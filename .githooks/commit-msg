@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# Checks the commit title against Conventional Commits, in English.
+#
+# Enable it once per clone with `git config core.hooksPath .githooks`.
+# To skip it in an exceptional case, use `git commit --no-verify`.
+set -uo pipefail
+
+title="$(grep -v '^#' "$1" | sed '/^[[:space:]]*$/d' | head -1)"
+
+# Titles git writes itself don't follow the format.
+case "$title" in
+    "Merge "* | "Revert "* | "fixup!"* | "squash!"*) exit 0 ;;
+esac
+
+types='fix|feat|build|ci|refactor|perf|docs|test|style|revert|chore'
+
+fail() {
+    {
+        echo
+        echo "  commit rejected: $1"
+        echo
+        echo "  title:    $title"
+        echo
+        echo "  format:   <type>[(scope)]: <description>"
+        echo "  types:    ${types//|/ }"
+        echo "  rules:    imperative verb, lowercase start, no final period"
+        echo "  examples: feat: add export to mp4"
+        echo "            fix(core): handle an expired digest nonce"
+        echo
+    } >&2
+    exit 1
+}
+
+if ! printf '%s' "$title" | grep -qE "^($types)(\([a-z0-9._/-]+\))?!?: .+"; then
+    fail "it doesn't follow <type>[(scope)]: <description>"
+fi
+
+description="$(printf '%s' "$title" | sed -E "s/^($types)(\([^)]*\))?!?: //")"
+first_word="${description%% *}"
+
+# Names like TLS or VideoItem keep their capitals, only a capitalized plain word is an error.
+if printf '%s' "$first_word" | grep -qE '^[A-Z][a-z]+$'; then
+    fail "the description can't start with a capital (\"$first_word\")"
+fi
+
+if printf '%s' "$title" | grep -qE '\.$'; then
+    fail "the title can't end with a period"
+fi
+
+# Catches the usual slips (added, adding, adds) and lets through verbs that only look like them.
+case "$first_word" in
+    embed | feed | need | proceed | seed | shed | speed | succeed | exceed | bring | ping | ring | string | sing | swing | \
+        access | address | bypass | compress | discuss | pass | process | progress | focus | canvas | bias) ;;
+    *ed | *ing)
+        fail "\"$first_word\" isn't in the imperative (use \"add\", not \"added\" or \"adding\")"
+        ;;
+    *ss | *us | *is) ;;
+    *s)
+        fail "\"$first_word\" isn't in the imperative (use \"add\", not \"adds\")"
+        ;;
+esac
+
+exit 0

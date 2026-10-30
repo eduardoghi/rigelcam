@@ -56,6 +56,14 @@ from outside its network.
 Recorder passwords are kept in the system keyring (Secret Service on Linux, Credential Manager on
 Windows) and never written to config files or logs.
 
+## Contributing
+
+Enable the commit message check once per clone:
+
+```sh
+git config core.hooksPath .githooks
+```
+
 ## License
 
 [MIT](LICENSE). The Space Grotesk font used in the logo is under the

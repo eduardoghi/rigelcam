@@ -56,6 +56,14 @@ rede dele, use uma VPN.
 As senhas dos gravadores ficam no cofre de senhas do sistema (Secret Service no Linux, Gerenciador
 de Credenciais no Windows) e nunca são gravadas em arquivos de configuração nem em logs.
 
+## Contribuindo
+
+Ative a validação da mensagem de commit uma vez por clone:
+
+```sh
+git config core.hooksPath .githooks
+```
+
 ## Licença
 
 [MIT](LICENSE). A fonte Space Grotesk usada no logo está sob a
