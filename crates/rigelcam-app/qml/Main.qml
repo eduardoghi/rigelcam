@@ -51,9 +51,94 @@ ApplicationWindow {
         }
     }
 
+    component AppToolTip: ToolTip {
+        id: tip
+        delay: 400
+        padding: 7
+        contentItem: Text {
+            text: tip.text
+            font.pixelSize: 12
+            color: colors.text
+        }
+        background: Rectangle {
+            radius: 6
+            color: colors.raised
+            border.color: colors.line
+        }
+    }
+
     component PrimaryButton: AppButton {
         fill: colors.accent
         hoverFill: colors.accentHover
+    }
+
+    component AppComboBox: ComboBox {
+        id: box
+        implicitHeight: 34
+        font.pixelSize: 13
+        font.weight: Font.Medium
+        leftPadding: 0
+        palette.text: colors.text
+        palette.buttonText: colors.text
+        background: Rectangle {
+            radius: 7
+            color: box.hovered ? colors.raised : colors.surface
+            border.color: colors.line
+        }
+        contentItem: Text {
+            leftPadding: 12
+            rightPadding: 28
+            verticalAlignment: Text.AlignVCenter
+            text: box.displayText
+            textFormat: Text.PlainText
+            font: box.font
+            color: colors.text
+            elide: Text.ElideRight
+        }
+        indicator: Image {
+            x: box.width - width - 8
+            anchors.verticalCenter: parent.verticalCenter
+            source: "qrc:/rigelcam/icons/chevron.svg"
+            sourceSize.width: 16
+            sourceSize.height: 16
+        }
+        delegate: ItemDelegate {
+            id: boxRow
+            required property var modelData
+            required property int index
+            width: ListView.view.width
+            height: 34
+            highlighted: box.highlightedIndex === index
+            background: Rectangle {
+                radius: 5
+                color: boxRow.highlighted ? colors.raised : "transparent"
+            }
+            contentItem: Text {
+                text: boxRow.modelData[box.textRole]
+                textFormat: Text.PlainText
+                font.pixelSize: 13
+                color: colors.text
+                verticalAlignment: Text.AlignVCenter
+            }
+        }
+        popup.y: box.height + 4
+        popup.padding: 4
+        // The default height leaves out the padding, which would make the list scroll.
+        popup.height: popup.contentItem.implicitHeight + 2 * popup.padding
+        popup.background: Rectangle {
+            radius: 8
+            color: colors.surface
+            border.color: colors.line
+        }
+    }
+
+    // Drags with a floating label, so the tile or row dragged stays where it is.
+    component CameraDrag: DragHandler {
+        property var camera
+        target: null
+        grabPermissions: PointerHandler.CanTakeOverFromAnything
+        onActiveChanged: active ? win.beginDrag(camera, centroid.scenePosition) : win.endDrag()
+        onCentroidChanged: if (active) win.moveDrag(centroid.scenePosition)
     }
 
     component FormField: TextField {
@@ -105,33 +190,94 @@ ApplicationWindow {
     CameraGrid {
         id: grid
         Component.onCompleted: load()
-        onChannelsChanged: {
-            win.zoomed = 0
-            win.liveCount = 0
-        }
+        onTreeChanged: win.syncTiles()
     }
 
-    readonly property var recorderList: grid.recorders ? JSON.parse(grid.recorders) : []
-    readonly property var cameras: grid.channels ? JSON.parse(grid.channels) : []
-    readonly property var selectedRecorder: recorderList.find(r => r.id === grid.selected)
+    readonly property var recorderList: grid.tree ? JSON.parse(grid.tree) : []
+    readonly property var gridLayout: grid.layout ? JSON.parse(grid.layout) : ({ columns: 1, cameras: [] })
+    readonly property var gridKeys: gridLayout.cameras.map(c => c ? cameraKey(c.recorder, c.channel) : null)
+    readonly property var tileKeys: recorderList.reduce((keys, r) => keys.concat(r.cameras.map(c => cameraKey(r.id, c.number))), [])
+    readonly property int cols: gridLayout.columns
+    readonly property int includedCount: gridKeys.filter(k => k !== null).length
     property int liveCount: 0
-    // Channel shown alone after a double click, or 0 for the whole grid.
-    property int zoomed: 0
-    readonly property var zoomedCamera: cameras.find(c => c.number === zoomed)
-    readonly property int visibleCount: zoomed ? 1 : cameras.length
-    readonly property int cols: Math.max(1, Math.ceil(Math.sqrt(visibleCount)))
-    readonly property int rows: Math.max(1, Math.ceil(visibleCount / cols))
+    // Key of the camera shown alone after a double click, or empty for the whole grid.
+    property string zoomed: ""
+    property string zoomedName: ""
+    // The camera being dragged to a square.
+    property var dragged: null
+    // Recorders with their cameras folded in the sidebar, for this session.
+    property var foldedRecorders: []
+
+    function cameraKey(recorder, channel) {
+        return recorder + ":" + channel
+    }
+
+    function setFolded(id, folded) {
+        const others = foldedRecorders.filter(r => r !== id)
+        foldedRecorders = folded ? others.concat(id) : others
+    }
+
+    // A model changed item by item, so a recorder answering doesn't restart the others' cameras.
+    function syncTiles() {
+        const cameras = new Map()
+        for (const recorder of JSON.parse(grid.tree || "[]")) {
+            for (const camera of recorder.cameras) {
+                const key = cameraKey(recorder.id, camera.number)
+                cameras.set(key, { key: key, recorder: recorder.id, number: camera.number, label: camera.name })
+            }
+        }
+        const keys = new Set(cameras.keys())
+        for (let i = tileModel.count - 1; i >= 0; i--) {
+            const key = tileModel.get(i).key
+            if (cameras.has(key))
+                cameras.delete(key)
+            else
+                tileModel.remove(i)
+        }
+        for (const camera of cameras.values())
+            tileModel.append(camera)
+        if (!keys.has(zoomed))
+            zoomed = ""
+        updateLiveCount()
+    }
 
     Component.onCompleted: win.showMaximized()
 
+    function updateLiveCount() {
+        let live = 0
+        for (let i = 0; i < cameraTiles.count; i++) {
+            const tile = cameraTiles.itemAt(i)
+            if (tile && tile.included && tile.hasVideo)
+                live++
+        }
+        liveCount = live
+    }
+
+    function moveDrag(position) {
+        const point = win.contentItem.mapFromItem(null, position.x, position.y)
+        dragLabel.x = point.x - dragLabel.width / 2
+        dragLabel.y = point.y - dragLabel.height / 2
+    }
+
+    function beginDrag(camera, position) {
+        moveDrag(position)
+        dragged = camera
+    }
+
+    function endDrag() {
+        if (dragLabel.Drag.target)
+            dragLabel.Drag.drop()
+        dragged = null
+    }
+
     Shortcut {
         sequence: "Esc"
-        enabled: win.zoomed !== 0
-        onActivated: win.zoomed = 0
+        enabled: win.zoomed !== ""
+        onActivated: win.zoomed = ""
     }
 
     header: Rectangle {
-        visible: win.zoomed === 0
+        visible: win.zoomed === ""
         height: visible ? 56 : 0
         color: colors.bar
 
@@ -149,6 +295,22 @@ ApplicationWindow {
             anchors.rightMargin: 14
             spacing: 12
 
+            AppButton {
+                id: sidebarButton
+                visible: win.recorderList.length > 0
+                display: AbstractButton.IconOnly
+                icon.source: "qrc:/rigelcam/icons/sidebar.svg"
+                text: grid.sidebarCollapsed ? "Mostrar câmeras" : "Esconder câmeras"
+                implicitWidth: 34
+                leftPadding: 9
+                rightPadding: 9
+                onClicked: grid.saveSidebarCollapsed(!grid.sidebarCollapsed)
+                AppToolTip {
+                    visible: sidebarButton.hovered
+                    text: sidebarButton.text
+                }
+            }
+
             Image {
                 source: "qrc:/rigelcam/logo.svg"
                 fillMode: Image.PreserveAspectFit
@@ -158,104 +320,8 @@ ApplicationWindow {
                 sourceSize.height: 60
             }
 
-            ComboBox {
-                id: recorderBox
-                Layout.preferredWidth: 220
-                implicitHeight: 34
-                visible: win.recorderList.length > 0
-                model: win.recorderList
-                textRole: "name"
-                valueRole: "id"
-                currentIndex: win.recorderList.findIndex(r => r.id === grid.selected)
-                onActivated: grid.selectRecorder(currentValue)
-                font.pixelSize: 13
-                font.weight: Font.Medium
-                leftPadding: 0
-                palette.text: colors.text
-                palette.buttonText: colors.text
-                background: Rectangle {
-                    radius: 7
-                    color: recorderBox.hovered ? colors.raised : colors.surface
-                    border.color: colors.line
-                }
-                contentItem: Text {
-                    leftPadding: 12
-                    rightPadding: 28
-                    verticalAlignment: Text.AlignVCenter
-                    text: recorderBox.displayText
-                    textFormat: Text.PlainText
-                    font: recorderBox.font
-                    color: colors.text
-                    elide: Text.ElideRight
-                }
-                indicator: Image {
-                    x: recorderBox.width - width - 8
-                    anchors.verticalCenter: parent.verticalCenter
-                    source: "qrc:/rigelcam/icons/chevron.svg"
-                    sourceSize.width: 16
-                    sourceSize.height: 16
-                }
-                delegate: ItemDelegate {
-                    id: recorderRow
-                    required property var modelData
-                    required property int index
-                    width: ListView.view.width
-                    height: 34
-                    highlighted: recorderBox.highlightedIndex === index
-                    background: Rectangle {
-                        radius: 5
-                        color: recorderRow.highlighted ? colors.raised : "transparent"
-                    }
-                    contentItem: Text {
-                        text: recorderRow.modelData.name
-                        textFormat: Text.PlainText
-                        font.pixelSize: 13
-                        color: colors.text
-                        verticalAlignment: Text.AlignVCenter
-                    }
-                }
-                popup.y: recorderBox.height + 4
-                popup.padding: 4
-                // The default height leaves out the padding, which would make the list scroll.
-                popup.height: popup.contentItem.implicitHeight + 2 * popup.padding
-                popup.background: Rectangle {
-                    radius: 8
-                    color: colors.surface
-                    border.color: colors.line
-                }
-            }
-
-            AppButton {
-                id: removeButton
-                visible: win.recorderList.length > 0
-                display: AbstractButton.IconOnly
-                icon.source: "qrc:/rigelcam/icons/trash.svg"
-                text: "Remover gravador"
-                implicitWidth: 34
-                leftPadding: 9
-                rightPadding: 9
-                Layout.leftMargin: -6
-                onClicked: removeDialog.open()
-                ToolTip {
-                    visible: removeButton.hovered
-                    delay: 400
-                    text: removeButton.text
-                    padding: 7
-                    contentItem: Text {
-                        text: removeButton.text
-                        font.pixelSize: 12
-                        color: colors.text
-                    }
-                    background: Rectangle {
-                        radius: 6
-                        color: colors.raised
-                        border.color: colors.line
-                    }
-                }
-            }
-
             Rectangle {
-                visible: win.cameras.length > 0
+                visible: win.recorderList.length > 0
                 width: 7
                 height: 7
                 radius: 4
@@ -263,18 +329,40 @@ ApplicationWindow {
                 Layout.leftMargin: 4
             }
             Label {
-                visible: win.cameras.length > 0
+                visible: win.recorderList.length > 0
                 font.pixelSize: 13
                 color: colors.muted
-                text: win.liveCount + " de " + win.cameras.length + " ao vivo"
+                text: win.liveCount + " de " + win.includedCount + " ao vivo"
             }
 
-            Item { Layout.fillWidth: true }
+            // With cameras on screen the centered message below is covered.
+            Label {
+                visible: win.recorderList.length > 0 && grid.error !== ""
+                Layout.leftMargin: 8
+                Layout.fillWidth: true
+                textFormat: Text.PlainText
+                elide: Text.ElideRight
+                font.pixelSize: 13
+                color: colors.danger
+                text: grid.error
+            }
 
-            PrimaryButton {
-                icon.source: "qrc:/rigelcam/icons/plus.svg"
-                text: "Adicionar gravador"
-                onClicked: addDialog.open()
+            Item {
+                visible: win.recorderList.length === 0 || grid.error === ""
+                Layout.fillWidth: true
+            }
+
+            AppComboBox {
+                Layout.preferredWidth: 150
+                visible: win.recorderList.length > 0
+                model: [1, 2, 3, 4, 5, 6].map(columns => ({
+                    columns: columns,
+                    label: columns === 1 ? "1 quadrado" : columns * columns + " quadrados"
+                }))
+                textRole: "label"
+                valueRole: "columns"
+                currentIndex: win.cols - 1
+                onActivated: grid.setGridColumns(currentValue)
             }
         }
     }
@@ -350,6 +438,7 @@ ApplicationWindow {
 
     AppDialog {
         id: removeDialog
+        property var recorder: null
         title: "Excluir gravador"
         width: Math.min(400, parent.width - 32)
         ColumnLayout {
@@ -361,7 +450,7 @@ ApplicationWindow {
                 textFormat: Text.PlainText
                 font.pixelSize: 14
                 color: colors.muted
-                text: "Quer mesmo excluir " + (win.selectedRecorder ? win.selectedRecorder.name : "") + "? A senha salva será apagada, e as gravações no aparelho não mudam."
+                text: "Quer mesmo excluir " + (removeDialog.recorder ? removeDialog.recorder.name : "") + "? A senha salva será apagada, e as gravações no aparelho não mudam."
             }
             RowLayout {
                 Layout.alignment: Qt.AlignRight
@@ -372,7 +461,7 @@ ApplicationWindow {
                     fill: colors.danger
                     hoverFill: "#F2666A"
                     onClicked: {
-                        grid.removeRecorder(grid.selected)
+                        grid.removeRecorder(removeDialog.recorder.id)
                         removeDialog.close()
                     }
                 }
@@ -383,17 +472,17 @@ ApplicationWindow {
     Column {
         anchors.centerIn: parent
         spacing: 14
-        visible: win.cameras.length === 0
+        visible: win.recorderList.length === 0
         Image {
             anchors.horizontalCenter: parent.horizontalCenter
-            visible: win.recorderList.length === 0 && grid.error === ""
+            visible: grid.error === ""
             source: "qrc:/rigelcam/star.svg"
             sourceSize.width: 72
             sourceSize.height: 72
         }
         Label {
             anchors.horizontalCenter: parent.horizontalCenter
-            visible: win.recorderList.length === 0 && grid.error === ""
+            visible: grid.error === ""
             font.pixelSize: 18
             font.weight: Font.DemiBold
             color: colors.text
@@ -401,17 +490,10 @@ ApplicationWindow {
         }
         PrimaryButton {
             anchors.horizontalCenter: parent.horizontalCenter
-            visible: win.recorderList.length === 0 && grid.error === ""
+            visible: grid.error === ""
             icon.source: "qrc:/rigelcam/icons/plus.svg"
             text: "Adicionar gravador"
             onClicked: addDialog.open()
-        }
-        Label {
-            anchors.horizontalCenter: parent.horizontalCenter
-            visible: win.recorderList.length > 0 && grid.error === ""
-            font.pixelSize: 14
-            color: colors.muted
-            text: "Conectando ao gravador…"
         }
         Label {
             anchors.horizontalCenter: parent.horizontalCenter
@@ -423,40 +505,293 @@ ApplicationWindow {
         }
     }
 
-    Grid {
-        id: cameraArea
-        anchors.fill: parent
-        columns: win.cols
-        spacing: 2
+    Rectangle {
+        id: sidebar
+        readonly property bool open: win.recorderList.length > 0 && !grid.sidebarCollapsed && win.zoomed === ""
+        readonly property string search: cameraSearch.text.trim().toLowerCase()
+        visible: open
+        width: open ? 260 : 0
+        anchors.left: parent.left
+        anchors.top: parent.top
+        anchors.bottom: parent.bottom
+        color: colors.bar
 
+        Rectangle {
+            anchors.right: parent.right
+            anchors.top: parent.top
+            anchors.bottom: parent.bottom
+            width: 1
+            color: colors.line
+        }
+
+        ColumnLayout {
+            anchors.fill: parent
+            anchors.margins: 10
+            spacing: 8
+
+            RowLayout {
+                Layout.leftMargin: 6
+                Label {
+                    Layout.fillWidth: true
+                    font.pixelSize: 13
+                    font.weight: Font.DemiBold
+                    color: colors.text
+                    text: "Gravadores"
+                }
+                AppButton {
+                    id: addButton
+                    display: AbstractButton.IconOnly
+                    icon.source: "qrc:/rigelcam/icons/plus.svg"
+                    text: "Adicionar gravador"
+                    implicitWidth: 30
+                    implicitHeight: 30
+                    leftPadding: 7
+                    rightPadding: 7
+                    onClicked: addDialog.open()
+                    AppToolTip {
+                        visible: addButton.hovered
+                        text: addButton.text
+                    }
+                }
+            }
+
+            FormField {
+                id: cameraSearch
+                implicitHeight: 34
+                font.pixelSize: 13
+                placeholderText: "Buscar câmera"
+            }
+
+            Flickable {
+                id: tree
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                clip: true
+                contentHeight: treeColumn.implicitHeight
+                // The mouse drags cameras here, and the wheel and the scroll bar move the list.
+                acceptedButtons: Qt.NoButton
+                boundsBehavior: Flickable.StopAtBounds
+                ScrollBar.vertical: ScrollBar {}
+
+                Column {
+                    id: treeColumn
+                    width: tree.width
+
+                    Repeater {
+                        model: win.recorderList
+
+                        Column {
+                            id: recorderGroup
+                            required property var modelData
+                            readonly property var matches: modelData.cameras.filter(c => c.name.toLowerCase().includes(sidebar.search))
+                            readonly property bool folded: sidebar.search === "" && win.foldedRecorders.includes(modelData.id)
+                            visible: sidebar.search === "" || matches.length > 0
+                            width: treeColumn.width
+
+                            Rectangle {
+                                width: parent.width
+                                height: 34
+                                radius: 5
+                                color: recorderHover.hovered ? colors.raised : "transparent"
+
+                                RowLayout {
+                                    anchors.fill: parent
+                                    anchors.leftMargin: 4
+                                    anchors.rightMargin: 4
+                                    spacing: 6
+                                    Image {
+                                        source: "qrc:/rigelcam/icons/chevron.svg"
+                                        sourceSize.width: 16
+                                        sourceSize.height: 16
+                                        rotation: recorderGroup.folded ? -90 : 0
+                                    }
+                                    Text {
+                                        Layout.fillWidth: true
+                                        text: recorderGroup.modelData.name
+                                        textFormat: Text.PlainText
+                                        elide: Text.ElideRight
+                                        font.pixelSize: 13
+                                        font.weight: Font.DemiBold
+                                        color: colors.text
+                                    }
+                                    AppButton {
+                                        id: removeButton
+                                        visible: recorderHover.hovered
+                                        display: AbstractButton.IconOnly
+                                        icon.source: "qrc:/rigelcam/icons/trash.svg"
+                                        icon.width: 14
+                                        icon.height: 14
+                                        text: "Remover gravador"
+                                        implicitWidth: 26
+                                        implicitHeight: 26
+                                        leftPadding: 6
+                                        rightPadding: 6
+                                        onClicked: {
+                                            removeDialog.recorder = recorderGroup.modelData
+                                            removeDialog.open()
+                                        }
+                                        AppToolTip {
+                                            visible: removeButton.hovered
+                                            text: removeButton.text
+                                        }
+                                    }
+                                }
+
+                                HoverHandler { id: recorderHover }
+                                // Folding waits for a second click, so a double click only opens the cameras.
+                                Timer {
+                                    id: foldLater
+                                    interval: Qt.styleHints.mouseDoubleClickInterval
+                                    onTriggered: win.setFolded(recorderGroup.modelData.id, !recorderGroup.folded)
+                                }
+                                TapHandler {
+                                    onTapped: if (tapCount === 1) foldLater.restart()
+                                    onDoubleTapped: {
+                                        foldLater.stop()
+                                        grid.openRecorder(recorderGroup.modelData.id)
+                                    }
+                                }
+                            }
+
+                            Text {
+                                visible: recorderGroup.modelData.state === "connecting"
+                                leftPadding: 26
+                                bottomPadding: 6
+                                font.pixelSize: 12
+                                color: colors.muted
+                                text: "Conectando…"
+                            }
+
+                            Column {
+                                visible: recorderGroup.modelData.state === "failed"
+                                width: parent.width
+                                leftPadding: 26
+                                bottomPadding: 6
+                                spacing: 2
+                                Text {
+                                    width: parent.width - parent.leftPadding
+                                    wrapMode: Text.WordWrap
+                                    textFormat: Text.PlainText
+                                    font.pixelSize: 12
+                                    color: colors.danger
+                                    text: recorderGroup.modelData.failure || ""
+                                }
+                                AppButton {
+                                    text: "Tentar de novo"
+                                    implicitHeight: 28
+                                    leftPadding: 8
+                                    rightPadding: 8
+                                    onClicked: grid.retryRecorder(recorderGroup.modelData.id)
+                                }
+                            }
+
+                            Repeater {
+                                model: recorderGroup.folded ? [] : recorderGroup.matches
+
+                                Rectangle {
+                                    id: cameraRow
+                                    required property var modelData
+                                    readonly property string key: win.cameraKey(recorderGroup.modelData.id, modelData.number)
+                                    readonly property bool onGrid: win.gridKeys.includes(key)
+                                    readonly property var payload: ({
+                                        recorder: recorderGroup.modelData.id,
+                                        number: modelData.number,
+                                        name: modelData.name
+                                    })
+                                    width: recorderGroup.width
+                                    height: 30
+                                    radius: 5
+                                    color: rowHover.hovered ? colors.raised : "transparent"
+
+                                    RowLayout {
+                                        anchors.fill: parent
+                                        anchors.leftMargin: 26
+                                        anchors.rightMargin: 8
+                                        spacing: 9
+                                        Rectangle {
+                                            width: 8
+                                            height: 8
+                                            radius: 4
+                                            color: cameraRow.onGrid ? colors.accent : "transparent"
+                                            border.color: cameraRow.onGrid ? colors.accent : colors.muted
+                                        }
+                                        Text {
+                                            Layout.fillWidth: true
+                                            text: cameraRow.modelData.name
+                                            textFormat: Text.PlainText
+                                            elide: Text.ElideRight
+                                            font.pixelSize: 13
+                                            color: cameraRow.onGrid ? colors.text : colors.muted
+                                        }
+                                    }
+
+                                    HoverHandler { id: rowHover }
+                                    TapHandler {
+                                        onDoubleTapped: grid.addCamera(recorderGroup.modelData.id, cameraRow.modelData.number)
+                                    }
+                                    CameraDrag { camera: cameraRow.payload }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Item {
+        id: cameraArea
+        readonly property real cellWidth: (width - (win.cols - 1) * 2) / win.cols
+        readonly property real cellHeight: (height - (win.cols - 1) * 2) / win.cols
+        anchors.left: sidebar.right
+        anchors.right: parent.right
+        anchors.top: parent.top
+        anchors.bottom: parent.bottom
+
+        ListModel { id: tileModel }
+
+        // One tile per camera and not per square, so moving a camera doesn't reopen its stream.
         Repeater {
-            model: win.cameras
+            id: cameraTiles
+            model: tileModel
 
             VideoItem {
                 id: tile
-                required property var modelData
-                readonly property bool shown: win.zoomed === 0 || win.zoomed === modelData.number
-                readonly property bool isMain: win.zoomed === modelData.number
+                required property string key
+                required property int recorder
+                required property int number
+                required property string label
+                readonly property var payload: ({ recorder: recorder, number: number, name: label })
+                readonly property int square: win.gridKeys.indexOf(key)
+                readonly property bool included: square >= 0
+                readonly property bool shown: included && (win.zoomed === "" || win.zoomed === key)
+                readonly property bool isMain: win.zoomed === key
 
                 visible: shown
-                width: (cameraArea.width - (win.cols - 1) * 2) / win.cols
-                height: (cameraArea.height - (win.rows - 1) * 2) / win.rows
+                x: isMain ? 0 : (square % win.cols) * (cameraArea.cellWidth + 2)
+                y: isMain ? 0 : Math.floor(square / win.cols) * (cameraArea.cellHeight + 2)
+                width: isMain ? cameraArea.width : cameraArea.cellWidth
+                height: isMain ? cameraArea.height : cameraArea.cellHeight
 
-                onHasVideoChanged: win.liveCount += hasVideo ? 1 : -1
+                onHasVideoChanged: win.updateLiveCount()
+                onIncludedChanged: win.updateLiveCount()
 
                 // Hidden cameras keep running for a while, since going back to the grid right after
                 // zooming is common and reconnecting all of them takes seconds.
                 Timer {
                     id: stopHidden
                     interval: 20000
-                    onTriggered: grid.show(tile, tile.modelData.number, false, false)
+                    onTriggered: grid.show(tile, tile.recorder, tile.number, false, false)
                 }
                 function apply() {
                     if (shown) {
                         stopHidden.stop()
-                        grid.show(tile, modelData.number, true, false)
-                    } else {
+                        grid.show(tile, recorder, number, true, false)
+                    } else if (included) {
                         stopHidden.restart()
+                    } else {
+                        stopHidden.stop()
+                        grid.show(tile, recorder, number, false, false)
                     }
                 }
                 Component.onCompleted: apply()
@@ -494,7 +829,7 @@ ApplicationWindow {
                     Connections {
                         target: tile
                         function onIsMainChanged() {
-                            grid.show(mainStream, tile.modelData.number, tile.isMain, true)
+                            grid.show(mainStream, tile.recorder, tile.number, tile.isMain, true)
                         }
                     }
                 }
@@ -514,7 +849,7 @@ ApplicationWindow {
                         anchors.leftMargin: 7
                         anchors.rightMargin: 7
                         verticalAlignment: Text.AlignVCenter
-                        text: tile.modelData.name
+                        text: tile.label
                         // The name comes from the recorder, so it can't be read as markup.
                         textFormat: Text.PlainText
                         elide: Text.ElideRight
@@ -532,16 +867,90 @@ ApplicationWindow {
                     border.width: 2
                 }
 
+                AppButton {
+                    id: leaveGrid
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+                    anchors.margins: 6
+                    visible: tileHover.hovered && !tile.isMain
+                    display: AbstractButton.IconOnly
+                    icon.source: "qrc:/rigelcam/icons/close.svg"
+                    icon.width: 14
+                    icon.height: 14
+                    text: "Tirar da grade"
+                    implicitWidth: 26
+                    implicitHeight: 26
+                    leftPadding: 6
+                    rightPadding: 6
+                    fill: "#B30B101C"
+                    onClicked: grid.removeCamera(tile.recorder, tile.number)
+                    AppToolTip {
+                        visible: leaveGrid.hovered
+                        text: leaveGrid.text
+                    }
+                }
+
                 HoverHandler { id: tileHover }
                 TapHandler {
-                    onDoubleTapped: win.zoomed = win.zoomed ? 0 : tile.modelData.number
+                    onDoubleTapped: {
+                        win.zoomedName = tile.label
+                        win.zoomed = win.zoomed ? "" : tile.key
+                    }
+                }
+                CameraDrag {
+                    enabled: !tile.isMain
+                    camera: tile.payload
+                }
+            }
+        }
+
+        // A number and not the list of cameras, so a drop doesn't destroy the area handling it.
+        Repeater {
+            model: win.recorderList.length > 0 ? win.cols * win.cols : 0
+
+            Item {
+                id: square
+                required property int index
+                readonly property var key: win.gridKeys[index] ?? null
+                readonly property bool hasTile: key !== null && win.tileKeys.includes(key)
+                visible: win.zoomed === ""
+                x: (index % win.cols) * (cameraArea.cellWidth + 2)
+                y: Math.floor(index / win.cols) * (cameraArea.cellHeight + 2)
+                width: cameraArea.cellWidth
+                height: cameraArea.cellHeight
+
+                Rectangle {
+                    anchors.fill: parent
+                    visible: !square.hasTile
+                    color: colors.surface
+                    Text {
+                        anchors.centerIn: parent
+                        // A camera of a recorder that is offline or hasn't answered keeps its square.
+                        text: square.key === null ? "Arraste uma câmera" : "Aguardando o gravador"
+                        font.pixelSize: 12
+                        color: "#5B6880"
+                    }
+                }
+
+                Rectangle {
+                    anchors.fill: parent
+                    visible: dropArea.containsDrag
+                    color: "transparent"
+                    border.color: colors.accent
+                    border.width: 3
+                }
+
+                DropArea {
+                    id: dropArea
+                    anchors.fill: parent
+                    onDropped: grid.placeCamera(win.dragged.recorder, win.dragged.number, square.index)
                 }
             }
         }
     }
 
     Rectangle {
-        visible: win.zoomed !== 0
+        visible: win.zoomed !== ""
         x: 12
         y: 12
         width: zoomBar.implicitWidth + 8
@@ -558,15 +967,38 @@ ApplicationWindow {
             AppButton {
                 icon.source: "qrc:/rigelcam/icons/back.svg"
                 text: "Voltar"
-                onClicked: win.zoomed = 0
+                onClicked: win.zoomed = ""
             }
             Text {
-                text: win.zoomedCamera ? win.zoomedCamera.name : ""
+                text: win.zoomedName
                 textFormat: Text.PlainText
                 font.pixelSize: 13
                 font.weight: Font.Medium
                 color: colors.text
             }
+        }
+    }
+
+    Rectangle {
+        id: dragLabel
+        visible: win.dragged !== null
+        z: 10
+        width: dragName.implicitWidth + 24
+        height: 32
+        radius: 7
+        color: colors.raised
+        border.color: colors.accent
+        Drag.active: visible
+        Drag.hotSpot.x: width / 2
+        Drag.hotSpot.y: height / 2
+        Text {
+            id: dragName
+            anchors.centerIn: parent
+            text: win.dragged ? win.dragged.name : ""
+            textFormat: Text.PlainText
+            font.pixelSize: 13
+            font.weight: Font.Medium
+            color: colors.text
         }
     }
 }

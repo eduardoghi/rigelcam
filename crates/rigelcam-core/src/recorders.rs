@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::layout::Layout;
+
 const KEYRING_SERVICE: &str = "rigelcam";
 
 #[derive(Debug, thiserror::Error)]
@@ -65,8 +67,12 @@ impl Secrets for SystemKeyring {
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct Saved {
-    selected: Option<u64>,
     recorders: Vec<Recorder>,
+    /// None until the first recorder answers with its channels.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    layout: Option<Layout>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    sidebar_collapsed: bool,
 }
 
 pub struct RecorderList<S: Secrets> {
@@ -104,21 +110,7 @@ impl<S: Secrets> RecorderList<S> {
         &self.saved.recorders
     }
 
-    /// The recorder to show, which falls back to the first one when none was chosen.
-    pub fn selected(&self) -> Option<&Recorder> {
-        let recorders = &self.saved.recorders;
-        self.saved
-            .selected
-            .and_then(|id| recorders.iter().find(|r| r.id == id))
-            .or(recorders.first())
-    }
-
-    pub fn select(&mut self, id: u64) -> Result<(), Error> {
-        self.saved.selected = Some(id);
-        self.write()
-    }
-
-    /// Saves a new recorder and selects it. The password goes first, so a keyring failure doesn't
+    /// Saves a new recorder. The password goes first, so a keyring failure doesn't
     /// leave a recorder in the list that has no password.
     pub fn add(
         &mut self,
@@ -135,7 +127,6 @@ impl<S: Secrets> RecorderList<S> {
             host: host.to_owned(),
             user: user.to_owned(),
         });
-        self.saved.selected = Some(id);
         self.write()?;
         Ok(id)
     }
@@ -143,9 +134,27 @@ impl<S: Secrets> RecorderList<S> {
     pub fn remove(&mut self, id: u64) -> Result<(), Error> {
         self.secrets.delete(id)?;
         self.saved.recorders.retain(|r| r.id != id);
-        if self.saved.selected == Some(id) {
-            self.saved.selected = None;
+        if let Some(layout) = &mut self.saved.layout {
+            layout.remove_recorder(id);
         }
+        self.write()
+    }
+
+    pub fn layout(&self) -> Option<&Layout> {
+        self.saved.layout.as_ref()
+    }
+
+    pub fn set_layout(&mut self, layout: Layout) -> Result<(), Error> {
+        self.saved.layout = Some(layout);
+        self.write()
+    }
+
+    pub fn sidebar_collapsed(&self) -> bool {
+        self.saved.sidebar_collapsed
+    }
+
+    pub fn set_sidebar_collapsed(&mut self, collapsed: bool) -> Result<(), Error> {
+        self.saved.sidebar_collapsed = collapsed;
         self.write()
     }
 
@@ -172,6 +181,7 @@ fn write_atomically(path: &Path, bytes: &[u8]) -> Result<(), Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::layout::CameraId;
     use std::cell::RefCell;
     use std::collections::HashMap;
     use std::rc::Rc;
@@ -231,27 +241,63 @@ mod tests {
     }
 
     #[test]
-    fn list_and_selection_survive_reopening() {
+    fn recorders_layout_and_sidebar_survive_reopening() {
         let path = temp_path("reopen");
         let secrets = MemorySecrets::default();
         let mut list = RecorderList::open(path.clone(), secrets.clone()).unwrap();
         let first = list.add("A", "192.0.2.1", "u", "p").unwrap();
         list.add("B", "192.0.2.2", "u", "p").unwrap();
-        list.select(first).unwrap();
+        let layout = Layout::fitting(&[CameraId {
+            recorder: first,
+            channel: 1,
+        }]);
+        list.set_layout(layout.clone()).unwrap();
+        list.set_sidebar_collapsed(true).unwrap();
         let reopened = RecorderList::open(path, secrets).unwrap();
         assert_eq!(reopened.recorders().len(), 2);
-        assert_eq!(reopened.selected().unwrap().name, "A");
+        assert_eq!(reopened.layout(), Some(&layout));
+        assert!(reopened.sidebar_collapsed());
     }
 
     #[test]
-    fn removing_deletes_the_password_and_moves_the_selection() {
+    fn removing_deletes_the_password_and_empties_its_squares() {
         let path = temp_path("remove");
         let mut list = RecorderList::open(path, MemorySecrets::default()).unwrap();
         let first = list.add("A", "192.0.2.1", "u", "p").unwrap();
         let second = list.add("B", "192.0.2.2", "u", "p").unwrap();
+        let camera = |recorder| {
+            Some(CameraId {
+                recorder,
+                channel: 1,
+            })
+        };
+        let layout = Layout {
+            columns: 2,
+            cameras: vec![camera(first), camera(second), None, None],
+        };
+        list.set_layout(layout).unwrap();
         list.remove(second).unwrap();
         assert!(list.password(second).is_err());
-        assert_eq!(list.selected().unwrap().id, first);
+        assert_eq!(list.recorders().len(), 1);
+        assert_eq!(
+            list.layout().unwrap().cameras,
+            vec![camera(first), None, None, None]
+        );
+    }
+
+    #[test]
+    fn file_saved_before_layouts_still_opens() {
+        let path = temp_path("older");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            r#"{"selected":1,"recorders":[{"id":1,"name":"A","host":"192.0.2.1","user":"u"}]}"#,
+        )
+        .unwrap();
+        let list = RecorderList::open(path, MemorySecrets::default()).unwrap();
+        assert_eq!(list.recorders().len(), 1);
+        assert_eq!(list.layout(), None);
+        assert!(!list.sidebar_collapsed());
     }
 
     #[test]
