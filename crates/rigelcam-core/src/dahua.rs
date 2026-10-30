@@ -70,7 +70,15 @@ impl Client {
     /// Lists every channel the recorder has, including the ones with no camera connected.
     pub fn channels(&self) -> Result<Vec<Channel>, Error> {
         let body = self.get("/cgi-bin/configManager.cgi?action=getConfig&name=ChannelTitle")?;
-        Ok(parse_channel_titles(&body))
+        let mut channels = parse_channel_titles(&body);
+        // Not every model or user can read this table, and then all channels stay listed.
+        if let Ok(devices) =
+            self.get("/cgi-bin/configManager.cgi?action=getConfig&name=RemoteDevice")
+        {
+            let disabled = parse_disabled_cameras(&devices);
+            channels.retain(|channel| !disabled.contains(&channel.number));
+        }
+        Ok(channels)
     }
 
     /// RTSP address of the live stream. It has no credentials, so it is safe to log.
@@ -140,9 +148,31 @@ fn parse_channel_titles(body: &str) -> Vec<Channel> {
     channels
 }
 
+/// Channels with no camera assigned. Their titles are still listed, as "CAM 32" for example.
+fn parse_disabled_cameras(body: &str) -> Vec<u32> {
+    body.lines()
+        .filter_map(|line| {
+            let index = line
+                .trim_end()
+                .strip_prefix("table.RemoteDevice.uuid:System_CONFIG_NETCAMERA_INFO_")?
+                .strip_suffix(".Enable=false")?;
+            Some(index.parse::<u32>().ok()? + 1)
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finds_channels_without_a_camera() {
+        let body = "table.RemoteDevice.uuid:System_CONFIG_NETCAMERA_INFO_0.Enable=true\r\n\
+                    table.RemoteDevice.uuid:System_CONFIG_NETCAMERA_INFO_0.Address=192.0.2.1\r\n\
+                    table.RemoteDevice.uuid:System_CONFIG_NETCAMERA_INFO_31.Enable=false\r\n\
+                    table.RemoteDevice.uuid:System_CONFIG_NETCAMERA_INFO_31.VideoInputs[0].Enable=false\r\n";
+        assert_eq!(parse_disabled_cameras(body), vec![32]);
+    }
 
     #[test]
     fn channel_titles_are_numbered_from_one_and_sorted() {

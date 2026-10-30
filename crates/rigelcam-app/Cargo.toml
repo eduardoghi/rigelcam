@@ -18,6 +18,7 @@ gstreamer-app = "0.25"
 gstreamer-video = "0.25"
 gstreamer-allocators = "0.25"
 rigelcam-core = { path = "../rigelcam-core" }
+serde_json = "1"
 
 [build-dependencies]
 cxx-qt-build = "0.10"
