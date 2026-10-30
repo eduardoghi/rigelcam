@@ -1,8 +1,23 @@
 #!/usr/bin/env bash
-# Rejects a commit with Rust code that `cargo fmt` would change.
+# Rejects a commit with what looks like a secret, or with Rust code that `cargo fmt` would change.
 #
 # To skip it in an exceptional case, use `git commit --no-verify`.
 set -uo pipefail
+
+if command -v gitleaks >/dev/null; then
+    if ! gitleaks git --staged --redact --no-banner --log-level warn; then
+        {
+            echo
+            echo "  commit rejected: gitleaks found what looks like a secret in the staged changes"
+            echo "  for a false positive, add its fingerprint to .gitleaksignore"
+            echo
+        } >&2
+        exit 1
+    fi
+else
+    # A contributor without it shouldn't be blocked, since CI runs the same check.
+    echo "  warning: gitleaks isn't installed, skipping the secret check" >&2
+fi
 
 # A commit without Rust changes shouldn't be held back by work in progress in other files.
 if ! git diff --cached --name-only --diff-filter=ACMR | grep -q '\.rs$'; then

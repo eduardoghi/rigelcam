@@ -1,0 +1,12 @@
+[extend]
+useDefault = true
+
+# RTSP and HTTP addresses with a password are the likeliest leak here, from pasted logs or commands.
+[[rules]]
+id = "url-with-password"
+description = "URL with a password"
+regex = '''\b(?:rtsp|rtsps|https?)://[^\s/:@'"]+:([^\s/@'"]+)@'''
+secretGroup = 1
+
+[rules.allowlist]
+regexes = ['''^(?:\$\{?\w+\}?|<[^>]*>|password|senha|PASSWORD)$''']
