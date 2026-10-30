@@ -17,7 +17,7 @@ types='fix|feat|build|ci|refactor|perf|docs|test|style|revert|chore'
 fail() {
     {
         echo
-        echo "  commit rejected: $1"
+        echo "  commit rejected ($1)"
         echo
         echo "  title:    $title"
         echo

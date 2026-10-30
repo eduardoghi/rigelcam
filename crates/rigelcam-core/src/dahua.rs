@@ -7,15 +7,15 @@ use ureq::http::StatusCode;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error("request failed: {0}")]
+    #[error("request failed ({0})")]
     Http(#[from] ureq::Error),
     #[error("the recorder rejected the user or password")]
     Unauthorized,
     #[error("the recorder answered HTTP {0}")]
     Status(u16),
-    #[error("the recorder sent an invalid Digest challenge: {0}")]
+    #[error("the recorder sent an invalid Digest challenge ({0})")]
     Challenge(String),
-    #[error("unexpected answer from the recorder: {0}")]
+    #[error("unexpected answer from the recorder ({0})")]
     Unexpected(String),
 }
 

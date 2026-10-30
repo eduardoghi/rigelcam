@@ -10,11 +10,11 @@ const KEYRING_SERVICE: &str = "rigelcam";
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error("could not read or write the recorder list: {0}")]
+    #[error("could not read or write the recorder list ({0})")]
     File(#[from] io::Error),
-    #[error("the recorder list is corrupted: {0}")]
+    #[error("the recorder list is corrupted ({0})")]
     Format(#[from] serde_json::Error),
-    #[error("the system keyring failed: {0}")]
+    #[error("the system keyring failed ({0})")]
     Keyring(String),
     #[error("this system has no folder for configuration files")]
     NoConfigDir,

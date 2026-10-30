@@ -8,7 +8,7 @@ if command -v gitleaks >/dev/null; then
     if ! gitleaks git --staged --redact --no-banner --log-level warn; then
         {
             echo
-            echo "  commit rejected: gitleaks found what looks like a secret in the staged changes"
+            echo "  commit rejected, gitleaks found what looks like a secret in the staged changes"
             echo "  for a false positive, add its fingerprint to .gitleaksignore"
             echo
         } >&2
@@ -16,7 +16,7 @@ if command -v gitleaks >/dev/null; then
     fi
 else
     # A contributor without it shouldn't be blocked, since CI runs the same check.
-    echo "  warning: gitleaks isn't installed, skipping the secret check" >&2
+    echo "  gitleaks isn't installed, skipping the secret check" >&2
 fi
 
 # A commit without Rust changes shouldn't be held back by work in progress in other files.
@@ -27,7 +27,7 @@ fi
 if ! cargo fmt --all --check; then
     {
         echo
-        echo "  commit rejected: run \`cargo fmt --all\`, add the files and commit again"
+        echo "  commit rejected, run \`cargo fmt --all\`, add the files and commit again"
         echo
     } >&2
     exit 1

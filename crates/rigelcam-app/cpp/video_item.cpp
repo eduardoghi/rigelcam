@@ -44,7 +44,7 @@ GLuint compile(QOpenGLFunctions *f, GLenum type, const char *source) {
     if (!ok) {
         char log[512] = {};
         f->glGetShaderInfoLog(shader, sizeof log, nullptr, log);
-        fprintf(stderr, "shader error: %s\n", log);
+        fprintf(stderr, "shader error (%s)\n", log);
     }
     return shader;
 }
@@ -121,6 +121,15 @@ public:
 
         f->glDisable(GL_BLEND);
         f->glDisable(GL_DEPTH_TEST);
+        // The scene graph leaves the scissor of the last clipped item on, so the first video after
+        // a clipped sidebar would be cut out entirely.
+        if (state->scissorEnabled()) {
+            const QRect scissor = state->scissorRect();
+            f->glEnable(GL_SCISSOR_TEST);
+            f->glScissor(scissor.x(), scissor.y(), scissor.width(), scissor.height());
+        } else {
+            f->glDisable(GL_SCISSOR_TEST);
+        }
         f->glUseProgram(p.id);
         f->glUniformMatrix4fv(p.mvp, 1, GL_FALSE, mvp.constData());
         f->glUniform1i(p.tex, 0);
@@ -187,7 +196,7 @@ private:
         a[n] = EGL_NONE;
         EGLImageKHR image = createImage(eglGetCurrentDisplay(), EGL_NO_CONTEXT, EGL_LINUX_DMA_BUF_EXT, nullptr, a);
         if (image == EGL_NO_IMAGE_KHR) {
-            fprintf(stderr, "eglCreateImage failed: 0x%x, fourcc 0x%x, modifier 0x%llx\n", eglGetError(), fr.fourcc,
+            fprintf(stderr, "eglCreateImage failed with 0x%x for fourcc 0x%x and modifier 0x%llx\n", eglGetError(), fr.fourcc,
                     static_cast<unsigned long long>(fr.modifier));
             return 0;
         }

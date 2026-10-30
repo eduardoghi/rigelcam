@@ -1,4 +1,4 @@
-//! One camera: an RTSP pipeline that hands DMABuf frames to a video item and reconnects by itself.
+//! RTSP pipeline of a camera, which hands DMABuf frames to a video item and reconnects by itself.
 
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -149,7 +149,7 @@ fn run(shared: Arc<Shared>) {
                     last_reason.clear();
                 }
                 if reason != last_reason {
-                    eprintln!("{}: {reason}", source.url);
+                    eprintln!("{} ({reason})", source.url);
                     last_reason = reason;
                 }
                 let guard = shared.control.lock().unwrap();
