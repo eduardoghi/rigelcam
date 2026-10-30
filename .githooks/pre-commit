@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Rejects a commit with Rust code that `cargo fmt` would change.
+#
+# To skip it in an exceptional case, use `git commit --no-verify`.
+set -uo pipefail
+
+# A commit without Rust changes shouldn't be held back by work in progress in other files.
+if ! git diff --cached --name-only --diff-filter=ACMR | grep -q '\.rs$'; then
+    exit 0
+fi
+
+if ! cargo fmt --all --check; then
+    {
+        echo
+        echo "  commit rejected: run \`cargo fmt --all\`, add the files and commit again"
+        echo
+    } >&2
+    exit 1
+fi

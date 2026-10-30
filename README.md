@@ -58,7 +58,7 @@ Windows) and never written to config files or logs.
 
 ## Contributing
 
-Enable the commit message check once per clone:
+Enable the commit message and formatting checks once per clone:
 
 ```sh
 git config core.hooksPath .githooks

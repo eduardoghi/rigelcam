@@ -58,7 +58,7 @@ de Credenciais no Windows) e nunca são gravadas em arquivos de configuração n
 
 ## Contribuindo
 
-Ative a validação da mensagem de commit uma vez por clone:
+Ative a validação da mensagem de commit e da formatação uma vez por clone:
 
 ```sh
 git config core.hooksPath .githooks
