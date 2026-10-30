@@ -1,0 +1,16 @@
+<RCC><qresource prefix="/rigelcam">
+    <file alias="logo.svg">../../assets/branding/logo-dark.svg</file>
+    <file alias="star.svg">../../assets/branding/rigelcam-star.svg</file>
+    <file alias="icon-16.png">../../assets/branding/png/rigelcam-16.png</file>
+    <file alias="icon-24.png">../../assets/branding/png/rigelcam-24.png</file>
+    <file alias="icon-32.png">../../assets/branding/png/rigelcam-32.png</file>
+    <file alias="icon-48.png">../../assets/branding/png/rigelcam-48.png</file>
+    <file alias="icon-64.png">../../assets/branding/png/rigelcam-64.png</file>
+    <file alias="icon-128.png">../../assets/branding/png/rigelcam-128.png</file>
+    <file alias="icon-256.png">../../assets/branding/png/rigelcam-256.png</file>
+    <file>icons/plus.svg</file>
+    <file>icons/trash.svg</file>
+    <file>icons/back.svg</file>
+    <file>icons/chevron.svg</file>
+    <file>icons/camera-off.svg</file>
+</qresource></RCC>

@@ -3,7 +3,6 @@
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
-use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use gstreamer as gst;
@@ -59,12 +58,23 @@ struct Control {
 struct Shared {
     control: Mutex<Control>,
     changed: Condvar,
+    /// Address of the video item, or 0 once it is gone. Calls into the item hold this lock, so the
+    /// item can't be destroyed in the middle of one.
+    item: Mutex<usize>,
+}
+
+impl Shared {
+    fn set_status(&self, has_video: bool, signal_lost: bool) {
+        let item = self.item.lock().unwrap();
+        if *item != 0 {
+            unsafe { rigel_item_set_status(*item as *mut c_void, has_video, signal_lost) };
+        }
+    }
 }
 
 /// Owned by the video item, which drops it before going away.
 pub struct CameraStream {
     shared: Arc<Shared>,
-    worker: Option<JoinHandle<()>>,
 }
 
 impl CameraStream {
@@ -72,17 +82,14 @@ impl CameraStream {
         let shared = Arc::new(Shared {
             control: Mutex::default(),
             changed: Condvar::new(),
+            item: Mutex::new(item as usize),
         });
         let worker_shared = shared.clone();
-        let item_address = item as usize;
-        let worker = std::thread::Builder::new()
+        std::thread::Builder::new()
             .name("camera".into())
-            .spawn(move || run(worker_shared, item_address))
+            .spawn(move || run(worker_shared))
             .expect("could not start the camera thread");
-        Self {
-            shared,
-            worker: Some(worker),
-        }
+        Self { shared }
     }
 
     /// Plays `source`, or stops receiving video with `None`.
@@ -95,22 +102,20 @@ impl CameraStream {
 }
 
 impl Drop for CameraStream {
+    // Doesn't wait for the worker, since closing an RTSP session can take seconds and this runs on
+    // the interface thread. After this the worker can't reach the item anymore.
     fn drop(&mut self) {
+        *self.shared.item.lock().unwrap() = 0;
         self.shared.control.lock().unwrap().stop = true;
         self.shared.changed.notify_all();
-        if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
-        }
     }
 }
 
-fn set_status(item: usize, has_video: bool, signal_lost: bool) {
-    unsafe { rigel_item_set_status(item as *mut c_void, has_video, signal_lost) };
-}
-
-fn run(shared: Arc<Shared>, item: usize) {
+fn run(shared: Arc<Shared>) {
     let mut generation = 0;
     let mut retry_delay = Duration::from_secs(2);
+    // A camera that stays offline fails on every retry, so only a new reason reaches the log.
+    let mut last_reason = String::new();
     loop {
         let (source, revision) = {
             let guard = shared.control.lock().unwrap();
@@ -124,19 +129,28 @@ fn run(shared: Arc<Shared>, item: usize) {
             (control.source.clone().unwrap(), control.revision)
         };
         generation += 1;
-        let result = play(&shared, item, &source, revision, generation);
+        let result = play(&shared, &source, revision, generation);
         match result {
             Outcome::Changed => {
                 retry_delay = Duration::from_secs(2);
+                last_reason.clear();
                 // With a new source, the current picture stays until its first frame arrives.
                 if shared.control.lock().unwrap().source.is_none() {
-                    set_status(item, false, false);
+                    shared.set_status(false, false);
                 }
             }
-            Outcome::Lost { received_video } => {
-                set_status(item, false, true);
+            Outcome::Lost {
+                received_video,
+                reason,
+            } => {
+                shared.set_status(false, true);
                 if received_video {
                     retry_delay = Duration::from_secs(2);
+                    last_reason.clear();
+                }
+                if reason != last_reason {
+                    eprintln!("{}: {reason}", source.url);
+                    last_reason = reason;
                 }
                 let guard = shared.control.lock().unwrap();
                 let _ = shared
@@ -154,14 +168,15 @@ enum Outcome {
     Changed,
     Lost {
         received_video: bool,
+        reason: String,
     },
 }
 
-fn play(shared: &Shared, item: usize, source: &Source, revision: u64, generation: u64) -> Outcome {
+fn play(shared: &Arc<Shared>, source: &Source, revision: u64, generation: u64) -> Outcome {
     let last_frame = Arc::new(Mutex::new(Instant::now()));
     let received_video = Arc::new(AtomicBool::new(false));
     let Some(pipeline) = build_pipeline(
-        item,
+        shared.clone(),
         source,
         generation,
         last_frame.clone(),
@@ -169,12 +184,14 @@ fn play(shared: &Shared, item: usize, source: &Source, revision: u64, generation
     ) else {
         return Outcome::Lost {
             received_video: false,
+            reason: "could not build the pipeline".to_owned(),
         };
     };
     let bus = pipeline.bus().unwrap();
     let outcome = if pipeline.set_state(gst::State::Playing).is_err() {
         Outcome::Lost {
             received_video: false,
+            reason: "could not start the pipeline".to_owned(),
         }
     } else {
         loop {
@@ -187,27 +204,24 @@ fn play(shared: &Shared, item: usize, source: &Source, revision: u64, generation
             if let Some(message) = bus.timed_pop(gst::ClockTime::from_mseconds(200)) {
                 match message.view() {
                     gst::MessageView::Error(error) => {
-                        eprintln!("{}: {}", source.url, error.error());
                         break Outcome::Lost {
                             received_video: received_video.load(Ordering::Relaxed),
+                            reason: error.error().to_string(),
                         };
                     }
                     gst::MessageView::Eos(_) => {
                         break Outcome::Lost {
                             received_video: received_video.load(Ordering::Relaxed),
+                            reason: "the stream ended".to_owned(),
                         };
                     }
                     _ => {}
                 }
             }
             if last_frame.lock().unwrap().elapsed() > STALL_TIMEOUT {
-                eprintln!(
-                    "{}: no frames for {} s",
-                    source.url,
-                    STALL_TIMEOUT.as_secs()
-                );
                 break Outcome::Lost {
                     received_video: received_video.load(Ordering::Relaxed),
+                    reason: format!("no frames for {} s", STALL_TIMEOUT.as_secs()),
                 };
             }
         }
@@ -217,7 +231,7 @@ fn play(shared: &Shared, item: usize, source: &Source, revision: u64, generation
 }
 
 fn build_pipeline(
-    item: usize,
+    shared: Arc<Shared>,
     source: &Source,
     generation: u64,
     last_frame: Arc<Mutex<Instant>>,
@@ -288,15 +302,16 @@ fn build_pipeline(
         );
         let last_frame = last_frame.clone();
         let received_video = received_video.clone();
+        let shared = shared.clone();
         sink.set_callbacks(
             AppSinkCallbacks::builder()
                 .new_sample(move |sink| {
                     let sample = sink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
                     *last_frame.lock().unwrap() = Instant::now();
-                    if push_sample(item, sample, generation).is_some()
+                    if push_sample(&shared, sample, generation).is_some()
                         && !received_video.swap(true, Ordering::Relaxed)
                     {
-                        set_status(item, true, false);
+                        shared.set_status(true, false);
                     }
                     Ok(gst::FlowSuccess::Ok)
                 })
@@ -319,7 +334,7 @@ fn modifier_of(sample: &gst::Sample) -> Option<u64> {
     u64::from_str_radix(modifier.trim_start_matches("0x"), 16).ok()
 }
 
-fn push_sample(item: usize, sample: gst::Sample, generation: u64) -> Option<()> {
+fn push_sample(shared: &Shared, sample: gst::Sample, generation: u64) -> Option<()> {
     let buffer = sample.buffer()?;
     let meta = buffer.meta::<VideoMeta>()?;
     let mut frame = RigelFrame {
@@ -341,7 +356,11 @@ fn push_sample(item: usize, sample: gst::Sample, generation: u64) -> Option<()> 
         frame.offsets[plane] = meta.offset()[plane] as u32;
         frame.strides[plane] = meta.stride()[plane] as u32;
     }
+    let item = shared.item.lock().unwrap();
+    if *item == 0 {
+        return None;
+    }
     frame.owner = Box::into_raw(Box::new(sample)) as *mut c_void;
-    unsafe { rigel_item_set_frame(item as *mut c_void, &frame) };
+    unsafe { rigel_item_set_frame(*item as *mut c_void, &frame) };
     Some(())
 }

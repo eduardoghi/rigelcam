@@ -22,6 +22,7 @@ struct RigelFrame {
 
 void rigel_use_gles();
 void rigel_register_types();
+void rigel_set_app_identity();
 void rigel_item_set_frame(void *item, const RigelFrame *frame);
 void rigel_item_set_status(void *item, bool has_video, bool signal_lost);
 void rigel_item_set_stream(void *item, void *stream, void (*destroy)(void *));

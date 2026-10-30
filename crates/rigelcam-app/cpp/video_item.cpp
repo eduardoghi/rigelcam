@@ -1,3 +1,5 @@
+#include <QGuiApplication>
+#include <QIcon>
 #include "video_item.h"
 
 #include <EGL/egl.h>
@@ -265,6 +267,16 @@ extern "C" void rigel_use_gles() {
 
 extern "C" void rigel_register_types() {
     qmlRegisterType<VideoItem>("rigelcam.video", 1, 0, "VideoItem");
+}
+
+extern "C" void rigel_set_app_identity() {
+    QGuiApplication::setApplicationDisplayName(QStringLiteral("Rigelcam"));
+    // Wayland compositors look up the icon through the installed .desktop file with this name.
+    QGuiApplication::setDesktopFileName(QStringLiteral("rigelcam"));
+    QIcon icon;
+    for (int size : {16, 24, 32, 48, 64, 128, 256})
+        icon.addFile(QStringLiteral(":/rigelcam/icon-%1.png").arg(size));
+    QGuiApplication::setWindowIcon(icon);
 }
 
 extern "C" void rigel_item_set_frame(void *item, const RigelFrame *frame) {

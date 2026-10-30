@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Rigelcam
+Comment=Live cameras and recordings from Intelbras and Dahua recorders
+Exec=rigelcam
+Icon=rigelcam
+Categories=AudioVideo;Video;Viewer;
+Terminal=false
