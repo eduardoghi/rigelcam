@@ -203,6 +203,10 @@ ApplicationWindow {
     // Key of the camera shown alone after a double click, or empty for the whole grid.
     property string zoomed: ""
     property string zoomedName: ""
+    readonly property bool fullScreen: visibility === Window.FullScreen
+    // Where F11 goes back to, since the window may have been maximized or not.
+    property int windowedVisibility: Window.Maximized
+    onFullScreenChanged: if (fullScreen) fullScreenHint.restart()
     // Digital zoom of the camera shown alone, with the top left of the visible part in fractions.
     property real zoomScale: 1
     property real zoomX: 0
@@ -234,6 +238,15 @@ ApplicationWindow {
         const y = zoomY + py / zoomScale
         zoomScale = clamp(scale, 1, 8)
         panTo(x - px / zoomScale, y - py / zoomScale)
+    }
+
+    function toggleFullScreen() {
+        if (fullScreen) {
+            visibility = windowedVisibility
+        } else {
+            windowedVisibility = visibility
+            visibility = Window.FullScreen
+        }
     }
 
     function cameraKey(recorder, channel) {
@@ -300,12 +313,22 @@ ApplicationWindow {
 
     Shortcut {
         sequence: "Esc"
-        enabled: win.zoomed !== ""
-        onActivated: win.zoomed = ""
+        enabled: win.zoomed !== "" || win.fullScreen
+        onActivated: {
+            if (win.zoomed !== "")
+                win.zoomed = ""
+            else
+                win.toggleFullScreen()
+        }
+    }
+
+    Shortcut {
+        sequence: "F11"
+        onActivated: win.toggleFullScreen()
     }
 
     header: Rectangle {
-        visible: win.zoomed === ""
+        visible: win.zoomed === "" && !win.fullScreen
         height: visible ? 56 : 0
         color: colors.bar
 
@@ -391,6 +414,21 @@ ApplicationWindow {
                 valueRole: "columns"
                 currentIndex: win.cols - 1
                 onActivated: grid.setGridColumns(currentValue)
+            }
+
+            AppButton {
+                id: fullScreenButton
+                display: AbstractButton.IconOnly
+                icon.source: "qrc:/rigelcam/icons/fullscreen.svg"
+                text: "Tela cheia (F11)"
+                implicitWidth: 34
+                leftPadding: 9
+                rightPadding: 9
+                onClicked: win.toggleFullScreen()
+                AppToolTip {
+                    visible: fullScreenButton.hovered
+                    text: fullScreenButton.text
+                }
             }
         }
     }
@@ -535,7 +573,7 @@ ApplicationWindow {
 
     Rectangle {
         id: sidebar
-        readonly property bool open: win.recorderList.length > 0 && !grid.sidebarCollapsed && win.zoomed === ""
+        readonly property bool open: win.recorderList.length > 0 && !grid.sidebarCollapsed && win.zoomed === "" && !win.fullScreen
         readonly property string search: cameraSearch.text.trim().toLowerCase()
         visible: open
         width: open ? 260 : 0
@@ -1069,6 +1107,30 @@ ApplicationWindow {
                     text: zoomIn.text
                 }
             }
+        }
+    }
+
+    Timer {
+        id: fullScreenHint
+        interval: 3000
+    }
+
+    Rectangle {
+        visible: fullScreenHint.running
+        z: 10
+        anchors.horizontalCenter: parent.horizontalCenter
+        y: 14
+        width: hintText.implicitWidth + 24
+        height: 32
+        radius: 7
+        color: "#D90F1626"
+        border.color: colors.line
+        Text {
+            id: hintText
+            anchors.centerIn: parent
+            font.pixelSize: 13
+            color: colors.text
+            text: "F11 ou Esc para sair da tela cheia"
         }
     }
 
