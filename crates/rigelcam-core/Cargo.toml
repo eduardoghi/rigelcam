@@ -1,0 +1,12 @@
+[package]
+name = "rigelcam-core"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Talks to Dahua based recorders over their HTTP API and RTSP"
+publish = false
+
+[dependencies]
+digest_auth = "0.3.1"
+thiserror = "2.0.21"
+ureq = "3.5.0"

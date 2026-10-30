@@ -1,5 +1,5 @@
 # Rust
-/target
+target/
 
 # Qt / CMake
 /build
@@ -9,3 +9,6 @@ CMakeLists.txt.user*
 .idea
 .vscode
 *.swp
+
+# Throwaway proofs of concept
+/spikes

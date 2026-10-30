@@ -1,0 +1,347 @@
+//! One camera: an RTSP pipeline that hands DMABuf frames to a video item and reconnects by itself.
+
+use std::ffi::c_void;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
+
+use gstreamer as gst;
+use gstreamer::prelude::*;
+use gstreamer_allocators::DmaBufMemory;
+use gstreamer_app::{AppSink, AppSinkCallbacks};
+use gstreamer_video::VideoMeta;
+
+const DRM_FORMAT_NV12: u32 = 0x3231_564e;
+/// A stream that stops sending frames without an error counts as lost after this long.
+const STALL_TIMEOUT: Duration = Duration::from_secs(15);
+const MAX_RETRY_DELAY: Duration = Duration::from_secs(30);
+
+#[repr(C)]
+struct RigelFrame {
+    width: i32,
+    height: i32,
+    fourcc: u32,
+    modifier: u64,
+    generation: u64,
+    n_planes: i32,
+    fds: [i32; 4],
+    offsets: [u32; 4],
+    strides: [u32; 4],
+    owner: *mut c_void,
+    release: extern "C" fn(*mut c_void),
+}
+
+extern "C" {
+    fn rigel_item_set_frame(item: *mut c_void, frame: *const RigelFrame);
+    fn rigel_item_set_status(item: *mut c_void, has_video: bool, signal_lost: bool);
+}
+
+extern "C" fn release_sample(owner: *mut c_void) {
+    drop(unsafe { Box::from_raw(owner as *mut gst::Sample) });
+}
+
+#[derive(Clone)]
+pub struct Source {
+    pub url: String,
+    pub user: String,
+    pub password: String,
+}
+
+#[derive(Default)]
+struct Control {
+    source: Option<Source>,
+    /// Bumped on every change, so the worker knows its pipeline is out of date.
+    revision: u64,
+    stop: bool,
+}
+
+struct Shared {
+    control: Mutex<Control>,
+    changed: Condvar,
+}
+
+/// Owned by the video item, which drops it before going away.
+pub struct CameraStream {
+    shared: Arc<Shared>,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl CameraStream {
+    pub fn new(item: *mut c_void) -> Self {
+        let shared = Arc::new(Shared {
+            control: Mutex::default(),
+            changed: Condvar::new(),
+        });
+        let worker_shared = shared.clone();
+        let item_address = item as usize;
+        let worker = std::thread::Builder::new()
+            .name("camera".into())
+            .spawn(move || run(worker_shared, item_address))
+            .expect("could not start the camera thread");
+        Self {
+            shared,
+            worker: Some(worker),
+        }
+    }
+
+    /// Plays `source`, or stops receiving video with `None`.
+    pub fn set_source(&self, source: Option<Source>) {
+        let mut control = self.shared.control.lock().unwrap();
+        control.source = source;
+        control.revision += 1;
+        self.shared.changed.notify_all();
+    }
+}
+
+impl Drop for CameraStream {
+    fn drop(&mut self) {
+        self.shared.control.lock().unwrap().stop = true;
+        self.shared.changed.notify_all();
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+fn set_status(item: usize, has_video: bool, signal_lost: bool) {
+    unsafe { rigel_item_set_status(item as *mut c_void, has_video, signal_lost) };
+}
+
+fn run(shared: Arc<Shared>, item: usize) {
+    let mut generation = 0;
+    let mut retry_delay = Duration::from_secs(2);
+    loop {
+        let (source, revision) = {
+            let guard = shared.control.lock().unwrap();
+            let control = shared
+                .changed
+                .wait_while(guard, |c| !c.stop && c.source.is_none())
+                .unwrap();
+            if control.stop {
+                return;
+            }
+            (control.source.clone().unwrap(), control.revision)
+        };
+        generation += 1;
+        let result = play(&shared, item, &source, revision, generation);
+        match result {
+            Outcome::Changed => {
+                retry_delay = Duration::from_secs(2);
+                // With a new source, the current picture stays until its first frame arrives.
+                if shared.control.lock().unwrap().source.is_none() {
+                    set_status(item, false, false);
+                }
+            }
+            Outcome::Lost { received_video } => {
+                set_status(item, false, true);
+                if received_video {
+                    retry_delay = Duration::from_secs(2);
+                }
+                let guard = shared.control.lock().unwrap();
+                let _ = shared
+                    .changed
+                    .wait_timeout_while(guard, retry_delay, |c| !c.stop && c.revision == revision)
+                    .unwrap();
+                retry_delay = (retry_delay * 2).min(MAX_RETRY_DELAY);
+            }
+        }
+    }
+}
+
+enum Outcome {
+    /// The source changed or the stream was asked to stop.
+    Changed,
+    Lost {
+        received_video: bool,
+    },
+}
+
+fn play(shared: &Shared, item: usize, source: &Source, revision: u64, generation: u64) -> Outcome {
+    let last_frame = Arc::new(Mutex::new(Instant::now()));
+    let received_video = Arc::new(AtomicBool::new(false));
+    let Some(pipeline) = build_pipeline(
+        item,
+        source,
+        generation,
+        last_frame.clone(),
+        received_video.clone(),
+    ) else {
+        return Outcome::Lost {
+            received_video: false,
+        };
+    };
+    let bus = pipeline.bus().unwrap();
+    let outcome = if pipeline.set_state(gst::State::Playing).is_err() {
+        Outcome::Lost {
+            received_video: false,
+        }
+    } else {
+        loop {
+            {
+                let control = shared.control.lock().unwrap();
+                if control.stop || control.revision != revision {
+                    break Outcome::Changed;
+                }
+            }
+            if let Some(message) = bus.timed_pop(gst::ClockTime::from_mseconds(200)) {
+                match message.view() {
+                    gst::MessageView::Error(error) => {
+                        eprintln!("{}: {}", source.url, error.error());
+                        break Outcome::Lost {
+                            received_video: received_video.load(Ordering::Relaxed),
+                        };
+                    }
+                    gst::MessageView::Eos(_) => {
+                        break Outcome::Lost {
+                            received_video: received_video.load(Ordering::Relaxed),
+                        };
+                    }
+                    _ => {}
+                }
+            }
+            if last_frame.lock().unwrap().elapsed() > STALL_TIMEOUT {
+                eprintln!(
+                    "{}: no frames for {} s",
+                    source.url,
+                    STALL_TIMEOUT.as_secs()
+                );
+                break Outcome::Lost {
+                    received_video: received_video.load(Ordering::Relaxed),
+                };
+            }
+        }
+    };
+    let _ = pipeline.set_state(gst::State::Null);
+    outcome
+}
+
+fn build_pipeline(
+    item: usize,
+    source: &Source,
+    generation: u64,
+    last_frame: Arc<Mutex<Instant>>,
+    received_video: Arc<AtomicBool>,
+) -> Option<gst::Pipeline> {
+    let pipeline = gst::Pipeline::new();
+    let src = gst::ElementFactory::make("rtspsrc")
+        .property("location", source.url.as_str())
+        .property_from_str("protocols", "tcp")
+        .property("latency", 300u32)
+        // Through properties, so the password stays out of the URL and of the logs.
+        .property("user-id", source.user.as_str())
+        .property("user-pw", source.password.as_str())
+        .build()
+        .ok()?;
+    pipeline.add(&src).ok()?;
+
+    src.connect("select-stream", false, |values| {
+        let caps = values[2].get::<gst::Caps>().ok()?;
+        let media = caps.structure(0)?.get::<String>("media").ok()?;
+        Some((media == "video").to_value())
+    });
+
+    let weak_pipeline = pipeline.downgrade();
+    src.connect_pad_added(move |_, pad| {
+        let Some(pipeline) = weak_pipeline.upgrade() else {
+            return;
+        };
+        let Some(caps) = pad.current_caps() else {
+            return;
+        };
+        let Some(structure) = caps.structure(0) else {
+            return;
+        };
+        let encoding = structure.get::<String>("encoding-name").unwrap_or_default();
+        let (depay, parse, decoder) = match encoding.as_str() {
+            "H264" => ("rtph264depay", "h264parse", "vah264dec"),
+            "H265" => ("rtph265depay", "h265parse", "vah265dec"),
+            other => {
+                eprintln!("unsupported encoding: {other}");
+                return;
+            }
+        };
+        let description = format!(
+            "{depay} ! {parse} ! {decoder} ! video/x-raw(memory:DMABuf),format=DMA_DRM \
+             ! appsink name=sink sync=false max-buffers=1 drop=true"
+        );
+        let Ok(branch) = gst::parse::bin_from_description(&description, true) else {
+            eprintln!("could not build the decoding branch");
+            return;
+        };
+        let sink = branch
+            .by_name("sink")
+            .unwrap()
+            .downcast::<AppSink>()
+            .unwrap();
+        // The decoder refuses DMABuf unless downstream declares VideoMeta, which appsink doesn't.
+        sink.static_pad("sink").unwrap().add_probe(
+            gst::PadProbeType::QUERY_DOWNSTREAM,
+            |_, info| {
+                if let Some(query) = info.query_mut() {
+                    if let gst::QueryViewMut::Allocation(allocation) = query.view_mut() {
+                        allocation.add_allocation_meta::<VideoMeta>(None);
+                    }
+                }
+                gst::PadProbeReturn::Ok
+            },
+        );
+        let last_frame = last_frame.clone();
+        let received_video = received_video.clone();
+        sink.set_callbacks(
+            AppSinkCallbacks::builder()
+                .new_sample(move |sink| {
+                    let sample = sink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
+                    *last_frame.lock().unwrap() = Instant::now();
+                    if push_sample(item, sample, generation).is_some()
+                        && !received_video.swap(true, Ordering::Relaxed)
+                    {
+                        set_status(item, true, false);
+                    }
+                    Ok(gst::FlowSuccess::Ok)
+                })
+                .build(),
+        );
+        pipeline.add(&branch).unwrap();
+        branch.sync_state_with_parent().unwrap();
+        pad.link(&branch.static_pad("sink").unwrap()).unwrap();
+    });
+    Some(pipeline)
+}
+
+fn modifier_of(sample: &gst::Sample) -> Option<u64> {
+    let caps = sample.caps()?;
+    let drm = caps.structure(0)?.get::<String>("drm-format").ok()?;
+    let (format, modifier) = drm.split_once(':').unwrap_or((drm.as_str(), "0x0"));
+    if format != "NV12" {
+        return None;
+    }
+    u64::from_str_radix(modifier.trim_start_matches("0x"), 16).ok()
+}
+
+fn push_sample(item: usize, sample: gst::Sample, generation: u64) -> Option<()> {
+    let buffer = sample.buffer()?;
+    let meta = buffer.meta::<VideoMeta>()?;
+    let mut frame = RigelFrame {
+        width: meta.width() as i32,
+        height: meta.height() as i32,
+        fourcc: DRM_FORMAT_NV12,
+        modifier: modifier_of(&sample)?,
+        generation,
+        n_planes: meta.n_planes() as i32,
+        fds: [-1; 4],
+        offsets: [0; 4],
+        strides: [0; 4],
+        owner: std::ptr::null_mut(),
+        release: release_sample,
+    };
+    for plane in 0..meta.n_planes() as usize {
+        let memory = buffer.peek_memory(plane.min(buffer.n_memory() - 1));
+        frame.fds[plane] = memory.downcast_memory_ref::<DmaBufMemory>()?.fd();
+        frame.offsets[plane] = meta.offset()[plane] as u32;
+        frame.strides[plane] = meta.stride()[plane] as u32;
+    }
+    frame.owner = Box::into_raw(Box::new(sample)) as *mut c_void;
+    unsafe { rigel_item_set_frame(item as *mut c_void, &frame) };
+    Some(())
+}

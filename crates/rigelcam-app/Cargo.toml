@@ -1,0 +1,23 @@
+[package]
+name = "rigelcam-app"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[[bin]]
+name = "rigelcam"
+path = "src/main.rs"
+
+[dependencies]
+cxx = "1.0"
+cxx-qt = "0.10"
+cxx-qt-lib = { version = "0.10", features = ["qt_gui", "qt_qml"] }
+gstreamer = "0.25"
+gstreamer-app = "0.25"
+gstreamer-video = "0.25"
+gstreamer-allocators = "0.25"
+rigelcam-core = { path = "../rigelcam-core" }
+
+[build-dependencies]
+cxx-qt-build = "0.10"
