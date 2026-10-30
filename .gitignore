@@ -1,0 +1,11 @@
+# Rust
+/target
+
+# Qt / CMake
+/build
+CMakeLists.txt.user*
+
+# Editors
+.idea
+.vscode
+*.swp
