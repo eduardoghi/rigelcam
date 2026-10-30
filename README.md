@@ -5,6 +5,8 @@
   </picture>
 </p>
 
+<p align="center">English · <a href="README.pt-BR.md">Português</a></p>
+
 rigelcam is a desktop app for watching live cameras and browsing recordings on Intelbras and Dahua
 NVRs, for Linux and Windows.
 
