@@ -203,10 +203,38 @@ ApplicationWindow {
     // Key of the camera shown alone after a double click, or empty for the whole grid.
     property string zoomed: ""
     property string zoomedName: ""
+    // Digital zoom of the camera shown alone, with the top left of the visible part in fractions.
+    property real zoomScale: 1
+    property real zoomX: 0
+    property real zoomY: 0
+    readonly property rect zoomView: Qt.rect(zoomX, zoomY, 1 / zoomScale, 1 / zoomScale)
+    onZoomedChanged: {
+        zoomScale = 1
+        zoomX = 0
+        zoomY = 0
+    }
     // The camera being dragged to a square.
     property var dragged: null
     // Recorders with their cameras folded in the sidebar, for this session.
     property var foldedRecorders: []
+
+    function clamp(value, low, high) {
+        return Math.min(Math.max(value, low), high)
+    }
+
+    function panTo(x, y) {
+        const limit = 1 - 1 / zoomScale
+        zoomX = clamp(x, 0, limit)
+        zoomY = clamp(y, 0, limit)
+    }
+
+    // Keeps the point at (px, py) of the view, in fractions, under the cursor.
+    function zoomAt(scale, px, py) {
+        const x = zoomX + px / zoomScale
+        const y = zoomY + py / zoomScale
+        zoomScale = clamp(scale, 1, 8)
+        panTo(x - px / zoomScale, y - py / zoomScale)
+    }
 
     function cameraKey(recorder, channel) {
         return recorder + ":" + channel
@@ -766,6 +794,7 @@ ApplicationWindow {
                 readonly property bool included: square >= 0
                 readonly property bool shown: included && (win.zoomed === "" || win.zoomed === key)
                 readonly property bool isMain: win.zoomed === key
+                view: isMain ? win.zoomView : Qt.rect(0, 0, 1, 1)
 
                 visible: shown
                 x: isMain ? 0 : (square % win.cols) * (cameraArea.cellWidth + 2)
@@ -826,6 +855,7 @@ ApplicationWindow {
                     id: mainStream
                     anchors.fill: parent
                     visible: hasVideo && tile.isMain
+                    view: tile.view
                     Connections {
                         target: tile
                         function onIsMainChanged() {
@@ -890,7 +920,32 @@ ApplicationWindow {
                     }
                 }
 
-                HoverHandler { id: tileHover }
+                HoverHandler {
+                    id: tileHover
+                    cursorShape: tile.isMain && win.zoomScale > 1 ? Qt.OpenHandCursor : Qt.ArrowCursor
+                }
+                WheelHandler {
+                    enabled: tile.isMain
+                    target: null
+                    acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
+                    onWheel: event => win.zoomAt(win.zoomScale * Math.pow(1.0015, event.angleDelta.y),
+                                                 event.x / tile.width, event.y / tile.height)
+                }
+                DragHandler {
+                    property real startX
+                    property real startY
+                    enabled: tile.isMain && win.zoomScale > 1
+                    target: null
+                    onActiveChanged: {
+                        startX = win.zoomX
+                        startY = win.zoomY
+                    }
+                    onActiveTranslationChanged: {
+                        if (active)
+                            win.panTo(startX - activeTranslation.x / tile.width / win.zoomScale,
+                                      startY - activeTranslation.y / tile.height / win.zoomScale)
+                    }
+                }
                 TapHandler {
                     onDoubleTapped: {
                         win.zoomedName = tile.label
@@ -975,6 +1030,44 @@ ApplicationWindow {
                 font.pixelSize: 13
                 font.weight: Font.Medium
                 color: colors.text
+            }
+            AppButton {
+                id: zoomOut
+                Layout.leftMargin: 8
+                enabled: win.zoomScale > 1
+                display: AbstractButton.IconOnly
+                icon.source: "qrc:/rigelcam/icons/minus.svg"
+                text: "Diminuir o zoom"
+                implicitWidth: 34
+                leftPadding: 9
+                rightPadding: 9
+                onClicked: win.zoomAt(win.zoomScale / 1.5, 0.5, 0.5)
+                AppToolTip {
+                    visible: zoomOut.hovered
+                    text: zoomOut.text
+                }
+            }
+            Text {
+                text: Math.round(win.zoomScale * 100) + "%"
+                horizontalAlignment: Text.AlignHCenter
+                Layout.preferredWidth: 42
+                font.pixelSize: 13
+                color: colors.text
+            }
+            AppButton {
+                id: zoomIn
+                enabled: win.zoomScale < 8
+                display: AbstractButton.IconOnly
+                icon.source: "qrc:/rigelcam/icons/plus.svg"
+                text: "Aumentar o zoom"
+                implicitWidth: 34
+                leftPadding: 9
+                rightPadding: 9
+                onClicked: win.zoomAt(win.zoomScale * 1.5, 0.5, 0.5)
+                AppToolTip {
+                    visible: zoomIn.hovered
+                    text: zoomIn.text
+                }
             }
         }
     }

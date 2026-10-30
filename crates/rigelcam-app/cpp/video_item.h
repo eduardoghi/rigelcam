@@ -34,18 +34,23 @@ class VideoItem : public QQuickItem {
     Q_OBJECT
     Q_PROPERTY(bool hasVideo READ hasVideo NOTIFY statusChanged)
     Q_PROPERTY(bool signalLost READ signalLost NOTIFY statusChanged)
+    /// Part of the picture to show, in fractions of its size, which is how digital zoom works.
+    Q_PROPERTY(QRectF view READ view WRITE setView NOTIFY viewChanged)
 public:
     explicit VideoItem(QQuickItem *parent = nullptr);
     ~VideoItem() override;
     void setFrame(const RigelFrame &frame);
     bool hasVideo() const { return m_hasVideo; }
     bool signalLost() const { return m_signalLost; }
+    QRectF view() const { return m_view; }
+    void setView(const QRectF &view);
     Q_INVOKABLE void setStatus(bool hasVideo, bool signalLost);
     void setStream(void *stream, void (*destroy)(void *));
     void *stream() const { return m_stream; }
 
 signals:
     void statusChanged();
+    void viewChanged();
 
 protected:
     QSGNode *updatePaintNode(QSGNode *old, UpdatePaintNodeData *) override;
@@ -56,6 +61,7 @@ private:
     bool m_hasPending = false;
     bool m_hasVideo = false;
     bool m_signalLost = false;
+    QRectF m_view{0, 0, 1, 1};
     void *m_stream = nullptr;
     void (*m_destroyStream)(void *) = nullptr;
 };

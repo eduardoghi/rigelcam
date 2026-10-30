@@ -86,8 +86,9 @@ public:
         release(m_previous);
     }
 
-    void setFrame(const RigelFrame &frame, const QRectF &rect) {
+    void setFrame(const RigelFrame &frame, const QRectF &rect, const QRectF &view) {
         m_rect = rect;
+        m_view = view;
         if (frame.release) {
             release(m_next);
             m_next = frame;
@@ -116,7 +117,9 @@ public:
 
         Program &p = program(f);
         const float w = float(m_rect.width()), h = float(m_rect.height());
-        const float quad[] = {0, 0, 0, 0, w, 0, 1, 0, 0, h, 0, 1, w, h, 1, 1};
+        const float u0 = float(m_view.left()), u1 = float(m_view.right());
+        const float v0 = float(m_view.top()), v1 = float(m_view.bottom());
+        const float quad[] = {0, 0, u0, v0, w, 0, u1, v0, 0, h, u0, v1, w, h, u1, v1};
         const QMatrix4x4 mvp = *state->projectionMatrix() * *matrix();
 
         f->glDisable(GL_BLEND);
@@ -212,6 +215,7 @@ private:
 
     RigelFrame m_next{}, m_current{}, m_previous{};
     QRectF m_rect;
+    QRectF m_view{0, 0, 1, 1};
     uint64_t m_generation = 0;
     std::map<ino_t, Imported> m_cache;
 };
@@ -231,6 +235,13 @@ VideoItem::~VideoItem() {
 void VideoItem::setStream(void *stream, void (*destroy)(void *)) {
     m_stream = stream;
     m_destroyStream = destroy;
+}
+
+void VideoItem::setView(const QRectF &view) {
+    if (m_view == view) return;
+    m_view = view;
+    emit viewChanged();
+    update();
 }
 
 void VideoItem::setStatus(bool hasVideo, bool signalLost) {
@@ -263,7 +274,7 @@ QSGNode *VideoItem::updatePaintNode(QSGNode *old, UpdatePaintNodeData *) {
             m_hasPending = false;
         }
     }
-    node->setFrame(frame, QRectF(0, 0, width(), height()));
+    node->setFrame(frame, QRectF(0, 0, width(), height()), m_view);
     node->markDirty(QSGNode::DirtyMaterial);
     return node;
 }
