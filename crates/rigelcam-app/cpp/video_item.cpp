@@ -64,6 +64,8 @@ Program &program(QOpenGLFunctions *f) {
     return p;
 }
 
+constexpr size_t kMaxImportedSurfaces = 64;
+
 struct Imported {
     EGLImageKHR image = EGL_NO_IMAGE_KHR;
     GLuint texture = 0;
@@ -156,6 +158,9 @@ private:
         if (fstat(fr.fds[0], &st) != 0) return 0;
         auto it = m_cache.find(st.st_ino);
         if (it != m_cache.end()) return it->second.texture;
+
+        // More surfaces than any decoder pool uses, so a bad stream can't grow this without limit.
+        if (m_cache.size() >= kMaxImportedSurfaces) clearCache();
 
         static auto createImage = reinterpret_cast<PFNEGLCREATEIMAGEKHRPROC>(eglGetProcAddress("eglCreateImageKHR"));
         static auto targetTexture = reinterpret_cast<PFNGLEGLIMAGETARGETTEXTURE2DOESPROC>(eglGetProcAddress("glEGLImageTargetTexture2DOES"));

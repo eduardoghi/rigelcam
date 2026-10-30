@@ -28,6 +28,7 @@ Window {
         anchors.centerIn: parent
         visible: grid.error !== ""
         text: grid.error
+        textFormat: Text.PlainText
         color: "#E4EEFF"
     }
 
@@ -97,6 +98,8 @@ Window {
                     anchors.top: parent.top
                     anchors.margins: 6
                     text: tile.modelData.name
+                    // The name comes from the recorder, so it can't be read as markup.
+                    textFormat: Text.PlainText
                     color: "white"
                     style: Text.Outline
                     styleColor: "black"
