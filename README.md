@@ -54,6 +54,11 @@ from outside its network.
 Recorder passwords are kept in the system keyring (Secret Service on Linux, Credential Manager on
 Windows) and never written to config files or logs.
 
+## License
+
+[MIT](LICENSE). The Space Grotesk font used in the logo is under the
+[SIL Open Font License](assets/branding/SpaceGrotesk-OFL.txt).
+
 ## Disclaimer
 
 rigelcam is an independent project, not affiliated with or endorsed by Intelbras or Dahua.
