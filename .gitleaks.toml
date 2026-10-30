@@ -5,8 +5,9 @@ useDefault = true
 [[rules]]
 id = "url-with-password"
 description = "URL with a password"
-regex = '''\b(?:rtsp|rtsps|https?)://[^\s/:@'"]+:([^\s/@'"]+)@'''
+regex = '''(?i)\b(?:rtsps?|https?)://[^\s/:@'"]*:([^\s@'"]+)@'''
 secretGroup = 1
 
+# Only placeholders, written as an environment variable or as <name>.
 [rules.allowlist]
-regexes = ['''^(?:\$\{?\w+\}?|<[^>]*>|password|senha|PASSWORD)$''']
+regexes = ['''^(?:\$\{?[A-Z_][A-Z0-9_]*\}?|<[a-z_-]+>)$''']
