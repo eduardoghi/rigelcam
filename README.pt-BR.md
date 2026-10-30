@@ -1,13 +1,13 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="assets/branding/logo-dark.svg">
-    <img src="assets/branding/logo-light.svg" alt="rigelcam" height="80">
+    <img src="assets/branding/logo-light.svg" alt="Rigelcam" height="80">
   </picture>
 </p>
 
 <p align="center"><a href="README.md">English</a> · Português</p>
 
-O rigelcam é um app de desktop para ver câmeras ao vivo e navegar pelas gravações de NVRs Intelbras
+O Rigelcam é um app de desktop para ver câmeras ao vivo e navegar pelas gravações de NVRs Intelbras
 e Dahua, no Linux e no Windows.
 
 Ele conversa com o gravador pelos protocolos que o próprio aparelho já oferece, RTSP para o vídeo e a
@@ -71,5 +71,5 @@ git config core.hooksPath .githooks
 
 ## Aviso
 
-O rigelcam é um projeto independente, sem vínculo com a Intelbras ou a Dahua e sem endosso delas.
+O Rigelcam é um projeto independente, sem vínculo com a Intelbras ou a Dahua e sem endosso delas.
 Intelbras e Dahua são marcas de seus respectivos donos.
