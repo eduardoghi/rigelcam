@@ -24,6 +24,8 @@ ApplicationWindow {
         readonly property color accent: "#3D84F7"
         readonly property color accentHover: "#5A97F9"
         readonly property color danger: "#E5484D"
+        readonly property color live: "#3DD68C"
+        readonly property color waiting: "#E5B94D"
     }
 
     component AppButton: Button {
@@ -200,6 +202,8 @@ ApplicationWindow {
     readonly property int cols: gridLayout.columns
     readonly property int includedCount: gridKeys.filter(k => k !== null).length
     property int liveCount: 0
+    // State of each camera in the grid, by key, as "live", "lost" or "connecting".
+    property var cameraStatus: ({})
     // Key of the camera shown alone after a double click, or empty for the whole grid.
     property string zoomed: ""
     property string zoomedName: ""
@@ -286,12 +290,17 @@ ApplicationWindow {
 
     function updateLiveCount() {
         let live = 0
+        const status = {}
         for (let i = 0; i < cameraTiles.count; i++) {
             const tile = cameraTiles.itemAt(i)
-            if (tile && tile.included && tile.hasVideo)
+            if (!tile || !tile.included)
+                continue
+            if (tile.hasVideo)
                 live++
+            status[tile.key] = tile.hasVideo ? "live" : tile.signalLost ? "lost" : "connecting"
         }
         liveCount = live
+        cameraStatus = status
     }
 
     function moveDrag(position) {
@@ -376,7 +385,7 @@ ApplicationWindow {
                 width: 7
                 height: 7
                 radius: 4
-                color: win.liveCount > 0 ? "#3DD68C" : colors.muted
+                color: win.liveCount > 0 ? colors.live : colors.muted
                 Layout.leftMargin: 4
             }
             Label {
@@ -759,6 +768,7 @@ ApplicationWindow {
                                     required property var modelData
                                     readonly property string key: win.cameraKey(recorderGroup.modelData.id, modelData.number)
                                     readonly property bool onGrid: win.gridKeys.includes(key)
+                                    readonly property string status: win.cameraStatus[key] ?? ""
                                     readonly property var payload: ({
                                         recorder: recorderGroup.modelData.id,
                                         number: modelData.number,
@@ -778,8 +788,11 @@ ApplicationWindow {
                                             width: 8
                                             height: 8
                                             radius: 4
-                                            color: cameraRow.onGrid ? colors.accent : "transparent"
-                                            border.color: cameraRow.onGrid ? colors.accent : colors.muted
+                                            color: cameraRow.status === "live" ? colors.live
+                                                 : cameraRow.status === "lost" ? colors.danger
+                                                 : cameraRow.status === "connecting" ? colors.waiting
+                                                 : "transparent"
+                                            border.color: cameraRow.onGrid ? color : colors.muted
                                         }
                                         Text {
                                             Layout.fillWidth: true
@@ -789,6 +802,14 @@ ApplicationWindow {
                                             font.pixelSize: 13
                                             color: cameraRow.onGrid ? colors.text : colors.muted
                                         }
+                                    }
+
+                                    AppToolTip {
+                                        visible: rowHover.hovered
+                                        text: cameraRow.status === "live" ? "Ao vivo"
+                                            : cameraRow.status === "lost" ? "Sem sinal"
+                                            : cameraRow.status === "connecting" ? "Conectando…"
+                                            : "Fora da grade"
                                     }
 
                                     HoverHandler { id: rowHover }
@@ -840,7 +861,7 @@ ApplicationWindow {
                 width: isMain ? cameraArea.width : cameraArea.cellWidth
                 height: isMain ? cameraArea.height : cameraArea.cellHeight
 
-                onHasVideoChanged: win.updateLiveCount()
+                onStatusChanged: win.updateLiveCount()
                 onIncludedChanged: win.updateLiveCount()
 
                 // Hidden cameras keep running for a while, since going back to the grid right after
