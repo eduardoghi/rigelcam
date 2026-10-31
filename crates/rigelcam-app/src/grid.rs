@@ -19,6 +19,7 @@ pub mod qobject {
         #[qproperty(QString, tree)]
         #[qproperty(QString, layout)]
         #[qproperty(bool, sidebar_collapsed, cxx_name = "sidebarCollapsed")]
+        #[qproperty(QString, theme)]
         #[qproperty(QString, error)]
         #[qproperty(bool, list_corrupted, cxx_name = "listCorrupted")]
         #[qproperty(QString, notice)]
@@ -31,6 +32,10 @@ pub mod qobject {
         /// Reads the saved recorders and connects to all of them.
         #[qinvokable]
         fn load(self: Pin<&mut Self>);
+
+        #[qinvokable]
+        #[cxx_name = "saveTheme"]
+        fn save_theme(self: Pin<&mut Self>, theme: &QString);
 
         /// Sets a damaged recorder list aside and starts an empty one.
         #[qinvokable]
@@ -201,6 +206,7 @@ pub struct CameraGridRust {
     tree: QString,
     layout: QString,
     sidebar_collapsed: bool,
+    theme: QString,
     error: QString,
     list_corrupted: bool,
     notice: QString,
@@ -236,8 +242,10 @@ impl qobject::CameraGrid {
         let ids: Vec<u64> = list.recorders().iter().map(|r| r.id).collect();
         let layout = list.layout().cloned();
         let collapsed = list.sidebar_collapsed();
+        let theme = QString::from(list.theme().unwrap_or_default());
         self.as_mut().rust_mut().list = Some(list);
         self.as_mut().set_sidebar_collapsed(collapsed);
+        self.as_mut().set_theme(theme);
         if let Some(layout) = layout {
             self.as_mut().publish_layout(&layout);
         }
@@ -496,6 +504,21 @@ impl qobject::CameraGrid {
 
     fn set_grid_columns(self: Pin<&mut Self>, columns: i32) {
         self.change_layout(|layout| layout.resize(columns as u32));
+    }
+
+    fn save_theme(mut self: Pin<&mut Self>, theme: &QString) {
+        let text = theme.to_string();
+        let result = self
+            .as_mut()
+            .rust_mut()
+            .list
+            .as_mut()
+            .map(|list| list.set_theme(&text));
+        if let Some(Err(error)) = result {
+            self.as_mut()
+                .set_error(QString::from(error.to_string().as_str()));
+        }
+        self.set_theme(theme.clone());
     }
 
     fn save_sidebar_collapsed(mut self: Pin<&mut Self>, collapsed: bool) {

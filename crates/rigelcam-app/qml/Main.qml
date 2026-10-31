@@ -14,18 +14,24 @@ ApplicationWindow {
 
     QtObject {
         id: colors
-        readonly property color page: "#0B101C"
-        readonly property color bar: "#0F1626"
-        readonly property color surface: "#121B2F"
-        readonly property color raised: "#1A2540"
-        readonly property color line: "#26324D"
-        readonly property color text: "#E4EEFF"
-        readonly property color muted: "#8A94A3"
-        readonly property color accent: "#3D84F7"
-        readonly property color accentHover: "#5A97F9"
-        readonly property color danger: "#E5484D"
-        readonly property color live: "#3DD68C"
-        readonly property color waiting: "#E5B94D"
+        readonly property bool dark: grid.theme ? grid.theme === "dark" : Qt.styleHints.colorScheme !== Qt.Light
+        readonly property color page: dark ? "#0B101C" : "#E9EEF6"
+        readonly property color bar: dark ? "#0F1626" : "#FFFFFF"
+        readonly property color surface: dark ? "#121B2F" : "#F5F8FC"
+        readonly property color raised: dark ? "#1A2540" : "#E3EAF4"
+        readonly property color line: dark ? "#26324D" : "#D3DCE9"
+        readonly property color text: dark ? "#E4EEFF" : "#121B2F"
+        readonly property color muted: dark ? "#8A94A3" : "#5B6880"
+        readonly property color faint: dark ? "#5B6880" : "#7D8899"
+        readonly property color accent: dark ? "#3D84F7" : "#2F6FDB"
+        readonly property color accentHover: dark ? "#5A97F9" : "#3D84F7"
+        readonly property color danger: dark ? "#E5484D" : "#CE2C31"
+        readonly property color live: dark ? "#3DD68C" : "#1F9D63"
+        readonly property color waiting: dark ? "#E5B94D" : "#A86B00"
+        readonly property color panel: dark ? "#D90F1626" : "#E6FFFFFF"
+        // Over the video, which looks the same in both themes.
+        readonly property color overVideo: "#B30B101C"
+        readonly property color overVideoText: "#E4EEFF"
     }
 
     component AppButton: Button {
@@ -33,6 +39,7 @@ ApplicationWindow {
         property color fill: "transparent"
         property color hoverFill: colors.raised
         property color edge: "transparent"
+        property color contentColor: colors.text
         implicitHeight: 34
         leftPadding: 12
         rightPadding: 12
@@ -43,8 +50,8 @@ ApplicationWindow {
         font.weight: Font.Medium
         icon.width: 16
         icon.height: 16
-        icon.color: colors.text
-        palette.buttonText: colors.text
+        icon.color: contentColor
+        palette.buttonText: contentColor
         opacity: enabled ? 1 : 0.45
         background: Rectangle {
             radius: 7
@@ -70,6 +77,7 @@ ApplicationWindow {
     }
 
     component PrimaryButton: AppButton {
+        contentColor: "#FFFFFF"
         fill: colors.accent
         hoverFill: colors.accentHover
     }
@@ -151,7 +159,7 @@ ApplicationWindow {
         rightPadding: 12
         font.pixelSize: 14
         color: colors.text
-        placeholderTextColor: "#5B6880"
+        placeholderTextColor: colors.faint
         selectionColor: colors.accent
         background: Rectangle {
             radius: 7
@@ -372,7 +380,7 @@ ApplicationWindow {
             }
 
             Image {
-                source: "qrc:/rigelcam/logo.svg"
+                source: colors.dark ? "qrc:/rigelcam/logo.svg" : "qrc:/rigelcam/logo-light.svg"
                 fillMode: Image.PreserveAspectFit
                 Layout.preferredHeight: 30
                 Layout.preferredWidth: 130
@@ -423,6 +431,21 @@ ApplicationWindow {
                 valueRole: "columns"
                 currentIndex: win.cols - 1
                 onActivated: grid.setGridColumns(currentValue)
+            }
+
+            AppButton {
+                id: themeButton
+                display: AbstractButton.IconOnly
+                icon.source: colors.dark ? "qrc:/rigelcam/icons/sun.svg" : "qrc:/rigelcam/icons/moon.svg"
+                text: colors.dark ? "Tema claro" : "Tema escuro"
+                implicitWidth: 34
+                leftPadding: 9
+                rightPadding: 9
+                onClicked: grid.saveTheme(colors.dark ? "light" : "dark")
+                AppToolTip {
+                    visible: themeButton.hovered
+                    text: themeButton.text
+                }
             }
 
             AppButton {
@@ -601,6 +624,7 @@ ApplicationWindow {
                     text: "Excluir"
                     fill: colors.danger
                     hoverFill: "#F2666A"
+                    contentColor: "#FFFFFF"
                     onClicked: {
                         grid.removeRecorder(removeDialog.recorder.id)
                         removeDialog.close()
@@ -617,7 +641,8 @@ ApplicationWindow {
         Image {
             anchors.horizontalCenter: parent.horizontalCenter
             visible: grid.error === ""
-            source: "qrc:/rigelcam/star.svg"
+            // The bright star of the dark theme would disappear on a light page.
+            source: colors.dark ? "qrc:/rigelcam/star.svg" : "qrc:/rigelcam/icon-256.png"
             sourceSize.width: 72
             sourceSize.height: 72
         }
@@ -1013,7 +1038,7 @@ ApplicationWindow {
                             anchors.horizontalCenter: parent.horizontalCenter
                             text: tile.signalLost ? "Sem sinal" : "Conectando…"
                             font.pixelSize: 12
-                            color: "#5B6880"
+                            color: colors.faint
                         }
                     }
                 }
@@ -1042,7 +1067,7 @@ ApplicationWindow {
                     width: Math.min(cameraName.implicitWidth + 14, tile.width - 12)
                     height: cameraName.implicitHeight + 6
                     radius: 5
-                    color: "#B30B101C"
+                    color: colors.overVideo
                     Text {
                         id: cameraName
                         anchors.fill: parent
@@ -1055,7 +1080,7 @@ ApplicationWindow {
                         elide: Text.ElideRight
                         font.pixelSize: 12
                         font.weight: Font.Medium
-                        color: colors.text
+                        color: colors.overVideoText
                     }
                 }
 
@@ -1082,7 +1107,8 @@ ApplicationWindow {
                     implicitHeight: 26
                     leftPadding: 6
                     rightPadding: 6
-                    fill: "#B30B101C"
+                    fill: colors.overVideo
+                    contentColor: colors.overVideoText
                     onClicked: grid.removeCamera(tile.recorder, tile.number)
                     AppToolTip {
                         visible: leaveGrid.hovered
@@ -1166,7 +1192,8 @@ ApplicationWindow {
                         implicitHeight: 26
                         leftPadding: 6
                         rightPadding: 6
-                        fill: "#B30B101C"
+                        fill: colors.overVideo
+                        contentColor: colors.overVideoText
                         onClicked: {
                             const camera = win.gridLayout.cameras[square.index]
                             grid.removeCamera(camera.recorder, camera.channel)
@@ -1181,7 +1208,7 @@ ApplicationWindow {
                         // A camera of a recorder that is offline or hasn't answered keeps its square.
                         text: square.key === null ? "Arraste uma câmera" : "Aguardando o gravador"
                         font.pixelSize: 12
-                        color: "#5B6880"
+                        color: colors.faint
                     }
                 }
 
@@ -1215,7 +1242,7 @@ ApplicationWindow {
         width: zoomBar.implicitWidth + 8
         height: 42
         radius: 9
-        color: "#D90F1626"
+        color: colors.panel
         border.color: colors.line
         RowLayout {
             id: zoomBar
@@ -1289,7 +1316,7 @@ ApplicationWindow {
         width: hintText.implicitWidth + 24
         height: 32
         radius: 7
-        color: "#D90F1626"
+        color: colors.panel
         border.color: colors.line
         Text {
             id: hintText

@@ -175,6 +175,9 @@ struct Saved {
     layout: Option<Layout>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     sidebar_collapsed: bool,
+    /// "light" or "dark", or nothing to follow the system.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    theme: Option<String>,
 }
 
 pub struct RecorderList<S: Secrets> {
@@ -329,6 +332,15 @@ impl<S: Secrets> RecorderList<S> {
         self.write()
     }
 
+    pub fn theme(&self) -> Option<&str> {
+        self.saved.theme.as_deref()
+    }
+
+    pub fn set_theme(&mut self, theme: &str) -> Result<(), Error> {
+        self.saved.theme = Some(theme.to_owned());
+        self.write()
+    }
+
     pub fn sidebar_collapsed(&self) -> bool {
         self.saved.sidebar_collapsed
     }
@@ -479,7 +491,9 @@ mod tests {
         }]);
         list.set_layout(layout.clone()).unwrap();
         list.set_sidebar_collapsed(true).unwrap();
+        list.set_theme("light").unwrap();
         let reopened = RecorderList::open(path, secrets).unwrap();
+        assert_eq!(reopened.theme(), Some("light"));
         assert_eq!(reopened.recorders().len(), 2);
         assert_eq!(reopened.layout(), Some(&layout));
         assert!(reopened.sidebar_collapsed());
