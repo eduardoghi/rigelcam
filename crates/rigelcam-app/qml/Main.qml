@@ -285,6 +285,8 @@ ApplicationWindow {
     // State of each camera in the grid, by key, as "live", "lost" or "connecting".
     property var cameraStatus: ({})
     // Key of the camera shown alone after a double click, or empty for the whole grid.
+    signal photoRequested()
+
     property string zoomed: ""
     property string zoomedName: ""
     // Only for a camera seen alone, where someone is looking for detail. Not saved, because the
@@ -505,6 +507,16 @@ ApplicationWindow {
         onActivated: playback.seek(playback.position + 10)
     }
 
+    Shortcut {
+        sequence: "Ctrl+S"
+        enabled: win.zoomed !== "" || win.inRecordings
+        onActivated: {
+            if (win.inRecordings)
+                playback.savePhotos()
+            else
+                win.photoRequested()
+        }
+    }
     Shortcut {
         sequence: "F11"
         onActivated: win.toggleFullScreen()
@@ -1194,6 +1206,7 @@ ApplicationWindow {
                 height: isMain ? cameraArea.height : cameraArea.cellHeight
 
                 onStatusChanged: win.updateLiveCount()
+                onPhotoFinished: file => photoToast.show(file)
                 // Later, because this closes the tile that is emitting the signal.
                 onAuthRefused: Qt.callLater(grid.recorderRefused.bind(grid, recorder))
                 onIncludedChanged: win.updateLiveCount()
@@ -1250,12 +1263,23 @@ ApplicationWindow {
                     visible: hasVideo && tile.isMain
                     view: tile.view
                     gamma: tile.gamma
+                    onPhotoFinished: file => photoToast.show(file)
                     onAuthRefused: Qt.callLater(grid.recorderRefused.bind(grid, tile.recorder))
                     Connections {
                         target: tile
                         function onIsMainChanged() {
                             grid.show(mainStream, tile.recorder, tile.number, tile.isMain, true)
                         }
+                    }
+                }
+
+                Connections {
+                    target: win
+                    enabled: tile.isMain
+                    function onPhotoRequested() {
+                        const name = tile.label + " " + Qt.formatDateTime(new Date(), "yyyy-MM-dd HH-mm-ss")
+                        const shown = mainStream.visible ? mainStream : tile
+                        shown.savePhoto(name)
                     }
                 }
 
@@ -1475,6 +1499,20 @@ ApplicationWindow {
                 color: colors.text
             }
             AppButton {
+                id: zoomPhoto
+                display: AbstractButton.IconOnly
+                icon.source: "qrc:/rigelcam/icons/camera.svg"
+                text: qsTr("Save photo")
+                implicitWidth: 34
+                leftPadding: 9
+                rightPadding: 9
+                onClicked: win.photoRequested()
+                AppToolTip {
+                    visible: zoomPhoto.hovered
+                    text: zoomPhoto.text + " (Ctrl+S)"
+                }
+            }
+            AppButton {
                 id: zoomOut
                 Layout.leftMargin: 8
                 enabled: win.zoomScale > 1
@@ -1558,6 +1596,14 @@ ApplicationWindow {
                 const cell = cells.itemAt(i)
                 if (cell && cell.camera)
                     action(cell)
+            }
+        }
+
+        function savePhotos() {
+            for (let i = 0; i < cells.count; i++) {
+                const cell = cells.itemAt(i)
+                if (cell && cell.camera && cell.streamOpen)
+                    cell.savePhoto()
             }
         }
 
@@ -1837,6 +1883,11 @@ ApplicationWindow {
                         failed = !streamOpen
                     }
 
+                    function savePhoto() {
+                        const time = playback.clockText(position).replace(/:/g, "-")
+                        video.savePhoto(camera.name + " " + playback.date + " " + time)
+                    }
+
                     function close() {
                         attempt = 0
                         streamOpen = false
@@ -1874,6 +1925,7 @@ ApplicationWindow {
                         anchors.margins: 1
                         gamma: win.gamma
 
+                        onPhotoFinished: file => photoToast.show(file)
                         onPlaybackPosition: (seconds, attempt) => {
                             if (attempt !== cell.attempt)
                                 return
@@ -1948,6 +2000,31 @@ ApplicationWindow {
                             font.pixelSize: 12
                             font.weight: Font.Medium
                             color: colors.overVideoText
+                        }
+                    }
+
+                    AppButton {
+                        id: cellPhoto
+                        anchors.right: closeCell.left
+                        anchors.top: parent.top
+                        anchors.topMargin: 8
+                        anchors.rightMargin: 4
+                        visible: cellHover.hovered && video.hasVideo
+                        display: AbstractButton.IconOnly
+                        icon.source: "qrc:/rigelcam/icons/camera.svg"
+                        icon.width: 14
+                        icon.height: 14
+                        text: qsTr("Save photo")
+                        implicitWidth: 26
+                        implicitHeight: 26
+                        leftPadding: 6
+                        rightPadding: 6
+                        fill: colors.overVideo
+                        contentColor: colors.overVideoText
+                        onClicked: cell.savePhoto()
+                        AppToolTip {
+                            visible: cellPhoto.hovered
+                            text: cellPhoto.text + " (Ctrl+S)"
                         }
                     }
 
@@ -2397,6 +2474,64 @@ ApplicationWindow {
             font.pixelSize: 13
             font.weight: Font.Medium
             color: colors.text
+        }
+    }
+
+    // Here and not with the other notices, since the top bar is hidden while zoomed.
+    Rectangle {
+        id: photoToast
+        property string folder: ""
+        property string fileName: ""
+
+        function show(file) {
+            const path = file.toString()
+            const slash = path.lastIndexOf("/")
+            folder = path === "" ? "" : path.slice(0, slash)
+            fileName = path === "" ? "" : decodeURIComponent(path.slice(slash + 1))
+            hideToast.restart()
+        }
+
+        visible: hideToast.running
+        z: 10
+        anchors.horizontalCenter: parent.horizontalCenter
+        anchors.bottom: parent.bottom
+        anchors.bottomMargin: win.inRecordings ? 124 : 20
+        width: toastRow.implicitWidth + 28
+        height: 54
+        radius: 9
+        color: colors.panel
+        border.color: colors.line
+
+        Timer {
+            id: hideToast
+            interval: 6000
+        }
+        RowLayout {
+            id: toastRow
+            anchors.centerIn: parent
+            spacing: 14
+            Column {
+                Text {
+                    text: photoToast.folder ? qsTr("Photo saved") : qsTr("Could not save the photo.")
+                    font.pixelSize: 13
+                    font.weight: Font.Medium
+                    color: photoToast.folder ? colors.text : colors.danger
+                }
+                Text {
+                    visible: photoToast.folder !== ""
+                    text: photoToast.fileName
+                    // The name comes from the recorder, so it can't be read as markup.
+                    textFormat: Text.PlainText
+                    font.pixelSize: 12
+                    color: colors.muted
+                }
+            }
+            AppButton {
+                visible: photoToast.folder !== ""
+                text: qsTr("Open folder")
+                edge: colors.line
+                onClicked: Qt.openUrlExternally(photoToast.folder)
+            }
         }
     }
 }

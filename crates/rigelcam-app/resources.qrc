@@ -10,6 +10,7 @@
     <file alias="icon-128.png">../../assets/branding/png/rigelcam-128.png</file>
     <file alias="icon-256.png">../../assets/branding/png/rigelcam-256.png</file>
     <file>icons/plus.svg</file>
+    <file>icons/camera.svg</file>
     <file>icons/sun.svg</file>
     <file>icons/moon.svg</file>
     <file>icons/edit.svg</file>

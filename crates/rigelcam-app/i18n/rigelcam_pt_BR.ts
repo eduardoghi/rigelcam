@@ -303,5 +303,21 @@
         <source>Close</source>
         <translation>Fechar</translation>
     </message>
+    <message>
+        <source>Save photo</source>
+        <translation>Salvar foto</translation>
+    </message>
+    <message>
+        <source>Photo saved</source>
+        <translation>Foto salva</translation>
+    </message>
+    <message>
+        <source>Could not save the photo.</source>
+        <translation>Não foi possível salvar a foto.</translation>
+    </message>
+    <message>
+        <source>Open folder</source>
+        <translation>Abrir pasta</translation>
+    </message>
 </context>
 </TS>

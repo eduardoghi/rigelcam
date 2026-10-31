@@ -1,6 +1,13 @@
+#include <QDir>
+#include <QFile>
 #include <QGuiApplication>
 #include <QIcon>
+#include <QImage>
+#include <QImageWriter>
 #include <QLocale>
+#include <QRegularExpression>
+#include <QStandardPaths>
+#include <QThreadPool>
 #include <QTranslator>
 #include <QtQml/QQmlEngine>
 #include "video_item.h"
@@ -21,6 +28,7 @@
 
 #include <cstdio>
 #include <map>
+#include <utility>
 
 namespace {
 
@@ -87,7 +95,44 @@ void release(RigelFrame &frame) {
     frame = RigelFrame{};
 }
 
+// Returns the path, or an empty string on failure. Runs off the render thread, since encoding takes
+// longer than a frame. Two photos in the same second get a number instead of overwriting each other.
+QString writePhoto(const QImage &image, QString name) {
+    const QString folder = QStandardPaths::writableLocation(QStandardPaths::PicturesLocation) + QStringLiteral("/Rigelcam");
+    if (!QDir().mkpath(folder)) return {};
+    // Camera names come from the recorder, so they can't choose the folder or hide the file.
+    static const QRegularExpression notAllowed(QStringLiteral("[<>:\"/\\\\|?*\\x00-\\x1f\\x7f]"));
+    name.replace(notAllowed, QStringLiteral("_"));
+    while (name.startsWith(u'.')) name.remove(0, 1);
+    name.truncate(150);
+    for (int copy = 1; copy < 100; copy++) {
+        const QString suffix = copy == 1 ? QString() : QStringLiteral(" (%1)").arg(copy);
+        QFile file(folder + u'/' + name + suffix + QStringLiteral(".jpg"));
+        if (!file.open(QIODevice::WriteOnly | QIODevice::NewOnly)) {
+            if (file.exists()) continue;
+            return {};
+        }
+        QImageWriter writer(&file, "jpeg");
+        writer.setQuality(95);
+        if (writer.write(image) && file.flush()) return file.fileName();
+        file.remove();
+        return {};
+    }
+    return {};
+}
+
 } // namespace
+
+// Reaches the item from the render thread and the writer, which can outlive it.
+struct PhotoLink {
+    QMutex mutex;
+    VideoItem *item = nullptr;
+
+    void report(const QUrl &file) {
+        QMutexLocker lock(&mutex);
+        if (item) QMetaObject::invokeMethod(item, "photoFinished", Qt::QueuedConnection, Q_ARG(QUrl, file));
+    }
+};
 
 // Owned by both the item and its node, so the item can free them on the render thread once its
 // stream stops. Only the render thread touches this.
@@ -128,7 +173,8 @@ private:
 
 class VideoNode : public QSGRenderNode {
 public:
-    explicit VideoNode(std::shared_ptr<VideoResources> resources) : m_res(std::move(resources)) {}
+    VideoNode(std::shared_ptr<VideoResources> resources, std::shared_ptr<PhotoLink> photoLink)
+        : m_res(std::move(resources)), m_photoLink(std::move(photoLink)) {}
     ~VideoNode() override { m_res->clear(); }
 
     void setFrame(const RigelFrame &frame, const QRectF &rect, const QRectF &view, float gamma) {
@@ -140,6 +186,8 @@ public:
             m_res->next = frame;
         }
     }
+
+    void requestPhoto(const QString &name) { m_photoName = name; }
 
     StateFlags changedStates() const override { return BlendState | DepthState | ScissorState; }
     RenderingFlags flags() const override { return BoundedRectRendering | OpaqueRendering; }
@@ -157,11 +205,15 @@ public:
             m_res->current = m_res->next;
             m_res->next = RigelFrame{};
         }
-        if (!m_res->current.release) return;
-        GLuint texture = textureFor(f, m_res->current);
-        if (!texture) return;
+        GLuint texture = m_res->current.release ? textureFor(f, m_res->current) : 0;
+        if (!texture) {
+            if (!m_photoName.isEmpty()) {
+                m_photoName.clear();
+                m_photoLink->report({});
+            }
+            return;
+        }
 
-        Program &p = program(f);
         const float w = float(m_rect.width()), h = float(m_rect.height());
         const float u0 = float(m_view.left()), u1 = float(m_view.right());
         const float v0 = float(m_view.top()), v1 = float(m_view.bottom());
@@ -170,6 +222,7 @@ public:
 
         f->glDisable(GL_BLEND);
         f->glDisable(GL_DEPTH_TEST);
+        if (!m_photoName.isEmpty()) takePhoto(f, texture);
         // The scene graph leaves the scissor of the last clipped item on, so the first video after
         // a clipped sidebar would be cut out entirely.
         if (state->scissorEnabled()) {
@@ -179,6 +232,12 @@ public:
         } else {
             f->glDisable(GL_SCISSOR_TEST);
         }
+        draw(f, texture, mvp, quad);
+    }
+
+private:
+    void draw(QOpenGLFunctions *f, GLuint texture, const QMatrix4x4 &mvp, const float (&quad)[16]) {
+        Program &p = program(f);
         f->glUseProgram(p.id);
         f->glUniformMatrix4fv(p.mvp, 1, GL_FALSE, mvp.constData());
         f->glUniform1i(p.tex, 0);
@@ -197,7 +256,52 @@ public:
         f->glBindTexture(GL_TEXTURE_EXTERNAL_OES, 0);
     }
 
-private:
+    // Draws the frame again at the size of the video, since the item is usually smaller, with the
+    // same shader as the screen so the photo gets the same colors.
+    void takePhoto(QOpenGLFunctions *f, GLuint texture) {
+        const QString name = std::exchange(m_photoName, QString());
+        const int width = qMax(1, qRound(m_res->current.width * m_view.width()));
+        const int height = qMax(1, qRound(m_res->current.height * m_view.height()));
+        QImage image(width, height, QImage::Format_RGBX8888);
+
+        GLint target = 0, viewport[4] = {};
+        f->glGetIntegerv(GL_FRAMEBUFFER_BINDING, &target);
+        f->glGetIntegerv(GL_VIEWPORT, viewport);
+        GLuint color = 0, framebuffer = 0;
+        f->glGenTextures(1, &color);
+        f->glBindTexture(GL_TEXTURE_2D, color);
+        f->glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        f->glBindTexture(GL_TEXTURE_2D, 0);
+        f->glGenFramebuffers(1, &framebuffer);
+        f->glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+        f->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, color, 0);
+        const bool ready = !image.isNull() && f->glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+        if (ready) {
+            const float u0 = float(m_view.left()), u1 = float(m_view.right());
+            const float v0 = float(m_view.top()), v1 = float(m_view.bottom());
+            // The first row glReadPixels returns is the bottom of the target, so the top of the
+            // video goes there and the image comes out upright.
+            const float quad[] = {-1, -1, u0, v0, 1, -1, u1, v0, -1, 1, u0, v1, 1, 1, u1, v1};
+            f->glViewport(0, 0, width, height);
+            f->glDisable(GL_SCISSOR_TEST);
+            draw(f, texture, QMatrix4x4(), quad);
+            f->glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, image.bits());
+        }
+        f->glBindFramebuffer(GL_FRAMEBUFFER, GLuint(target));
+        f->glViewport(viewport[0], viewport[1], viewport[2], viewport[3]);
+        f->glDeleteFramebuffers(1, &framebuffer);
+        f->glDeleteTextures(1, &color);
+
+        if (!ready) {
+            m_photoLink->report({});
+            return;
+        }
+        QThreadPool::globalInstance()->start([image, name, link = m_photoLink] {
+            const QString path = writePhoto(image, name);
+            link->report(path.isEmpty() ? QUrl() : QUrl::fromLocalFile(path));
+        });
+    }
+
     // The decoder recycles a fixed set of surfaces, so each one is imported only once.
     GLuint textureFor(QOpenGLFunctions *f, const RigelFrame &fr) {
         if (fr.generation != m_res->generation) {
@@ -258,6 +362,8 @@ private:
     }
 
     std::shared_ptr<VideoResources> m_res;
+    std::shared_ptr<PhotoLink> m_photoLink;
+    QString m_photoName;
     QRectF m_rect;
     QRectF m_view{0, 0, 1, 1};
     float m_gamma = 1;
@@ -266,7 +372,9 @@ private:
 
 } // namespace
 
-VideoItem::VideoItem(QQuickItem *parent) : QQuickItem(parent), m_resources(std::make_shared<VideoResources>()) {
+VideoItem::VideoItem(QQuickItem *parent)
+    : QQuickItem(parent), m_resources(std::make_shared<VideoResources>()), m_photoLink(std::make_shared<PhotoLink>()) {
+    m_photoLink->item = this;
     setFlag(ItemHasContents, true);
 }
 
@@ -274,6 +382,8 @@ VideoItem::~VideoItem() {
     // Stops the pipeline first, so that no streaming thread can still call setFrame on this item.
     if (m_destroyStream) m_destroyStream(m_stream);
     release(m_pending);
+    QMutexLocker lock(&m_photoLink->mutex);
+    m_photoLink->item = nullptr;
 }
 
 void VideoItem::setStream(void *stream, void (*destroy)(void *)) {
@@ -292,6 +402,16 @@ void VideoItem::setGamma(qreal gamma) {
     if (m_gamma == gamma) return;
     m_gamma = gamma;
     emit gammaChanged();
+    update();
+}
+
+void VideoItem::savePhoto(const QString &name) {
+    if (!m_hasVideo) {
+        emit photoFinished({});
+        return;
+    }
+    m_photoName = name;
+    // A paused recording sends no frames, so nothing else would render this item.
     update();
 }
 
@@ -330,7 +450,7 @@ void VideoItem::setFrame(const RigelFrame &frame) {
 
 QSGNode *VideoItem::updatePaintNode(QSGNode *old, UpdatePaintNodeData *) {
     auto *node = static_cast<VideoNode *>(old);
-    if (!node) node = new VideoNode(m_resources);
+    if (!node) node = new VideoNode(m_resources, m_photoLink);
     RigelFrame frame{};
     {
         QMutexLocker lock(&m_mutex);
@@ -341,6 +461,7 @@ QSGNode *VideoItem::updatePaintNode(QSGNode *old, UpdatePaintNodeData *) {
         }
     }
     node->setFrame(frame, QRectF(0, 0, width(), height()), m_view, float(m_gamma));
+    if (!m_photoName.isEmpty()) node->requestPhoto(std::exchange(m_photoName, QString()));
     node->markDirty(QSGNode::DirtyMaterial);
     return node;
 }

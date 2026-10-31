@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QtCore/QMutex>
+#include <QtCore/QUrl>
 #include <QtQuick/QQuickItem>
 #include <cstdint>
 #include <memory>
@@ -48,6 +49,7 @@ public:
 };
 
 struct VideoResources;
+struct PhotoLink;
 
 /// QML item that draws the latest DMABuf frame it received, imported as an external texture.
 class VideoItem : public QQuickItem {
@@ -71,6 +73,9 @@ public:
     Q_INVOKABLE void setStatus(bool hasVideo, bool signalLost);
     void setStream(void *stream, void (*destroy)(void *));
     void *stream() const { return m_stream; }
+    /// Saves what the item shows in the pictures folder, at the resolution of the video and with
+    /// the view and gamma applied. Reports through photoFinished. The name becomes the file name.
+    Q_INVOKABLE void savePhoto(const QString &name);
 
 signals:
     void statusChanged();
@@ -85,6 +90,8 @@ signals:
     void playbackEnded(int attempt);
     /// The recorder couldn't open a recording or stopped sending it.
     void playbackFailed(int attempt);
+    /// The file of the photo, or an empty URL if it couldn't be saved.
+    void photoFinished(const QUrl &file);
 
 protected:
     QSGNode *updatePaintNode(QSGNode *old, UpdatePaintNodeData *) override;
@@ -93,6 +100,8 @@ private:
     void releaseVideo();
 
     std::shared_ptr<VideoResources> m_resources;
+    std::shared_ptr<PhotoLink> m_photoLink;
+    QString m_photoName;
     QMutex m_mutex;
     RigelFrame m_pending{};
     bool m_hasPending = false;
