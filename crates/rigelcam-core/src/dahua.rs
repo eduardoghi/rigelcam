@@ -1,5 +1,6 @@
 //! Client for the Dahua HTTP API, which answers plain `key=value` lines behind Digest auth.
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::io::Read;
 use std::net::Ipv4Addr;
@@ -9,6 +10,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use digest_auth::{AuthContext, WwwAuthenticateHeader};
+use md5::{Digest, Md5};
+use serde_json::{json, Value};
 use ureq::http::{Response, StatusCode};
 use ureq::Body;
 
@@ -225,19 +228,21 @@ impl Client {
             .ok_or_else(|| Error::Unexpected(body.clone()))
     }
 
-    /// Lists what a channel recorded on a day given as `YYYY-MM-DD`. The recorder answers an error
-    /// to a search that finds nothing, so an old day comes back empty.
+    /// Lists what a channel recorded on a day given as `YYYY-MM-DD`. An old day comes back empty.
     pub fn recordings(&self, channel: u32, date: &str) -> Result<Vec<Span>, Error> {
-        let created = self.get("/cgi-bin/mediaFileFind.cgi?action=factory.create")?;
-        let finder = parse_value(&created, "result")
-            .ok_or_else(|| Error::Unexpected(created.clone()))?
-            .to_owned();
-        let result = self.search_files(&finder, channel, date);
-        // Recorders allow few searches at a time, so this one is closed whatever happened.
-        let base = "/cgi-bin/mediaFileFind.cgi?action";
-        let _ = self.get(&format!("{base}=close&object={finder}"));
-        let _ = self.get(&format!("{base}=destroy&object={finder}"));
-        result
+        let finder = Finder::open(self)?;
+        if !finder.find(channel, date)? {
+            return Ok(Vec::new());
+        }
+        let mut spans = Vec::new();
+        loop {
+            let files = finder.next(SEARCH_PAGE)?;
+            let found = files.len();
+            spans.extend(files.iter().filter_map(|file| file.span_on(date)));
+            if found < SEARCH_PAGE {
+                return Ok(merge_spans(spans));
+            }
+        }
     }
 
     /// Tells which of the given days, as `YYYY-MM-DD`, have recordings of a channel, one at a time
@@ -249,70 +254,14 @@ impl Client {
         dates: impl IntoIterator<Item = &'a str>,
         mut found: impl FnMut(&str, bool) -> bool,
     ) -> Result<(), Error> {
-        let created = self.get("/cgi-bin/mediaFileFind.cgi?action=factory.create")?;
-        let finder = parse_value(&created, "result")
-            .ok_or_else(|| Error::Unexpected(created.clone()))?
-            .to_owned();
-        let mut result = Ok(());
+        let finder = Finder::open(self)?;
         for date in dates {
-            let answer = self.find_files(&finder, channel, date).and_then(|any| {
-                if !any {
-                    return Ok(false);
-                }
-                let body = self.get(&format!(
-                    "/cgi-bin/mediaFileFind.cgi?action=findNextFile&object={finder}&count=1"
-                ))?;
-                Ok(!parse_files(&body).is_empty())
-            });
-            match answer {
-                Ok(recorded) => {
-                    if !found(date, recorded) {
-                        break;
-                    }
-                }
-                Err(error) => {
-                    result = Err(error);
-                    break;
-                }
-            }
-        }
-        let base = "/cgi-bin/mediaFileFind.cgi?action";
-        let _ = self.get(&format!("{base}=close&object={finder}"));
-        let _ = self.get(&format!("{base}=destroy&object={finder}"));
-        result
-    }
-
-    /// Starts a search. The recorder answers an error to one that finds nothing.
-    fn find_files(&self, finder: &str, channel: u32, date: &str) -> Result<bool, Error> {
-        let path = format!(
-            "/cgi-bin/mediaFileFind.cgi?action=findFile&object={finder}&condition.Channel={channel}\
-             &condition.StartTime={date}%2000:00:00&condition.EndTime={date}%2023:59:59"
-        );
-        match self.get(&path) {
-            Ok(_) => Ok(true),
-            Err(Error::Status(400)) => Ok(false),
-            Err(error) => Err(error),
-        }
-    }
-
-    fn search_files(&self, finder: &str, channel: u32, date: &str) -> Result<Vec<Span>, Error> {
-        if !self.find_files(finder, channel, date)? {
-            return Ok(Vec::new());
-        }
-        let mut spans = Vec::new();
-        loop {
-            let body = self.get(&format!(
-                "/cgi-bin/mediaFileFind.cgi?action=findNextFile&object={finder}\
-                 &count={SEARCH_PAGE}"
-            ))?;
-            let files = parse_files(&body);
-            let found = files.len();
-            spans.extend(files.iter().filter_map(|file| file.span_on(date)));
-            if found < SEARCH_PAGE {
+            let recorded = finder.find(channel, date)? && !finder.next(1)?.is_empty();
+            if !found(date, recorded) {
                 break;
             }
         }
-        Ok(merge_spans(spans))
+        Ok(())
     }
 
     /// RTSP address of a recording, from `seconds` after the midnight of `date` until that day
@@ -360,6 +309,23 @@ impl Client {
 
     fn get(&self, path: &str) -> Result<String, Error> {
         Ok(self.send(path, false)?.body_mut().read_to_string()?)
+    }
+
+    fn post_rpc(&self, path: &str, request: &Value) -> Result<Value, Error> {
+        let url = format!("http://{}:{}{path}", self.host, self.http_port);
+        let mut response = self
+            .agent
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .send(request.to_string())?;
+        if response.status() != StatusCode::OK {
+            return Err(Error::Status(response.status().as_u16()));
+        }
+        let body = response.body_mut().read_to_string()?;
+        serde_json::from_str(&body).map_err(|_| {
+            let start: String = body.chars().take(200).collect();
+            Error::Unexpected(start)
+        })
     }
 
     fn send(&self, path: &str, long_body: bool) -> Result<Response<Body>, Error> {
@@ -426,6 +392,206 @@ impl Client {
             .respond(&context)
             .map(|answer| answer.to_header_string())
             .map_err(|e| Error::Challenge(e.to_string()))
+    }
+}
+
+/// A login session of the API the web interface uses, which is undocumented. Recorders log every
+/// CGI request as a login and hold few log entries, so a month of a calendar would push out days of
+/// history, while the calls of a session leave nothing in the log.
+struct Session<'a> {
+    client: &'a Client,
+    id: Value,
+    calls: Cell<u32>,
+}
+
+impl<'a> Session<'a> {
+    /// Logs in, or returns None when the recorder doesn't offer this or refuses it, which the CGI
+    /// path then answers for.
+    fn open(client: &'a Client) -> Option<Self> {
+        if client.refused.load(Ordering::Relaxed) {
+            return None;
+        }
+        let login = |password: &str, session: &Value| {
+            let params = json!({
+                "userName": client.user,
+                "password": password,
+                "clientType": "Web3.0",
+                "authorityType": "Default",
+                "passwordType": "Default",
+            });
+            client.post_rpc(
+                "/RPC2_Login",
+                &json!({"method": "global.login", "params": params, "id": 1, "session": session}),
+            )
+        };
+        let challenge = login("", &Value::Null).ok()?;
+        let params = challenge.get("params")?;
+        if params.get("encryption")?.as_str()? != "Default" {
+            return None;
+        }
+        let realm = params.get("realm")?.as_str()?;
+        let random = params.get("random")?.as_str()?;
+        let hash = login_hash(&client.user, &client.password, realm, random);
+        let session = challenge.get("session")?;
+        let answer = login(&hash, session).ok()?;
+        if answer.get("result")?.as_bool() != Some(true) {
+            return None;
+        }
+        Some(Self {
+            client,
+            id: answer.get("session").unwrap_or(session).clone(),
+            calls: Cell::new(1),
+        })
+    }
+
+    fn call(&self, method: &str, params: Value, object: &Value) -> Result<Value, Error> {
+        self.calls.set(self.calls.get() + 1);
+        self.client.post_rpc(
+            "/RPC2",
+            &json!({
+                "method": method,
+                "params": params,
+                "id": self.calls.get(),
+                "session": self.id,
+                "object": object,
+            }),
+        )
+    }
+}
+
+impl Drop for Session<'_> {
+    fn drop(&mut self) {
+        let _ = self.call("global.logout", Value::Null, &Value::Null);
+    }
+}
+
+/// `MD5(user:random:MD5(user:realm:password))`, in uppercase hexadecimal.
+fn login_hash(user: &str, password: &str, realm: &str, random: &str) -> String {
+    let md5 = |text: String| {
+        Md5::digest(text.as_bytes())
+            .iter()
+            .fold(String::new(), |hex, byte| hex + &format!("{byte:02X}"))
+    };
+    md5(format!(
+        "{user}:{random}:{}",
+        md5(format!("{user}:{realm}:{password}"))
+    ))
+}
+
+fn files_of(answer: &Value) -> Vec<RecordedFile> {
+    let time = |file: &Value, field: &str| {
+        file.get(field)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned()
+    };
+    answer
+        .pointer("/params/infos")
+        .and_then(Value::as_array)
+        .map(|files| {
+            files
+                .iter()
+                .map(|file| RecordedFile {
+                    start: time(file, "StartTime"),
+                    end: time(file, "EndTime"),
+                    event: file
+                        .get("Flags")
+                        .and_then(Value::as_array)
+                        .is_some_and(|flags| flags.iter().any(|flag| flag != "Timing")),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// A search on the recorder, closed when dropped because recorders allow few at a time.
+enum Finder<'a> {
+    Session { session: Session<'a>, object: Value },
+    Cgi { client: &'a Client, object: String },
+}
+
+impl<'a> Finder<'a> {
+    fn open(client: &'a Client) -> Result<Self, Error> {
+        if let Some(session) = Session::open(client) {
+            let created = session.call("mediaFileFind.factory.create", Value::Null, &Value::Null);
+            if let Some(object) = created
+                .ok()
+                .and_then(|answer| answer.get("result").cloned())
+            {
+                if object.as_u64().is_some_and(|object| object != 0) {
+                    return Ok(Self::Session { session, object });
+                }
+            }
+        }
+        let created = client.get("/cgi-bin/mediaFileFind.cgi?action=factory.create")?;
+        let object = parse_value(&created, "result")
+            .ok_or_else(|| Error::Unexpected(created.clone()))?
+            .to_owned();
+        Ok(Self::Cgi { client, object })
+    }
+
+    /// Starts a search of a day and tells whether it found anything.
+    fn find(&self, channel: u32, date: &str) -> Result<bool, Error> {
+        match self {
+            Self::Session { session, object } => {
+                let condition = json!({
+                    // Starts at 0 here, unlike everywhere else.
+                    "Channel": channel.saturating_sub(1),
+                    "StartTime": format!("{date} 00:00:00"),
+                    "EndTime": format!("{date} 23:59:59"),
+                    "Types": ["dav"],
+                    "VideoStream": "Main",
+                });
+                let params = json!({ "condition": condition });
+                let answer = session.call("mediaFileFind.findFile", params, object)?;
+                Ok(answer.get("result").and_then(Value::as_bool) == Some(true))
+            }
+            Self::Cgi { client, object } => {
+                let path = format!(
+                    "/cgi-bin/mediaFileFind.cgi?action=findFile&object={object}\
+                     &condition.Channel={channel}&condition.StartTime={date}%2000:00:00\
+                     &condition.EndTime={date}%2023:59:59"
+                );
+                // The recorder answers an error to a search that finds nothing.
+                match client.get(&path) {
+                    Ok(_) => Ok(true),
+                    Err(Error::Status(400)) => Ok(false),
+                    Err(error) => Err(error),
+                }
+            }
+        }
+    }
+
+    fn next(&self, count: usize) -> Result<Vec<RecordedFile>, Error> {
+        match self {
+            Self::Session { session, object } => {
+                let params = json!({ "count": count });
+                let answer = session.call("mediaFileFind.findNextFile", params, object)?;
+                Ok(files_of(&answer))
+            }
+            Self::Cgi { client, object } => {
+                let body = client.get(&format!(
+                    "/cgi-bin/mediaFileFind.cgi?action=findNextFile&object={object}&count={count}"
+                ))?;
+                Ok(parse_files(&body))
+            }
+        }
+    }
+}
+
+impl Drop for Finder<'_> {
+    fn drop(&mut self) {
+        match self {
+            Self::Session { session, object } => {
+                let _ = session.call("mediaFileFind.close", Value::Null, object);
+                let _ = session.call("mediaFileFind.destroy", Value::Null, object);
+            }
+            Self::Cgi { client, object } => {
+                let base = "/cgi-bin/mediaFileFind.cgi?action";
+                let _ = client.get(&format!("{base}=close&object={object}"));
+                let _ = client.get(&format!("{base}=destroy&object={object}"));
+            }
+        }
     }
 }
 
@@ -693,8 +859,45 @@ mod tests {
     }
 
     #[test]
+    fn hashes_a_login_as_the_recorder_expects() {
+        assert_eq!(
+            login_hash("admin", "secret", "realm", "123"),
+            "46A71A5D47175C033CE8E04E111C4492"
+        );
+    }
+
+    #[test]
+    fn reads_the_files_of_a_session() {
+        let answer = json!({"params": {"found": 2, "infos": [
+            {"StartTime": "2026-10-30 10:00:00", "EndTime": "2026-10-30 10:30:00", "Flags": ["Timing"]},
+            {"StartTime": "2026-10-30 10:30:00", "EndTime": "2026-10-30 11:00:00", "Flags": ["Event"]},
+        ]}});
+        let files = files_of(&answer);
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0].start, "2026-10-30 10:00:00");
+        assert!(!files[0].event);
+        assert!(files[1].event);
+        assert!(files_of(&json!({"result": false})).is_empty());
+    }
+
+    #[test]
+    fn a_recorder_without_sessions_is_searched_through_cgi() {
+        let (port, requests) = fake_recorder(
+            b"HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+        );
+        let client = Client::new("127.0.0.1", "admin", "secret").with_ports(port, 554);
+        assert!(matches!(
+            client.recordings(1, "2026-10-30"),
+            Err(Error::Status(404))
+        ));
+        // The login that failed, and then the CGI search.
+        assert_eq!(requests.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
     fn reads_where_each_camera_answers() {
-        let body = "table.RemoteDevice.uuid:System_CONFIG_NETCAMERA_INFO_0.Address=192.168.0.10\r\n\
+        let body =
+            "table.RemoteDevice.uuid:System_CONFIG_NETCAMERA_INFO_0.Address=192.168.0.10\r\n\
                     table.RemoteDevice.uuid:System_CONFIG_NETCAMERA_INFO_0.RtspPort=8554\r\n\
                     table.RemoteDevice.uuid:System_CONFIG_NETCAMERA_INFO_1.Address=10.0.0.2\r\n\
                     table.RemoteDevice.uuid:System_CONFIG_NETCAMERA_INFO_2.Address=0.0.0.0\r\n\

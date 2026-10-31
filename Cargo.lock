@@ -1623,6 +1623,7 @@ dependencies = [
  "digest_auth",
  "dirs",
  "keyring",
+ "md-5",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
