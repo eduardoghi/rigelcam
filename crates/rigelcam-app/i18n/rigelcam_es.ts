@@ -263,5 +263,13 @@
         <source>Pick a day</source>
         <translation>Elegir el día</translation>
     </message>
+    <message>
+        <source>Gamma</source>
+        <translation>Gamma</translation>
+    </message>
+    <message>
+        <source>Back to normal</source>
+        <translation>Volver a lo normal</translation>
+    </message>
 </context>
 </TS>

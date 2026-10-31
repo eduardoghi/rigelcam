@@ -55,6 +55,8 @@ class VideoItem : public QQuickItem {
     Q_PROPERTY(bool signalLost READ signalLost NOTIFY statusChanged)
     /// Part of the picture to show, in fractions of its size, which is how digital zoom works.
     Q_PROPERTY(QRectF view READ view WRITE setView NOTIFY viewChanged)
+    /// Lifts the midtones above 1 and lowers them below it, keeping black and white in place.
+    Q_PROPERTY(qreal gamma READ gamma WRITE setGamma NOTIFY gammaChanged)
 public:
     explicit VideoItem(QQuickItem *parent = nullptr);
     ~VideoItem() override;
@@ -63,6 +65,8 @@ public:
     bool signalLost() const { return m_signalLost; }
     QRectF view() const { return m_view; }
     void setView(const QRectF &view);
+    qreal gamma() const { return m_gamma; }
+    void setGamma(qreal gamma);
     Q_INVOKABLE void setStatus(bool hasVideo, bool signalLost);
     void setStream(void *stream, void (*destroy)(void *));
     void *stream() const { return m_stream; }
@@ -70,6 +74,7 @@ public:
 signals:
     void statusChanged();
     void viewChanged();
+    void gammaChanged();
     /// The recorder refused the user or password, and this stream stopped trying.
     void authRefused();
     /// Seconds of a recording played since the point it was opened at.
@@ -90,6 +95,7 @@ private:
     bool m_hasVideo = false;
     bool m_signalLost = false;
     QRectF m_view{0, 0, 1, 1};
+    qreal m_gamma = 1;
     void *m_stream = nullptr;
     void (*m_destroyStream)(void *) = nullptr;
 };

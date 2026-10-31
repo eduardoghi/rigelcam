@@ -31,12 +31,15 @@ const char *kVertex =
 const char *kFragment =
     "#version 100\n"
     "#extension GL_OES_EGL_image_external : require\n"
-    "precision mediump float; varying vec2 v; uniform samplerExternalOES tex;\n"
-    "void main() { gl_FragColor = texture2D(tex, v); }\n";
+    "precision mediump float; varying vec2 v; uniform samplerExternalOES tex; uniform float gamma;\n"
+    "void main() {\n"
+    "    vec4 color = texture2D(tex, v);\n"
+    "    gl_FragColor = gamma == 1.0 ? color : vec4(pow(color.rgb, vec3(1.0 / gamma)), color.a);\n"
+    "}\n";
 
 struct Program {
     GLuint id = 0;
-    GLint mvp = -1, tex = -1, pos = -1, uv = -1;
+    GLint mvp = -1, tex = -1, gamma = -1, pos = -1, uv = -1;
     GLuint vbo = 0;
 };
 
@@ -64,6 +67,7 @@ Program &program(QOpenGLFunctions *f) {
         f->glLinkProgram(p.id);
         p.mvp = f->glGetUniformLocation(p.id, "mvp");
         p.tex = f->glGetUniformLocation(p.id, "tex");
+        p.gamma = f->glGetUniformLocation(p.id, "gamma");
         p.pos = f->glGetAttribLocation(p.id, "pos");
         p.uv = f->glGetAttribLocation(p.id, "uv");
         f->glGenBuffers(1, &p.vbo);
@@ -127,9 +131,10 @@ public:
     explicit VideoNode(std::shared_ptr<VideoResources> resources) : m_res(std::move(resources)) {}
     ~VideoNode() override { m_res->clear(); }
 
-    void setFrame(const RigelFrame &frame, const QRectF &rect, const QRectF &view) {
+    void setFrame(const RigelFrame &frame, const QRectF &rect, const QRectF &view, float gamma) {
         m_rect = rect;
         m_view = view;
+        m_gamma = gamma;
         if (frame.release) {
             release(m_res->next);
             m_res->next = frame;
@@ -177,6 +182,7 @@ public:
         f->glUseProgram(p.id);
         f->glUniformMatrix4fv(p.mvp, 1, GL_FALSE, mvp.constData());
         f->glUniform1i(p.tex, 0);
+        f->glUniform1f(p.gamma, m_gamma);
         f->glActiveTexture(GL_TEXTURE0);
         f->glBindTexture(GL_TEXTURE_EXTERNAL_OES, texture);
         f->glBindBuffer(GL_ARRAY_BUFFER, p.vbo);
@@ -254,6 +260,7 @@ private:
     std::shared_ptr<VideoResources> m_res;
     QRectF m_rect;
     QRectF m_view{0, 0, 1, 1};
+    float m_gamma = 1;
     bool m_importFailed = false;
 };
 
@@ -278,6 +285,13 @@ void VideoItem::setView(const QRectF &view) {
     if (m_view == view) return;
     m_view = view;
     emit viewChanged();
+    update();
+}
+
+void VideoItem::setGamma(qreal gamma) {
+    if (m_gamma == gamma) return;
+    m_gamma = gamma;
+    emit gammaChanged();
     update();
 }
 
@@ -326,7 +340,7 @@ QSGNode *VideoItem::updatePaintNode(QSGNode *old, UpdatePaintNodeData *) {
             m_hasPending = false;
         }
     }
-    node->setFrame(frame, QRectF(0, 0, width(), height()), m_view);
+    node->setFrame(frame, QRectF(0, 0, width(), height()), m_view, float(m_gamma));
     node->markDirty(QSGNode::DirtyMaterial);
     return node;
 }

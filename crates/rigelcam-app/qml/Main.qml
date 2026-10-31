@@ -154,6 +154,58 @@ ApplicationWindow {
         onCentroidChanged: if (active) win.moveDrag(centroid.scenePosition)
     }
 
+    component GammaControl: RowLayout {
+        spacing: 6
+        Text {
+            font.pixelSize: 13
+            color: colors.text
+            text: qsTr("Gamma")
+        }
+        Slider {
+            id: gammaSlider
+            Layout.preferredWidth: 110
+            from: 0.5
+            to: 3
+            stepSize: 0.05
+            value: win.gamma
+            onMoved: win.gamma = value
+            background: Rectangle {
+                x: gammaSlider.leftPadding
+                y: (gammaSlider.height - height) / 2
+                width: gammaSlider.availableWidth
+                height: 4
+                radius: 2
+                color: colors.line
+                Rectangle {
+                    width: gammaSlider.visualPosition * parent.width
+                    height: parent.height
+                    radius: 2
+                    color: colors.accent
+                }
+            }
+            handle: Rectangle {
+                x: gammaSlider.leftPadding + gammaSlider.visualPosition * (gammaSlider.availableWidth - width)
+                y: (gammaSlider.height - height) / 2
+                width: 14
+                height: 14
+                radius: 7
+                color: gammaSlider.pressed ? colors.accentHover : colors.accent
+            }
+        }
+        AppButton {
+            id: gammaReset
+            text: win.gamma.toFixed(2)
+            implicitWidth: 44
+            leftPadding: 4
+            rightPadding: 4
+            onClicked: win.gamma = 1
+            AppToolTip {
+                visible: gammaReset.hovered
+                text: qsTr("Back to normal")
+            }
+        }
+    }
+
     component FormField: TextField {
         id: field
         Layout.fillWidth: true
@@ -221,6 +273,9 @@ ApplicationWindow {
     // Key of the camera shown alone after a double click, or empty for the whole grid.
     property string zoomed: ""
     property string zoomedName: ""
+    // Only for a camera seen alone, where someone is looking for detail. Not saved, because the
+    // right value depends on the camera and on the hour.
+    property real gamma: 1
     property var zoomedCamera: null
     readonly property bool fullScreen: visibility === Window.FullScreen
     // Where F11 goes back to, since the window may have been maximized or not.
@@ -1070,6 +1125,7 @@ ApplicationWindow {
                 readonly property bool shown: included && !win.inRecordings && (win.zoomed === "" || win.zoomed === key)
                 readonly property bool isMain: win.zoomed === key
                 view: isMain ? win.zoomView : Qt.rect(0, 0, 1, 1)
+                gamma: isMain ? win.gamma : 1
 
                 visible: shown
                 x: isMain ? 0 : (square % win.cols) * (cameraArea.cellWidth + 2)
@@ -1133,6 +1189,7 @@ ApplicationWindow {
                     anchors.fill: parent
                     visible: hasVideo && tile.isMain
                     view: tile.view
+                    gamma: tile.gamma
                     onAuthRefused: Qt.callLater(grid.recorderRefused, tile.recorder)
                     Connections {
                         target: tile
@@ -1392,6 +1449,7 @@ ApplicationWindow {
                     text: zoomIn.text
                 }
             }
+            GammaControl { Layout.leftMargin: 8 }
         }
     }
 
@@ -1515,6 +1573,7 @@ ApplicationWindow {
 
         VideoItem {
             id: video
+            gamma: win.gamma
             anchors.left: parent.left
             anchors.right: parent.right
             anchors.top: parent.top
@@ -1674,6 +1733,8 @@ ApplicationWindow {
                 }
 
                 Item { Layout.fillWidth: true }
+
+                GammaControl { Layout.rightMargin: 8 }
 
                 Repeater {
                     model: [1, 2, 4, 8]
