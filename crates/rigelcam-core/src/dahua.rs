@@ -19,11 +19,23 @@ pub enum Error {
     Unexpected(String),
 }
 
+/// Files asked for at a time, which is about two days of a channel recording all the time.
+const SEARCH_PAGE: usize = 100;
+
 /// A recorder channel. `number` starts at 1, as in the RTSP URLs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Channel {
     pub number: u32,
     pub name: String,
+}
+
+/// A continuous recording of a day, in seconds since its midnight on the clock of the recorder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Span {
+    pub start: u32,
+    pub end: u32,
+    /// Saved because of an event, such as motion, and not just the regular schedule.
+    pub event: bool,
 }
 
 /// Which of the two streams of a channel to open.
@@ -95,6 +107,70 @@ impl Client {
         Ok(channels)
     }
 
+    /// Current time of the recorder as `YYYY-MM-DD HH:MM:SS`, which can differ from this computer
+    /// and is the one its recordings use.
+    pub fn clock(&self) -> Result<String, Error> {
+        let body = self.get("/cgi-bin/global.cgi?action=getCurrentTime")?;
+        parse_value(&body, "result")
+            .map(str::to_owned)
+            .ok_or_else(|| Error::Unexpected(body.clone()))
+    }
+
+    /// Lists what a channel recorded on a day given as `YYYY-MM-DD`. The recorder answers an error
+    /// to a search that finds nothing, so an old day comes back empty.
+    pub fn recordings(&self, channel: u32, date: &str) -> Result<Vec<Span>, Error> {
+        let created = self.get("/cgi-bin/mediaFileFind.cgi?action=factory.create")?;
+        let finder = parse_value(&created, "result")
+            .ok_or_else(|| Error::Unexpected(created.clone()))?
+            .to_owned();
+        let result = self.search_files(&finder, channel, date);
+        // Recorders allow few searches at a time, so this one is closed whatever happened.
+        let base = "/cgi-bin/mediaFileFind.cgi?action";
+        let _ = self.get(&format!("{base}=close&object={finder}"));
+        let _ = self.get(&format!("{base}=destroy&object={finder}"));
+        result
+    }
+
+    fn search_files(&self, finder: &str, channel: u32, date: &str) -> Result<Vec<Span>, Error> {
+        let path = format!(
+            "/cgi-bin/mediaFileFind.cgi?action=findFile&object={finder}&condition.Channel={channel}\
+             &condition.StartTime={date}%2000:00:00&condition.EndTime={date}%2023:59:59"
+        );
+        match self.get(&path) {
+            Ok(_) => {}
+            Err(Error::Status(400)) => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+        }
+        let mut spans = Vec::new();
+        loop {
+            let body = self.get(&format!(
+                "/cgi-bin/mediaFileFind.cgi?action=findNextFile&object={finder}\
+                 &count={SEARCH_PAGE}"
+            ))?;
+            let files = parse_files(&body);
+            let found = files.len();
+            spans.extend(files.iter().filter_map(|file| file.span_on(date)));
+            if found < SEARCH_PAGE {
+                break;
+            }
+        }
+        Ok(merge_spans(spans))
+    }
+
+    /// RTSP address of a recording, from `seconds` after the midnight of `date` until that day
+    /// ends. The time goes in the address because the positions of the stream count only
+    /// recorded time, so seeking with them would land later after every gap. Recordings exist
+    /// only in the main stream, and asking for the substream is an error.
+    pub fn playback_url(&self, channel: u32, date: &str, seconds: u32) -> String {
+        let day = date.replace('-', "_");
+        let (hours, minutes, seconds) = (seconds / 3600, seconds / 60 % 60, seconds % 60);
+        format!(
+            "rtsp://{}:{}/cam/playback?channel={channel}\
+             &starttime={day}_{hours:02}_{minutes:02}_{seconds:02}&endtime={day}_23_59_59",
+            self.host, self.rtsp_port
+        )
+    }
+
     /// RTSP address of the live stream. It has no credentials, so it is safe to log.
     pub fn live_url(&self, channel: u32, stream: Stream) -> String {
         let subtype = match stream {
@@ -144,6 +220,91 @@ fn parse_value<'a>(body: &'a str, key: &str) -> Option<&'a str> {
         .find_map(|(k, v)| (k == key).then_some(v))
 }
 
+/// One entry of a search, with times as `YYYY-MM-DD HH:MM:SS`.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct RecordedFile {
+    start: String,
+    end: String,
+    event: bool,
+}
+
+fn seconds_of(time: &str) -> Option<u32> {
+    let (_, clock) = time.split_once(' ')?;
+    let mut parts = clock.split(':').map(|part| part.parse::<u32>().ok());
+    Some(parts.next()?? * 3600 + parts.next()?? * 60 + parts.next()??)
+}
+
+impl RecordedFile {
+    /// The part of this file on a day, since a file can cross midnight.
+    fn span_on(&self, date: &str) -> Option<Span> {
+        let day_of = |time: &str| time.split(' ').next().unwrap_or_default().to_owned();
+        // The format sorts like the dates it holds.
+        if day_of(&self.end).as_str() < date || day_of(&self.start).as_str() > date {
+            return None;
+        }
+        let on_day = |time: &str| time.starts_with(date);
+        let start = if on_day(&self.start) {
+            seconds_of(&self.start)?
+        } else {
+            0
+        };
+        let end = if on_day(&self.end) {
+            seconds_of(&self.end)?
+        } else {
+            86_400
+        };
+        (start < end).then_some(Span {
+            start,
+            end,
+            event: self.event,
+        })
+    }
+}
+
+fn parse_files(body: &str) -> Vec<RecordedFile> {
+    let mut files: Vec<(u32, RecordedFile)> = Vec::new();
+    for line in body.lines() {
+        let Some((key, value)) = line.trim_end().split_once('=') else {
+            continue;
+        };
+        let Some(rest) = key.strip_prefix("items[") else {
+            continue;
+        };
+        let Some((index, field)) = rest.split_once("].") else {
+            continue;
+        };
+        let Ok(index) = index.parse::<u32>() else {
+            continue;
+        };
+        if files.last().is_none_or(|(last, _)| *last != index) {
+            files.push((index, RecordedFile::default()));
+        }
+        let file = &mut files.last_mut().unwrap().1;
+        match field {
+            "StartTime" => file.start = value.to_owned(),
+            "EndTime" => file.end = value.to_owned(),
+            _ if field.starts_with("Flags[") && value != "Timing" => file.event = true,
+            _ => {}
+        }
+    }
+    files.into_iter().map(|(_, file)| file).collect()
+}
+
+/// Joins recordings that touch, since recorders split a continuous day in files of minutes.
+fn merge_spans(mut spans: Vec<Span>) -> Vec<Span> {
+    spans.sort_by_key(|span| span.start);
+    let mut merged: Vec<Span> = Vec::new();
+    for span in spans {
+        match merged.last_mut() {
+            Some(last) if last.event == span.event && span.start <= last.end + 1 => {
+                last.end = last.end.max(span.end);
+            }
+            _ => merged.push(span),
+        }
+    }
+    merged
+}
+
 fn parse_channel_titles(body: &str) -> Vec<Channel> {
     let mut channels: Vec<Channel> = body
         .lines()
@@ -178,6 +339,63 @@ fn parse_disabled_cameras(body: &str) -> Vec<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const FILES: &str = "found=3\r\n\
+        items[0].Channel=2\r\n\
+        items[0].StartTime=2026-10-29 23:55:00\r\n\
+        items[0].EndTime=2026-10-30 00:08:22\r\n\
+        items[0].Flags[0]=Timing\r\n\
+        items[1].StartTime=2026-10-30 00:08:22\r\n\
+        items[1].EndTime=2026-10-30 00:20:00\r\n\
+        items[1].Flags[0]=Timing\r\n\
+        items[2].StartTime=2026-10-30 10:00:00\r\n\
+        items[2].EndTime=2026-10-30 10:05:30\r\n\
+        items[2].Flags[0]=Event\r\n";
+
+    #[test]
+    fn days_come_as_merged_spans_cut_at_midnight() {
+        let files = parse_files(FILES);
+        assert_eq!(files.len(), 3);
+        let spans = files
+            .iter()
+            .filter_map(|f| f.span_on("2026-10-30"))
+            .collect();
+        assert_eq!(
+            merge_spans(spans),
+            vec![
+                Span {
+                    start: 0,
+                    end: 1200,
+                    event: false
+                },
+                Span {
+                    start: 36_000,
+                    end: 36_330,
+                    event: true
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_file_on_another_day_adds_nothing() {
+        let file = RecordedFile {
+            start: "2026-10-29 10:00:00".to_owned(),
+            end: "2026-10-29 10:05:00".to_owned(),
+            event: false,
+        };
+        assert_eq!(file.span_on("2026-10-30"), None);
+    }
+
+    #[test]
+    fn playback_starts_at_the_time_asked_for() {
+        let client = Client::new("recorder.local", "admin", "secret");
+        assert_eq!(
+            client.playback_url(3, "2026-10-30", 36_005),
+            "rtsp://recorder.local:554/cam/playback?channel=3\
+             &starttime=2026_10_30_10_00_05&endtime=2026_10_30_23_59_59"
+        );
+    }
 
     #[test]
     fn ignores_the_proxy_of_the_system() {
