@@ -211,6 +211,9 @@ fn run(shared: Arc<Shared>) {
     let mut retry_delay = Duration::from_secs(2);
     // A camera that stays offline fails on every retry, so only a new reason reaches the log.
     let mut last_reason = String::new();
+    // A recorder can answer 404 once and open the camera on the next try, so a source that has not
+    // shown a picture reads as connecting until it fails again.
+    let mut failed_revision = None;
     loop {
         // Also after an end or a failure, when the item can let go of its last frames.
         let idle = shared.control.lock().unwrap().source.is_none();
@@ -259,7 +262,8 @@ fn run(shared: Arc<Shared>) {
                 received_video,
                 reason,
             } => {
-                shared.set_status(false, true);
+                shared.set_status(false, received_video || failed_revision == Some(revision));
+                failed_revision = Some(revision);
                 if source.recording {
                     eprintln!("{} ({reason})", source.url);
                     shared.report_ended(received_video && reason == STREAM_ENDED, source.attempt);
