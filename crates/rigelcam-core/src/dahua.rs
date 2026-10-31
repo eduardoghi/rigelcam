@@ -2,6 +2,7 @@
 
 use std::time::Duration;
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use digest_auth::{AuthContext, WwwAuthenticateHeader};
@@ -57,6 +58,8 @@ pub struct Client {
     /// The last Digest challenge, answered again without asking for a new one. Otherwise every
     /// request costs two round trips, which adds up in a search of many days.
     challenge: Mutex<Option<WwwAuthenticateHeader>>,
+    /// The recorder refused the password, so this client stops talking to it.
+    refused: AtomicBool,
 }
 
 impl Client {
@@ -77,6 +80,7 @@ impl Client {
             user: user.to_owned(),
             password: password.to_owned(),
             challenge: Mutex::new(None),
+            refused: AtomicBool::new(false),
             agent,
         }
     }
@@ -239,15 +243,18 @@ impl Client {
     }
 
     fn get(&self, path: &str) -> Result<String, Error> {
+        // Recorders lock a user after a few wrong passwords, and a search makes many requests.
+        if self.refused.load(Ordering::Relaxed) {
+            return Err(Error::Unauthorized);
+        }
         let url = format!("http://{}:{}{path}", self.host, self.http_port);
-        let saved = self.challenge.lock().unwrap().as_mut().map(|prompt| {
-            let context = AuthContext::new(self.user.as_str(), self.password.as_str(), path);
-            prompt
-                .respond(&context)
-                .map(|answer| answer.to_header_string())
-        });
+        let saved = self.challenge.lock().unwrap().take();
+        let mut prompt = saved;
+        let answer = prompt
+            .as_mut()
+            .and_then(|prompt| self.answer(prompt, path).ok());
         let mut request = self.agent.get(&url);
-        if let Some(Ok(answer)) = saved {
+        if let Some(answer) = answer {
             request = request.header("Authorization", answer);
         }
         let mut response = request.call()?;
@@ -258,14 +265,10 @@ impl Client {
                 .and_then(|value| value.to_str().ok())
                 .ok_or_else(|| Error::Challenge("no WWW-Authenticate header".to_owned()))?
                 .to_owned();
-            let mut prompt =
+            let mut fresh =
                 digest_auth::parse(&challenge).map_err(|e| Error::Challenge(e.to_string()))?;
-            let context = AuthContext::new(self.user.as_str(), self.password.as_str(), path);
-            let answer = prompt
-                .respond(&context)
-                .map_err(|e| Error::Challenge(e.to_string()))?
-                .to_header_string();
-            *self.challenge.lock().unwrap() = Some(prompt);
+            let answer = self.answer(&mut fresh, path)?;
+            prompt = Some(fresh);
             response = self
                 .agent
                 .get(&url)
@@ -273,10 +276,28 @@ impl Client {
                 .call()?;
         }
         match response.status() {
+            StatusCode::OK | StatusCode::BAD_REQUEST => {
+                // Only a challenge that worked is worth keeping.
+                *self.challenge.lock().unwrap() = prompt;
+            }
+            StatusCode::UNAUTHORIZED => {
+                self.refused.store(true, Ordering::Relaxed);
+                return Err(Error::Unauthorized);
+            }
+            _ => {}
+        }
+        match response.status() {
             StatusCode::OK => Ok(response.body_mut().read_to_string()?),
-            StatusCode::UNAUTHORIZED => Err(Error::Unauthorized),
             other => Err(Error::Status(other.as_u16())),
         }
+    }
+
+    fn answer(&self, prompt: &mut WwwAuthenticateHeader, path: &str) -> Result<String, Error> {
+        let context = AuthContext::new(self.user.as_str(), self.password.as_str(), path);
+        prompt
+            .respond(&context)
+            .map(|answer| answer.to_header_string())
+            .map_err(|e| Error::Challenge(e.to_string()))
     }
 }
 
@@ -467,6 +488,38 @@ mod tests {
     fn ignores_the_proxy_of_the_system() {
         let client = Client::new("recorder.local", "admin", "secret");
         assert!(client.agent.config().proxy().is_none());
+    }
+
+    #[test]
+    fn a_refused_password_stops_all_further_requests() {
+        use std::io::{Read, Write};
+        use std::sync::atomic::AtomicUsize;
+        use std::sync::Arc;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let counter = requests.clone();
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let mut buffer = [0; 2048];
+                let _ = stream.read(&mut buffer);
+                counter.fetch_add(1, Ordering::Relaxed);
+                let _ = stream.write_all(
+                    b"HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Length: 0\r\n\
+                      WWW-Authenticate: Digest realm=\"x\", qop=\"auth\", nonce=\"n\"\r\n\r\n",
+                );
+            }
+        });
+        let client = Client::new("127.0.0.1", "admin", "wrong").with_ports(port, 554);
+        assert!(matches!(client.clock(), Err(Error::Unauthorized)));
+        let tried = requests.load(Ordering::Relaxed);
+        assert!(tried <= 2, "{tried}");
+        assert!(matches!(
+            client.recordings(1, "2026-10-30"),
+            Err(Error::Unauthorized)
+        ));
+        assert_eq!(requests.load(Ordering::Relaxed), tried);
     }
 
     #[test]

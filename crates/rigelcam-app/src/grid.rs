@@ -165,7 +165,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use cxx_qt::{CxxQtType, Threading};
+use cxx_qt::{CxxQtThread, CxxQtType, Threading};
 use cxx_qt_lib::QString;
 use rigelcam_core::dahua::{Channel, Client, Error as RecorderError, Stream};
 use rigelcam_core::layout::{CameraId, Layout};
@@ -213,6 +213,12 @@ fn recorder_message(error: &RecorderError) -> String {
 
 const FIRST_RETRY_DELAY: Duration = Duration::from_secs(5);
 const MAX_RETRY_DELAY: Duration = Duration::from_secs(60);
+
+fn report_refused(thread: &CxxQtThread<qobject::CameraGrid>, recorder: i32) {
+    let _ = thread.queue(move |grid: Pin<&mut qobject::CameraGrid>| {
+        grid.recorder_refused(recorder);
+    });
+}
 
 fn camera_id(recorder: i32, channel: i32) -> CameraId {
     CameraId {
@@ -588,8 +594,14 @@ impl qobject::CameraGrid {
         let thread = self.qt_thread();
         std::thread::spawn(move || {
             let client = connection.client();
-            let today = client.clock().unwrap_or_default();
-            let today = today.split(' ').next().unwrap_or_default().to_owned();
+            let today = match client.clock() {
+                Ok(now) => now.split(' ').next().unwrap_or_default().to_owned(),
+                Err(RecorderError::Unauthorized) => {
+                    report_refused(&thread, recorder);
+                    return;
+                }
+                Err(_) => String::new(),
+            };
             // From the end, which is what someone looking for a recent event wants first.
             let dates: Vec<String> = (1..=31)
                 .rev()
@@ -598,7 +610,7 @@ impl qobject::CameraGrid {
                 .collect();
             let mut days: Vec<u32> = Vec::new();
             let key = format!("{recorder}:{channel}:{month}");
-            let _ = client.recorded_days(
+            let result = client.recorded_days(
                 channel as u32,
                 dates.iter().map(String::as_str),
                 |date, recorded| {
@@ -615,7 +627,11 @@ impl qobject::CameraGrid {
                     true
                 },
             );
-            if latest.load(Ordering::Relaxed) == search {
+            if let Err(RecorderError::Unauthorized) = result {
+                report_refused(&thread, recorder);
+                return;
+            }
+            if result.is_ok() && latest.load(Ordering::Relaxed) == search {
                 let text = json!({"key": key, "days": days, "done": true}).to_string();
                 let _ = thread.queue(move |grid: Pin<&mut qobject::CameraGrid>| {
                     grid.set_recorded_days(QString::from(text.as_str()));
