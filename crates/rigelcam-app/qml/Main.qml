@@ -239,6 +239,7 @@ ApplicationWindow {
     // "live" or "recordings", which stops the live cameras to free the network and the decoder.
     property string mode: "live"
     readonly property bool inRecordings: mode === "recordings"
+    readonly property bool playerKeys: inRecordings && playback.spans.length > 0 && !addDialog.visible && !removeDialog.visible
     // The camera being watched in the recordings: { recorder, number, name }, or null.
     property var playbackCamera: null
     // The camera being dragged to a square.
@@ -375,16 +376,23 @@ ApplicationWindow {
         }
     }
 
-    // Text fields keep these keys for their cursor, so they work in the search box as usual.
+    // Without this, Space presses whatever button was clicked last. Text fields keep it, like the
+    // arrows, so they work in the search box as usual.
+    Shortcut {
+        sequence: "Space"
+        enabled: win.playerKeys
+        onActivated: playback.togglePlaying()
+    }
+
     Shortcut {
         sequence: "Left"
-        enabled: win.inRecordings && playback.spans.length > 0
+        enabled: win.playerKeys
         onActivated: playback.seek(playback.position - 10)
     }
 
     Shortcut {
         sequence: "Right"
-        enabled: win.inRecordings && playback.spans.length > 0
+        enabled: win.playerKeys
         onActivated: playback.seek(playback.position + 10)
     }
 
