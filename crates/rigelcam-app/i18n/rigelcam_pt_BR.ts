@@ -271,5 +271,9 @@
         <source>Back to normal</source>
         <translation>Voltar ao normal</translation>
     </message>
+    <message>
+        <source>Could not open this recording. Try another time on the bar.</source>
+        <translation>Não foi possível abrir esta gravação. Tente outro horário na barra.</translation>
+    </message>
 </context>
 </TS>

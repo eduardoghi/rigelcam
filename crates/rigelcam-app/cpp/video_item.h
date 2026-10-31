@@ -34,6 +34,7 @@ void rigel_item_set_status(void *item, bool has_video, bool signal_lost);
 void rigel_item_auth_refused(void *item);
 void rigel_item_position(void *item, double seconds);
 void rigel_item_ended(void *item);
+void rigel_item_failed(void *item);
 void rigel_item_set_stream(void *item, void *stream, void (*destroy)(void *));
 void *rigel_item_stream(void *item);
 }
@@ -81,6 +82,8 @@ signals:
     void playbackPosition(double seconds);
     /// The recording reached the end of what the recorder has.
     void playbackEnded();
+    /// The recorder couldn't open a recording or stopped sending it.
+    void playbackFailed();
 
 protected:
     QSGNode *updatePaintNode(QSGNode *old, UpdatePaintNodeData *) override;

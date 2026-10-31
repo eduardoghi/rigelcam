@@ -18,6 +18,7 @@ const DRM_FORMAT_NV12: u32 = 0x3231_564e;
 /// A stream that stops sending frames without an error counts as lost after this long.
 const STALL_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_RETRY_DELAY: Duration = Duration::from_secs(30);
+const STREAM_ENDED: &str = "the stream ended";
 /// How often a recording tells where it is, which is enough for a moving bar.
 const POSITION_INTERVAL: Duration = Duration::from_millis(250);
 
@@ -44,6 +45,7 @@ extern "C" {
     fn rigel_item_auth_refused(item: *mut c_void);
     fn rigel_item_position(item: *mut c_void, seconds: f64);
     fn rigel_item_ended(item: *mut c_void);
+    fn rigel_item_failed(item: *mut c_void);
 }
 
 extern "C" fn release_sample(owner: *mut c_void) {
@@ -94,10 +96,17 @@ impl Shared {
         }
     }
 
-    fn report_ended(&self) {
+    fn report_ended(&self, cleanly: bool) {
         let item = self.item.lock().unwrap();
         if *item != 0 {
-            unsafe { rigel_item_ended(*item as *mut c_void) };
+            let item = *item as *mut c_void;
+            unsafe {
+                if cleanly {
+                    rigel_item_ended(item);
+                } else {
+                    rigel_item_failed(item);
+                }
+            }
         }
     }
 
@@ -226,7 +235,7 @@ fn run(shared: Arc<Shared>) {
                 shared.set_status(false, true);
                 if source.recording {
                     eprintln!("{} ({reason})", source.url);
-                    shared.report_ended();
+                    shared.report_ended(received_video && reason == STREAM_ENDED);
                     let guard = shared.control.lock().unwrap();
                     drop(
                         shared
@@ -342,7 +351,7 @@ fn play(shared: &Arc<Shared>, source: &Source, revision: u64, generation: u64) -
                     gst::MessageView::Eos(_) => {
                         break Outcome::Lost {
                             received_video: received_video.load(Ordering::Relaxed),
-                            reason: "the stream ended".to_owned(),
+                            reason: STREAM_ENDED.to_owned(),
                         };
                     }
                     _ => {}

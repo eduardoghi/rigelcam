@@ -412,6 +412,10 @@ extern "C" void rigel_item_ended(void *item) {
     QMetaObject::invokeMethod(static_cast<VideoItem *>(item), "playbackEnded", Qt::QueuedConnection);
 }
 
+extern "C" void rigel_item_failed(void *item) {
+    QMetaObject::invokeMethod(static_cast<VideoItem *>(item), "playbackFailed", Qt::QueuedConnection);
+}
+
 extern "C" void rigel_item_auth_refused(void *item) {
     QMetaObject::invokeMethod(static_cast<VideoItem *>(item), "authRefused", Qt::QueuedConnection);
 }

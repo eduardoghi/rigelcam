@@ -1468,6 +1468,7 @@ ApplicationWindow {
         property string today: ""
         property int rate: 1
         property bool playing: false
+        property bool failed: false
         // Where a pipeline was opened, and where the bar is.
         property int openedAt: 0
         property real position: 0
@@ -1514,6 +1515,7 @@ ApplicationWindow {
         function stop() {
             playing = false
             seeking = false
+            failed = false
             grid.show(video, 0, 0, false, false)
         }
 
@@ -1531,6 +1533,7 @@ ApplicationWindow {
             if (target < 0 || !win.playbackCamera)
                 return
             position = target
+            failed = false
             openedAt = Math.floor(target)
             seeking = true
             playing = true
@@ -1591,14 +1594,27 @@ ApplicationWindow {
                 playback.position = playback.timeAfter(seconds)
             }
             onPlaybackEnded: playback.playing = false
+            onPlaybackFailed: {
+                playback.playing = false
+                playback.seeking = false
+                playback.failed = true
+            }
         }
 
         Label {
             anchors.centerIn: video
-            visible: !win.playbackCamera || playback.spans.length === 0
+            visible: !win.playbackCamera || playback.spans.length === 0 || playback.failed
+            padding: 12
             font.pixelSize: 14
-            color: colors.muted
-            text: win.playbackCamera ? qsTr("No recordings on this day.") : qsTr("Double-click a camera to see its recordings.")
+            color: playback.failed ? colors.danger : colors.muted
+            background: Rectangle {
+                visible: playback.failed
+                radius: 8
+                color: colors.panel
+            }
+            text: !win.playbackCamera ? qsTr("Double-click a camera to see its recordings.")
+                : playback.spans.length === 0 ? qsTr("No recordings on this day.")
+                : qsTr("Could not open this recording. Try another time on the bar.")
         }
 
         Rectangle {
