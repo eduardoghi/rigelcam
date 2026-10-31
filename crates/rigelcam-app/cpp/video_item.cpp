@@ -11,6 +11,8 @@
 #include <QtGui/QOpenGLFunctions>
 #include <QtGui/QSurfaceFormat>
 #include <QtQml/qqml.h>
+#include <QtCore/QRunnable>
+#include <QtQuick/QQuickWindow>
 #include <QtQuick/QSGRenderNode>
 #include <sys/stat.h>
 
@@ -78,20 +80,56 @@ void release(RigelFrame &frame) {
     frame = RigelFrame{};
 }
 
+} // namespace
+
+// Owned by both the item and its node, so the item can free them on the render thread once its
+// stream stops. Only the render thread touches this.
+struct VideoResources {
+    RigelFrame next{}, current{}, previous{};
+    uint64_t generation = 0;
+    std::map<ino_t, Imported> cache;
+
+    void clearCache() {
+        auto *context = QOpenGLContext::currentContext();
+        if (!context) return;
+        static auto destroyImage = reinterpret_cast<PFNEGLDESTROYIMAGEKHRPROC>(eglGetProcAddress("eglDestroyImageKHR"));
+        for (auto &[inode, imported] : cache) {
+            context->functions()->glDeleteTextures(1, &imported.texture);
+            destroyImage(eglGetCurrentDisplay(), imported.image);
+        }
+        cache.clear();
+    }
+
+    void clear() {
+        clearCache();
+        release(next);
+        release(current);
+        release(previous);
+    }
+};
+
+namespace {
+
+class ClearVideoJob : public QRunnable {
+public:
+    explicit ClearVideoJob(std::shared_ptr<VideoResources> resources) : m_resources(std::move(resources)) {}
+    void run() override { m_resources->clear(); }
+
+private:
+    std::shared_ptr<VideoResources> m_resources;
+};
+
 class VideoNode : public QSGRenderNode {
 public:
-    ~VideoNode() override {
-        release(m_next);
-        release(m_current);
-        release(m_previous);
-    }
+    explicit VideoNode(std::shared_ptr<VideoResources> resources) : m_res(std::move(resources)) {}
+    ~VideoNode() override { m_res->clear(); }
 
     void setFrame(const RigelFrame &frame, const QRectF &rect, const QRectF &view) {
         m_rect = rect;
         m_view = view;
         if (frame.release) {
-            release(m_next);
-            m_next = frame;
+            release(m_res->next);
+            m_res->next = frame;
         }
     }
 
@@ -99,20 +137,20 @@ public:
     RenderingFlags flags() const override { return BoundedRectRendering | OpaqueRendering; }
     QRectF rect() const override { return m_rect; }
 
-    void releaseResources() override { clearCache(); }
+    void releaseResources() override { m_res->clearCache(); }
 
     void render(const RenderState *state) override {
         auto *f = QOpenGLContext::currentContext()->functions();
         // A frame goes back to the decoder only after a newer one was drawn, since the GPU may
         // still be sampling it.
-        if (m_next.release) {
-            release(m_previous);
-            m_previous = m_current;
-            m_current = m_next;
-            m_next = RigelFrame{};
+        if (m_res->next.release) {
+            release(m_res->previous);
+            m_res->previous = m_res->current;
+            m_res->current = m_res->next;
+            m_res->next = RigelFrame{};
         }
-        if (!m_current.release) return;
-        GLuint texture = textureFor(f, m_current);
+        if (!m_res->current.release) return;
+        GLuint texture = textureFor(f, m_res->current);
         if (!texture) return;
 
         Program &p = program(f);
@@ -151,30 +189,19 @@ public:
     }
 
 private:
-    void clearCache() {
-        auto *context = QOpenGLContext::currentContext();
-        if (!context) return;
-        static auto destroyImage = reinterpret_cast<PFNEGLDESTROYIMAGEKHRPROC>(eglGetProcAddress("eglDestroyImageKHR"));
-        for (auto &[inode, imported] : m_cache) {
-            context->functions()->glDeleteTextures(1, &imported.texture);
-            destroyImage(eglGetCurrentDisplay(), imported.image);
-        }
-        m_cache.clear();
-    }
-
     // The decoder recycles a fixed set of surfaces, so each one is imported only once.
     GLuint textureFor(QOpenGLFunctions *f, const RigelFrame &fr) {
-        if (fr.generation != m_generation) {
-            clearCache();
-            m_generation = fr.generation;
+        if (fr.generation != m_res->generation) {
+            m_res->clearCache();
+            m_res->generation = fr.generation;
         }
         struct stat st {};
         if (fstat(fr.fds[0], &st) != 0) return 0;
-        auto it = m_cache.find(st.st_ino);
-        if (it != m_cache.end()) return it->second.texture;
+        auto it = m_res->cache.find(st.st_ino);
+        if (it != m_res->cache.end()) return it->second.texture;
 
         // More surfaces than any decoder pool uses, so a bad stream can't grow this without limit.
-        if (m_cache.size() >= kMaxImportedSurfaces) clearCache();
+        if (m_res->cache.size() >= kMaxImportedSurfaces) m_res->clearCache();
 
         static auto createImage = reinterpret_cast<PFNEGLCREATEIMAGEKHRPROC>(eglGetProcAddress("eglCreateImageKHR"));
         static auto targetTexture = reinterpret_cast<PFNGLEGLIMAGETARGETTEXTURE2DOESPROC>(eglGetProcAddress("glEGLImageTargetTexture2DOES"));
@@ -184,6 +211,10 @@ private:
         add(EGL_WIDTH, fr.width);
         add(EGL_HEIGHT, fr.height);
         add(EGL_LINUX_DRM_FOURCC_EXT, EGLint(fr.fourcc));
+        // Without these hints the driver assumes limited range, which crushes the blacks and
+        // whites of full range cameras.
+        add(EGL_YUV_COLOR_SPACE_HINT_EXT, fr.matrix == 1 ? EGL_ITU_REC709_EXT : fr.matrix == 2 ? EGL_ITU_REC2020_EXT : EGL_ITU_REC601_EXT);
+        add(EGL_SAMPLE_RANGE_HINT_EXT, fr.full_range ? EGL_YUV_FULL_RANGE_EXT : EGL_YUV_NARROW_RANGE_EXT);
         const EGLint fd[] = {EGL_DMA_BUF_PLANE0_FD_EXT, EGL_DMA_BUF_PLANE1_FD_EXT};
         const EGLint offset[] = {EGL_DMA_BUF_PLANE0_OFFSET_EXT, EGL_DMA_BUF_PLANE1_OFFSET_EXT};
         const EGLint pitch[] = {EGL_DMA_BUF_PLANE0_PITCH_EXT, EGL_DMA_BUF_PLANE1_PITCH_EXT};
@@ -199,8 +230,12 @@ private:
         a[n] = EGL_NONE;
         EGLImageKHR image = createImage(eglGetCurrentDisplay(), EGL_NO_CONTEXT, EGL_LINUX_DMA_BUF_EXT, nullptr, a);
         if (image == EGL_NO_IMAGE_KHR) {
-            fprintf(stderr, "eglCreateImage failed with 0x%x for fourcc 0x%x and modifier 0x%llx\n", eglGetError(), fr.fourcc,
-                    static_cast<unsigned long long>(fr.modifier));
+            // Every frame of the stream fails the same way, so only the first one reaches the log.
+            if (!m_importFailed) {
+                fprintf(stderr, "eglCreateImage failed with 0x%x for fourcc 0x%x and modifier 0x%llx\n", eglGetError(), fr.fourcc,
+                        static_cast<unsigned long long>(fr.modifier));
+                m_importFailed = true;
+            }
             return 0;
         }
         GLuint texture = 0;
@@ -209,20 +244,19 @@ private:
         f->glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
         f->glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
         targetTexture(GL_TEXTURE_EXTERNAL_OES, image);
-        m_cache[st.st_ino] = Imported{image, texture};
+        m_res->cache[st.st_ino] = Imported{image, texture};
         return texture;
     }
 
-    RigelFrame m_next{}, m_current{}, m_previous{};
+    std::shared_ptr<VideoResources> m_res;
     QRectF m_rect;
     QRectF m_view{0, 0, 1, 1};
-    uint64_t m_generation = 0;
-    std::map<ino_t, Imported> m_cache;
+    bool m_importFailed = false;
 };
 
 } // namespace
 
-VideoItem::VideoItem(QQuickItem *parent) : QQuickItem(parent) {
+VideoItem::VideoItem(QQuickItem *parent) : QQuickItem(parent), m_resources(std::make_shared<VideoResources>()) {
     setFlag(ItemHasContents, true);
 }
 
@@ -249,6 +283,21 @@ void VideoItem::setStatus(bool hasVideo, bool signalLost) {
     m_hasVideo = hasVideo;
     m_signalLost = signalLost;
     emit statusChanged();
+    // Neither video nor a reconnection means the stream was stopped.
+    if (!hasVideo && !signalLost) releaseVideo();
+}
+
+// The node of a hidden item never renders again by itself, so its surfaces would stay imported.
+void VideoItem::releaseVideo() {
+    {
+        QMutexLocker lock(&m_mutex);
+        release(m_pending);
+        m_hasPending = false;
+    }
+    if (QQuickWindow *view = window()) {
+        view->scheduleRenderJob(new ClearVideoJob(m_resources), QQuickWindow::BeforeRenderingStage);
+        view->update();
+    }
 }
 
 void VideoItem::setFrame(const RigelFrame &frame) {
@@ -264,7 +313,7 @@ void VideoItem::setFrame(const RigelFrame &frame) {
 
 QSGNode *VideoItem::updatePaintNode(QSGNode *old, UpdatePaintNodeData *) {
     auto *node = static_cast<VideoNode *>(old);
-    if (!node) node = new VideoNode();
+    if (!node) node = new VideoNode(m_resources);
     RigelFrame frame{};
     {
         QMutexLocker lock(&m_mutex);

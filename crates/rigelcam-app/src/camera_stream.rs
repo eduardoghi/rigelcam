@@ -9,7 +9,7 @@ use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_allocators::DmaBufMemory;
 use gstreamer_app::{AppSink, AppSinkCallbacks};
-use gstreamer_video::VideoMeta;
+use gstreamer_video::{VideoColorMatrix, VideoColorRange, VideoColorimetry, VideoMeta};
 
 const DRM_FORMAT_NV12: u32 = 0x3231_564e;
 /// A stream that stops sending frames without an error counts as lost after this long.
@@ -24,6 +24,8 @@ struct RigelFrame {
     modifier: u64,
     generation: u64,
     n_planes: i32,
+    full_range: i32,
+    matrix: i32,
     fds: [i32; 4],
     offsets: [u32; 4],
     strides: [u32; 4],
@@ -40,7 +42,7 @@ extern "C" fn release_sample(owner: *mut c_void) {
     drop(unsafe { Box::from_raw(owner as *mut gst::Sample) });
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Source {
     pub url: String,
     pub user: String,
@@ -95,6 +97,11 @@ impl CameraStream {
     /// Plays `source`, or stops receiving video with `None`.
     pub fn set_source(&self, source: Option<Source>) {
         let mut control = self.shared.control.lock().unwrap();
+        // The grid asks again for what is already playing when it shows a hidden camera, and a
+        // new revision would reopen a stream that is working.
+        if control.source == source {
+            return;
+        }
         control.source = source;
         control.revision += 1;
         self.shared.changed.notify_all();
@@ -250,9 +257,12 @@ fn build_pipeline(
     pipeline.add(&src).ok()?;
 
     src.connect("select-stream", false, |values| {
-        let caps = values[2].get::<gst::Caps>().ok()?;
-        let media = caps.structure(0)?.get::<String>("media").ok()?;
-        Some((media == "video").to_value())
+        let media = values[2].get::<gst::Caps>().ok().and_then(|caps| {
+            let structure = caps.structure(0)?;
+            structure.get::<String>("media").ok()
+        });
+        // The signal has to return a boolean, or GLib aborts.
+        Some((media.as_deref() == Some("video")).to_value())
     });
 
     let weak_pipeline = pipeline.downgrade();
@@ -271,7 +281,7 @@ fn build_pipeline(
             "H264" => ("rtph264depay", "h264parse", "vah264dec"),
             "H265" => ("rtph265depay", "h265parse", "vah265dec"),
             other => {
-                eprintln!("unsupported encoding: {other}");
+                fail(&pipeline, &format!("unsupported encoding ({other})"));
                 return;
             }
         };
@@ -280,7 +290,7 @@ fn build_pipeline(
              ! appsink name=sink sync=false max-buffers=1 drop=true"
         );
         let Ok(branch) = gst::parse::bin_from_description(&description, true) else {
-            eprintln!("could not build the decoding branch");
+            fail(&pipeline, "could not build the decoding branch");
             return;
         };
         let sink = branch
@@ -307,21 +317,33 @@ fn build_pipeline(
             AppSinkCallbacks::builder()
                 .new_sample(move |sink| {
                     let sample = sink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
-                    *last_frame.lock().unwrap() = Instant::now();
-                    if push_sample(&shared, sample, generation).is_some()
-                        && !received_video.swap(true, Ordering::Relaxed)
-                    {
-                        shared.set_status(true, false);
+                    // A frame the item can't take doesn't count, so the stream ends up as lost.
+                    if push_sample(&shared, sample, generation).is_some() {
+                        *last_frame.lock().unwrap() = Instant::now();
+                        if !received_video.swap(true, Ordering::Relaxed) {
+                            shared.set_status(true, false);
+                        }
                     }
                     Ok(gst::FlowSuccess::Ok)
                 })
                 .build(),
         );
-        pipeline.add(&branch).unwrap();
-        branch.sync_state_with_parent().unwrap();
-        pad.link(&branch.static_pad("sink").unwrap()).unwrap();
+        // A panic here would abort the app, since this runs inside a C callback.
+        let started = pipeline.add(&branch).is_ok()
+            && branch.sync_state_with_parent().is_ok()
+            && branch
+                .static_pad("sink")
+                .is_some_and(|sink| pad.link(&sink).is_ok());
+        if !started {
+            fail(&pipeline, "could not start the decoder");
+        }
     });
     Some(pipeline)
+}
+
+/// Reports a failure from a streaming thread to the loop in `play`, which handles it as a lost stream.
+fn fail(pipeline: &gst::Pipeline, reason: &str) {
+    let _ = pipeline.post_message(gst::message::Error::new(gst::CoreError::Failed, reason));
 }
 
 fn modifier_of(sample: &gst::Sample) -> Option<u64> {
@@ -334,9 +356,26 @@ fn modifier_of(sample: &gst::Sample) -> Option<u64> {
     u64::from_str_radix(modifier.trim_start_matches("0x"), 16).ok()
 }
 
+/// Whether the range is full, and the code of the color matrix for the video item.
+fn color_of(sample: &gst::Sample) -> Option<(i32, i32)> {
+    let caps = sample.caps()?;
+    let text = caps.structure(0)?.get::<String>("colorimetry").ok()?;
+    let colorimetry: VideoColorimetry = text.parse().ok()?;
+    let matrix = match colorimetry.matrix() {
+        VideoColorMatrix::Bt709 => 1,
+        VideoColorMatrix::Bt2020 => 2,
+        _ => 0,
+    };
+    Some((
+        (colorimetry.range() == VideoColorRange::Range0_255) as i32,
+        matrix,
+    ))
+}
+
 fn push_sample(shared: &Shared, sample: gst::Sample, generation: u64) -> Option<()> {
     let buffer = sample.buffer()?;
     let meta = buffer.meta::<VideoMeta>()?;
+    let (full_range, matrix) = color_of(&sample).unwrap_or((0, 0));
     let mut frame = RigelFrame {
         width: meta.width() as i32,
         height: meta.height() as i32,
@@ -344,6 +383,8 @@ fn push_sample(shared: &Shared, sample: gst::Sample, generation: u64) -> Option<
         modifier: modifier_of(&sample)?,
         generation,
         n_planes: meta.n_planes() as i32,
+        full_range,
+        matrix,
         fds: [-1; 4],
         offsets: [0; 4],
         strides: [0; 4],

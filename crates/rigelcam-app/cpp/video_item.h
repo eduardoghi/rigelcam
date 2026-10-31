@@ -3,6 +3,7 @@
 #include <QtCore/QMutex>
 #include <QtQuick/QQuickItem>
 #include <cstdint>
+#include <memory>
 
 extern "C" {
 struct RigelFrame {
@@ -13,6 +14,9 @@ struct RigelFrame {
     // Changes when the pipeline is rebuilt, since its surfaces may reuse old inode numbers.
     uint64_t generation;
     int n_planes;
+    int full_range;
+    // 0 is BT.601, 1 is BT.709 and 2 is BT.2020.
+    int matrix;
     int fds[4];
     uint32_t offsets[4];
     uint32_t strides[4];
@@ -28,6 +32,8 @@ void rigel_item_set_status(void *item, bool has_video, bool signal_lost);
 void rigel_item_set_stream(void *item, void *stream, void (*destroy)(void *));
 void *rigel_item_stream(void *item);
 }
+
+struct VideoResources;
 
 /// QML item that draws the latest DMABuf frame it received, imported as an external texture.
 class VideoItem : public QQuickItem {
@@ -56,6 +62,9 @@ protected:
     QSGNode *updatePaintNode(QSGNode *old, UpdatePaintNodeData *) override;
 
 private:
+    void releaseVideo();
+
+    std::shared_ptr<VideoResources> m_resources;
     QMutex m_mutex;
     RigelFrame m_pending{};
     bool m_hasPending = false;
