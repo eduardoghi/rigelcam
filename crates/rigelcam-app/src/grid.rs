@@ -168,7 +168,7 @@ use std::time::Duration;
 
 use cxx_qt::{CxxQtThread, CxxQtType, Threading};
 use cxx_qt_lib::QString;
-use rigelcam_core::dahua::{Channel, Client, Error as RecorderError, Stream};
+use rigelcam_core::dahua::{Channel, Client, Error as RecorderError, LoginGate, Stream};
 use rigelcam_core::layout::{CameraId, Layout};
 use rigelcam_core::recorders::{
     Address, AddressError, Error as RecordersError, RecorderList, Secrets, SystemKeyring,
@@ -247,6 +247,7 @@ struct Connection {
     address: Address,
     user: String,
     password: String,
+    gate: Arc<LoginGate>,
 }
 
 impl Connection {
@@ -425,13 +426,19 @@ impl qobject::CameraGrid {
                 .get(id)
                 .map_err(|error| (error.to_string(), false))
                 .and_then(|password| {
+                    let address = recorder.address();
+                    let gate = client_for(&address, &recorder.user, &password);
                     let connection = Connection {
-                        address: recorder.address(),
+                        address,
                         user: recorder.user,
                         password,
+                        gate: Arc::new(LoginGate::new(gate)),
                     };
                     match connection.client().channels() {
-                        Ok(channels) => Ok((connection, channels)),
+                        Ok(channels) => {
+                            connection.gate.confirm();
+                            Ok((connection, channels))
+                        }
                         Err(error) => {
                             let retry = matches!(error, RecorderError::Http(_));
                             Err((recorder_message(&error), retry))
@@ -688,6 +695,7 @@ impl qobject::CameraGrid {
             recording: true,
             rate: rate as u32,
             attempt,
+            gate: connection.gate.clone(),
         };
         let item = item as *mut c_void;
         let mut stream = rigel_item_stream(item) as *mut CameraStream;
@@ -983,6 +991,7 @@ impl qobject::CameraGrid {
                     recording: false,
                     rate: 1,
                     attempt: 0,
+                    gate: connection.gate.clone(),
                 }
             });
         (*stream).set_source(source);

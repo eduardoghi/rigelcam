@@ -13,4 +13,6 @@ keyring = "4.2.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 thiserror = "2.0.21"
-ureq = "3.5.0"
+# Without gzip, so the limit on a body counts what was decoded, and without TLS, which recorders
+# here don't use.
+ureq = { version = "3.5.0", default-features = false }

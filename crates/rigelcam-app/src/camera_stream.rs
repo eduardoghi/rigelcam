@@ -1,9 +1,11 @@
 //! RTSP pipeline of a camera, which hands DMABuf frames to a video item and reconnects by itself.
 
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
+
+use rigelcam_core::dahua::LoginGate;
 
 use gstreamer as gst;
 use gstreamer::prelude::*;
@@ -19,6 +21,8 @@ const DRM_FORMAT_NV12: u32 = 0x3231_564e;
 const STALL_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_RETRY_DELAY: Duration = Duration::from_secs(30);
 const STREAM_ENDED: &str = "the stream ended";
+/// OPTIONS, DESCRIBE and the repeat of whichever of them got the challenge.
+const MAX_REQUESTS_BEFORE_LOGIN: u32 = 3;
 /// How often a recording tells where it is, which is enough for a moving bar.
 const POSITION_INTERVAL: Duration = Duration::from_millis(250);
 
@@ -52,7 +56,7 @@ extern "C" fn release_sample(owner: *mut c_void) {
     drop(unsafe { Box::from_raw(owner as *mut gst::Sample) });
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct Source {
     pub url: String,
     pub user: String,
@@ -65,6 +69,19 @@ pub struct Source {
     /// Number of this opening of a recording. It makes every one a new source, so asking again
     /// for the same moment reopens a recording that failed or ended.
     pub attempt: i32,
+    pub gate: Arc<LoginGate>,
+}
+
+// The gate belongs to the recorder, and it comes along with these from the same connection.
+impl PartialEq for Source {
+    fn eq(&self, other: &Self) -> bool {
+        self.url == other.url
+            && self.user == other.user
+            && self.password == other.password
+            && self.recording == other.recording
+            && self.rate == other.rate
+            && self.attempt == other.attempt
+    }
 }
 
 #[derive(Default)]
@@ -195,6 +212,11 @@ fn run(shared: Arc<Shared>) {
     // A camera that stays offline fails on every retry, so only a new reason reaches the log.
     let mut last_reason = String::new();
     loop {
+        // Also after an end or a failure, when the item can let go of its last frames.
+        let idle = shared.control.lock().unwrap().source.is_none();
+        if idle {
+            shared.set_status(false, false);
+        }
         let (source, revision) = {
             let guard = shared.control.lock().unwrap();
             let control = shared
@@ -207,20 +229,22 @@ fn run(shared: Arc<Shared>) {
             (control.source.clone().unwrap(), control.revision)
         };
         generation += 1;
-        let result = play(&shared, &source, revision, generation);
+        let result = if source.gate.allows() {
+            play(&shared, &source, revision, generation)
+        } else {
+            Outcome::Refused
+        };
         match result {
             Outcome::Changed => {
+                // With a new source, the current picture stays until its first frame arrives.
                 retry_delay = Duration::from_secs(2);
                 last_reason.clear();
-                // With a new source, the current picture stays until its first frame arrives.
-                if shared.control.lock().unwrap().source.is_none() {
-                    shared.set_status(false, false);
-                }
             }
             // Repeating a refused password can lock the user on the recorder, so this stream waits
             // for a new source, and the grid stops the other cameras of the recorder.
             Outcome::Refused => {
                 eprintln!("the recorder refused the login for {}", source.url);
+                source.gate.refuse();
                 shared.set_status(false, true);
                 shared.report_refused();
                 let guard = shared.control.lock().unwrap();
@@ -391,6 +415,20 @@ fn build_pipeline(
         .build()
         .ok()?;
     pipeline.add(&src).ok()?;
+
+    // rtspsrc answers every refusal with the same password, 8 times before it gives up. Past the
+    // few requests a good login takes, the next one is refused here and it stops.
+    let requests = Arc::new(AtomicU32::new(0));
+    let logged_in = Arc::new(AtomicBool::new(false));
+    let seen = logged_in.clone();
+    src.connect("before-send", false, move |_| {
+        let sent = requests.fetch_add(1, Ordering::Relaxed);
+        Some((seen.load(Ordering::Relaxed) || sent < MAX_REQUESTS_BEFORE_LOGIN).to_value())
+    });
+    src.connect("on-sdp", false, move |_| {
+        logged_in.store(true, Ordering::Relaxed);
+        None
+    });
 
     src.connect("select-stream", false, |values| {
         let media = values[2].get::<gst::Caps>().ok().and_then(|caps| {

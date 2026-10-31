@@ -1,6 +1,6 @@
 //! Client for the Dahua HTTP API, which answers plain `key=value` lines behind Digest auth.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
@@ -30,6 +30,65 @@ const SEARCH_PAGE: usize = 100;
 pub struct Channel {
     pub number: u32,
     pub name: String,
+}
+
+/// How long a confirmed login spares the next opening of a stream from checking again. Long enough
+/// for a whole grid to open, and short enough for a password changed since.
+const LOGIN_CHECK_INTERVAL: Duration = Duration::from_secs(5);
+
+#[derive(Default)]
+struct LoginState {
+    checked: Option<Instant>,
+    refused: bool,
+}
+
+/// Decides whether the streams of a recorder may try to log in. `rtspsrc` repeats a wrong password
+/// by itself and every camera has its own, so a changed password would reach the recorder hundreds
+/// of times at once and can lock the user. One HTTP login answers for all of them.
+pub struct LoginGate {
+    client: Client,
+    state: Mutex<LoginState>,
+}
+
+impl LoginGate {
+    pub fn new(client: Client) -> Self {
+        Self {
+            client,
+            state: Mutex::default(),
+        }
+    }
+
+    /// Records a login that just worked on this recorder.
+    pub fn confirm(&self) {
+        self.state.lock().unwrap().checked = Some(Instant::now());
+    }
+
+    /// Stops all further logins, after a stream was refused.
+    pub fn refuse(&self) {
+        self.state.lock().unwrap().refused = true;
+    }
+
+    /// Whether a stream may log in now. The lock stays held during the check, so cameras opening
+    /// together wait for one answer. A recorder that doesn't answer lets them through, since it
+    /// can't count a login that doesn't reach it.
+    pub fn allows(&self) -> bool {
+        let mut state = self.state.lock().unwrap();
+        if state.refused {
+            return false;
+        }
+        if state
+            .checked
+            .is_some_and(|checked| checked.elapsed() < LOGIN_CHECK_INTERVAL)
+        {
+            return true;
+        }
+        if matches!(self.client.clock(), Err(Error::Unauthorized)) {
+            state.refused = true;
+            return false;
+        }
+        state.checked = Some(Instant::now());
+        true
+    }
 }
 
 /// A continuous recording of a day, in seconds since its midnight on the clock of the recorder.
@@ -67,6 +126,9 @@ impl Client {
         // Status codes are handled here because a 401 is the normal first step of Digest.
         let agent = ureq::Agent::config_builder()
             .http_status_as_error(false)
+            // A redirect drops the Authorization header, so following one would make the right
+            // password look refused.
+            .max_redirects(0)
             // A recorder sits on the local network, and a proxy of the system would only see its
             // address and user, or block it. RTSP doesn't go through one either.
             .proxy(None)
@@ -492,25 +554,10 @@ mod tests {
 
     #[test]
     fn a_refused_password_stops_all_further_requests() {
-        use std::io::{Read, Write};
-        use std::sync::atomic::AtomicUsize;
-        use std::sync::Arc;
-
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let requests = Arc::new(AtomicUsize::new(0));
-        let counter = requests.clone();
-        std::thread::spawn(move || {
-            for mut stream in listener.incoming().flatten() {
-                let mut buffer = [0; 2048];
-                let _ = stream.read(&mut buffer);
-                counter.fetch_add(1, Ordering::Relaxed);
-                let _ = stream.write_all(
-                    b"HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Length: 0\r\n\
-                      WWW-Authenticate: Digest realm=\"x\", qop=\"auth\", nonce=\"n\"\r\n\r\n",
-                );
-            }
-        });
+        let (port, requests) = fake_recorder(
+            b"HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Length: 0\r\n\
+              WWW-Authenticate: Digest realm=\"x\", qop=\"auth\", nonce=\"n\"\r\n\r\n",
+        );
         let client = Client::new("127.0.0.1", "admin", "wrong").with_ports(port, 554);
         assert!(matches!(client.clock(), Err(Error::Unauthorized)));
         let tried = requests.load(Ordering::Relaxed);
@@ -520,6 +567,70 @@ mod tests {
             Err(Error::Unauthorized)
         ));
         assert_eq!(requests.load(Ordering::Relaxed), tried);
+    }
+
+    /// A recorder on a local port that answers every request with `answer`, counting them.
+    fn fake_recorder(
+        answer: &'static [u8],
+    ) -> (u16, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let requests = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = requests.clone();
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let mut buffer = [0; 2048];
+                let _ = stream.read(&mut buffer);
+                counter.fetch_add(1, Ordering::Relaxed);
+                let _ = stream.write_all(answer);
+            }
+        });
+        (port, requests)
+    }
+
+    #[test]
+    fn a_redirect_is_not_followed_and_is_not_a_refused_password() {
+        let (port, requests) = fake_recorder(
+            b"HTTP/1.1 301 Moved\r\nLocation: /other\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+        );
+        let client = Client::new("127.0.0.1", "admin", "secret").with_ports(port, 554);
+        assert!(matches!(client.clock(), Err(Error::Status(301))));
+        assert_eq!(requests.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn a_refused_gate_stays_closed_without_more_requests() {
+        let (port, requests) = fake_recorder(
+            b"HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Length: 0\r\n\
+              WWW-Authenticate: Digest realm=\"x\", qop=\"auth\", nonce=\"n\"\r\n\r\n",
+        );
+        let client = Client::new("127.0.0.1", "admin", "wrong").with_ports(port, 554);
+        let gate = LoginGate::new(client);
+        assert!(!gate.allows());
+        let tried = requests.load(Ordering::Relaxed);
+        assert!(tried <= 2, "{tried}");
+        assert!(!gate.allows());
+        assert_eq!(requests.load(Ordering::Relaxed), tried);
+    }
+
+    #[test]
+    fn a_confirmed_gate_opens_without_asking_and_a_refusal_closes_it() {
+        let (port, requests) = fake_recorder(b"HTTP/1.1 500 Error\r\nConnection: close\r\n\r\n");
+        let client = Client::new("127.0.0.1", "admin", "secret").with_ports(port, 554);
+        let gate = LoginGate::new(client);
+        gate.confirm();
+        assert!(gate.allows());
+        assert_eq!(requests.load(Ordering::Relaxed), 0);
+        gate.refuse();
+        assert!(!gate.allows());
+    }
+
+    #[test]
+    fn a_recorder_that_does_not_answer_keeps_the_gate_open() {
+        let client = Client::new("127.0.0.1", "admin", "secret").with_ports(1, 554);
+        assert!(LoginGate::new(client).allows());
     }
 
     #[test]
