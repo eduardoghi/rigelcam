@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::io::Read;
+use std::net::Ipv4Addr;
 use std::time::{Duration, Instant};
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -538,7 +539,8 @@ fn parse_channel_titles(body: &str) -> Vec<Channel> {
     channels
 }
 
-/// The address of each channel that has one, from the fields of its entry.
+/// The address of each channel that has one, from the fields of its entry. It ends up in a URL that
+/// gets the password of the recorder, so only a private IP address counts.
 fn parse_cameras(body: &str) -> HashMap<u32, Camera> {
     let mut hosts = HashMap::new();
     let mut ports = HashMap::new();
@@ -556,7 +558,7 @@ fn parse_cameras(body: &str) -> HashMap<u32, Camera> {
             continue;
         };
         if let Some(host) = field.strip_prefix("Address=") {
-            if !host.is_empty() && host != "0.0.0.0" {
+            if host.parse::<Ipv4Addr>().is_ok_and(|ip| ip.is_private()) {
                 hosts.insert(channel, host.to_owned());
             }
         } else if let Some(port) = field.strip_prefix("RtspPort=") {
@@ -692,16 +694,18 @@ mod tests {
 
     #[test]
     fn reads_where_each_camera_answers() {
-        let body = "table.RemoteDevice.uuid:System_CONFIG_NETCAMERA_INFO_0.Address=192.0.2.1\r\n\
+        let body = "table.RemoteDevice.uuid:System_CONFIG_NETCAMERA_INFO_0.Address=192.168.0.10\r\n\
                     table.RemoteDevice.uuid:System_CONFIG_NETCAMERA_INFO_0.RtspPort=8554\r\n\
-                    table.RemoteDevice.uuid:System_CONFIG_NETCAMERA_INFO_1.Address=192.0.2.2\r\n\
+                    table.RemoteDevice.uuid:System_CONFIG_NETCAMERA_INFO_1.Address=10.0.0.2\r\n\
                     table.RemoteDevice.uuid:System_CONFIG_NETCAMERA_INFO_2.Address=0.0.0.0\r\n\
-                    table.RemoteDevice.uuid:System_CONFIG_NETCAMERA_INFO_3.Address=\r\n";
+                    table.RemoteDevice.uuid:System_CONFIG_NETCAMERA_INFO_3.Address=\r\n\
+                    table.RemoteDevice.uuid:System_CONFIG_NETCAMERA_INFO_4.Address=8.8.8.8\r\n\
+                    table.RemoteDevice.uuid:System_CONFIG_NETCAMERA_INFO_5.Address=a@b/c\r\n";
         let cameras = parse_cameras(body);
         assert_eq!(cameras.len(), 2);
         assert_eq!(
             cameras[&1].live_url(Stream::Sub),
-            "rtsp://192.0.2.1:8554/cam/realmonitor?channel=1&subtype=1"
+            "rtsp://192.168.0.10:8554/cam/realmonitor?channel=1&subtype=1"
         );
         assert_eq!(cameras[&2].rtsp_port, 554);
     }
