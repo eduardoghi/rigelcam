@@ -291,5 +291,17 @@
         <source>The recorder is not connected.</source>
         <translation>O gravador não está conectado.</translation>
     </message>
+    <message>
+        <source>No recording at this time.</source>
+        <translation>Sem gravação neste horário.</translation>
+    </message>
+    <message>
+        <source>Up to 4 cameras in the recordings. Remove one to add another.</source>
+        <translation>Até 4 câmeras nas gravações. Tire uma para colocar outra.</translation>
+    </message>
+    <message>
+        <source>Close</source>
+        <translation>Fechar</translation>
+    </message>
 </context>
 </TS>

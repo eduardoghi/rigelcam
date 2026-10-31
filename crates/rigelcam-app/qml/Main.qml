@@ -9,6 +9,9 @@ ApplicationWindow {
     id: win
     width: 1280
     height: 800
+    // Below this the top bar is cut in the languages with the longest texts.
+    minimumWidth: 900
+    minimumHeight: 600
     color: colors.page
     title: "Rigelcam"
 
@@ -309,8 +312,13 @@ ApplicationWindow {
     readonly property bool playerKeys: inRecordings && playback.spans.length > 0 && !addDialog.visible && !removeDialog.visible
         && !calendar.visible && !comboOpen
     property bool comboOpen: false
-    // The camera being watched in the recordings: { recorder, number, name }, or null.
-    property var playbackCamera: null
+    // The player controls don't fit beside the sidebar, so it opens over the video on request.
+    readonly property bool narrowPlayer: inRecordings && width < playerRow.implicitWidth + 300
+    property bool sidebarFloating: false
+    // The cameras in the recordings as { recorder, number, name }, in fixed slots that can be empty,
+    // so taking one out doesn't touch the streams of the others.
+    property var playbackCameras: [null, null, null, null]
+    readonly property var playbackCamera: playbackCameras.find(c => c !== null) ?? null
     // The camera being dragged to a square.
     property var dragged: null
     // Recorders with their cameras folded in the sidebar, for this session.
@@ -389,9 +397,11 @@ ApplicationWindow {
             tileModel.append(camera)
         if (!keys.has(zoomed))
             zoomed = ""
-        // The recorder was removed, edited or refused the password, so this stream is out of date.
-        if (playbackCamera && !keys.has(cameraKey(playbackCamera.recorder, playbackCamera.number)))
-            playback.close()
+        // The recorder was removed, edited or refused the password, so these streams are out of date.
+        playbackCameras.forEach((camera, slot) => {
+            if (camera && !keys.has(cameraKey(camera.recorder, camera.number)))
+                playback.removeCamera(slot)
+        })
         updateLiveCount()
     }
 
@@ -403,11 +413,33 @@ ApplicationWindow {
         // In this order, or the cameras hidden by the zoom would reopen for an instant.
         mode = next
         zoomed = ""
+        sidebarFloating = !playbackCamera
     }
 
+    function isPlayback(recorder, number) {
+        return playbackCameras.some(c => c && c.recorder === recorder && c.number === number)
+    }
+
+    // Replaces whatever is in the recordings.
     function openPlayback(camera) {
-        playbackCamera = camera
-        playback.open(camera)
+        playback.clear()
+        addPlayback(camera)
+    }
+
+    function addPlayback(camera) {
+        if (isPlayback(camera.recorder, camera.number))
+            return
+        const slot = playbackCameras.indexOf(null)
+        if (slot < 0) {
+            grid.notice = "Up to 4 cameras in the recordings. Remove one to add another."
+            return
+        }
+        grid.notice = ""
+        const cameras = playbackCameras.slice()
+        cameras[slot] = camera
+        playbackCameras = cameras
+        sidebarFloating = false
+        playback.searchCamera(camera, playback.viewDate)
     }
 
     function updateLiveCount() {
@@ -502,11 +534,16 @@ ApplicationWindow {
                 visible: win.recorderList.length > 0
                 display: AbstractButton.IconOnly
                 icon.source: "qrc:/rigelcam/icons/sidebar.svg"
-                text: grid.sidebarCollapsed ? qsTr("Show cameras") : qsTr("Hide cameras")
+                text: sidebar.open ? qsTr("Hide cameras") : qsTr("Show cameras")
                 implicitWidth: 34
                 leftPadding: 9
                 rightPadding: 9
-                onClicked: grid.saveSidebarCollapsed(!grid.sidebarCollapsed)
+                onClicked: {
+                    if (win.narrowPlayer)
+                        win.sidebarFloating = !win.sidebarFloating
+                    else
+                        grid.saveSidebarCollapsed(!grid.sidebarCollapsed)
+                }
                 AppToolTip {
                     visible: sidebarButton.hovered
                     text: sidebarButton.text
@@ -845,7 +882,9 @@ ApplicationWindow {
 
     Rectangle {
         id: sidebar
-        readonly property bool open: win.recorderList.length > 0 && !grid.sidebarCollapsed && win.zoomed === "" && !win.fullScreen
+        readonly property bool open: win.recorderList.length > 0 && win.zoomed === "" && !win.fullScreen
+            && (win.narrowPlayer ? win.sidebarFloating : !grid.sidebarCollapsed)
+        z: 2
         readonly property string search: cameraSearch.text.trim().toLowerCase()
         visible: open
         width: open ? 260 : 0
@@ -1050,9 +1089,8 @@ ApplicationWindow {
                                     required property var modelData
                                     readonly property string key: win.cameraKey(recorderGroup.modelData.id, modelData.number)
                                     readonly property bool onGrid: win.gridKeys.includes(key)
-                                    readonly property bool isPlayback: win.inRecordings && win.playbackCamera !== null
-                                        && win.playbackCamera.recorder === recorderGroup.modelData.id
-                                        && win.playbackCamera.number === modelData.number
+                                    readonly property bool isPlayback: win.inRecordings
+                                        && win.isPlayback(recorderGroup.modelData.id, modelData.number)
                                     // The live cameras are stopped in the recordings, so their state means nothing.
                                     readonly property string status: win.inRecordings ? "" : (win.cameraStatus[key] ?? "")
                                     readonly property var payload: ({
@@ -1103,7 +1141,7 @@ ApplicationWindow {
                                     TapHandler {
                                         onDoubleTapped: {
                                             if (win.inRecordings)
-                                                win.openPlayback(cameraRow.payload)
+                                                win.addPlayback(cameraRow.payload)
                                             else
                                                 grid.addCamera(recorderGroup.modelData.id, cameraRow.modelData.number)
                                         }
@@ -1368,6 +1406,9 @@ ApplicationWindow {
                     }
                     Text {
                         anchors.centerIn: parent
+                        width: Math.min(implicitWidth, parent.width - 12)
+                        elide: Text.ElideRight
+                        horizontalAlignment: Text.AlignHCenter
                         // A camera of a recorder that is offline or hasn't answered keeps its square.
                         text: square.key === null ? qsTr("Drag a camera here") : qsTr("Waiting for the recorder")
                         font.pixelSize: 12
@@ -1477,7 +1518,7 @@ ApplicationWindow {
 
     Item {
         id: playback
-        anchors.left: sidebar.right
+        anchors.left: win.narrowPlayer ? parent.left : sidebar.right
         anchors.right: parent.right
         anchors.top: parent.top
         anchors.bottom: parent.bottom
@@ -1485,98 +1526,142 @@ ApplicationWindow {
 
         // The day shown, as YYYY-MM-DD on the clock of the recorder.
         property string date: ""
+        // What each camera recorded on the day, by key, and all of it together for the bar.
+        property var spansOf: ({})
         property var spans: []
         property int nowSeconds: 86400
         property string today: ""
         property int rate: 1
         property bool playing: false
-        property bool failed: false
-        property bool loading: false
-        // A search that only brings the day up to date, while what is playing goes on.
-        property bool refreshing: false
-        // The day asked for, which `date` becomes when the answer comes.
+        // Cameras waiting for their search, and the ones that only bring the day up to date.
+        property var pending: ({})
+        property var refreshing: ({})
+        readonly property bool loading: Object.keys(pending).length > 0
+        // Failed searches, by key.
+        property var errors: ({})
+        // The day asked for, which `date` becomes when the answers come.
         property string requestedDate: ""
         readonly property string viewDate: requestedDate || date
-        property string searchError: ""
-        // Whether a stream exists to pause, which it doesn't after the end, a failure or stop().
-        property bool streamOpen: false
-        // Where the stream was opened, and where the bar is.
-        property int openedAt: 0
+        // Whether the first stream of this day already opened.
+        property bool started: false
+        // The time on the bar, which comes from the first camera that is playing.
         property real position: 0
-        // The stream the screen is following. Reports from any other are stale, so the bar never
-        // goes back by itself.
-        property int attempt: 0
 
         readonly property var recordings: grid.recordings ? JSON.parse(grid.recordings) : null
 
-        onRecordingsChanged: {
-            const camera = win.playbackCamera
-            if (!recordings || !win.inRecordings || !camera || recordings.recorder !== camera.recorder
-                    || recordings.channel !== camera.number)
-                return
-            const refreshed = refreshing
-            refreshing = false
-            loading = false
-            requestedDate = ""
-            if (recordings.error) {
-                if (!refreshed)
-                    searchError = recordings.error
-                return
-            }
-            date = recordings.date
-            spans = recordings.spans
-            const now = recordings.now.split(" ")
-            today = now[0]
-            const clock = now[1].split(":")
-            nowSeconds = date === today ? parseInt(clock[0]) * 3600 + parseInt(clock[1]) * 60 + parseInt(clock[2]) : 86400
-            if (refreshed)
-                return
-            if (spans.length === 0) {
-                stop()
-                return
-            }
-            // Opens near the end of the current day, and at the start of older ones.
-            const last = spans[spans.length - 1]
-            seek(date === today ? Math.max(last.start, last.end - 60) : spans[0].start)
+        function keyOf(camera) {
+            return win.cameraKey(camera.recorder, camera.number)
         }
 
-        // Nothing of the previous camera or day stays on screen while the answer doesn't come.
-        function search(camera, day) {
-            stop()
-            spans = []
-            position = 0
-            openedAt = 0
-            searchError = ""
-            loading = true
-            refreshing = false
+        function eachCell(action) {
+            for (let i = 0; i < cells.count; i++) {
+                const cell = cells.itemAt(i)
+                if (cell && cell.camera)
+                    action(cell)
+            }
+        }
+
+        function leadCell() {
+            for (let i = 0; i < cells.count; i++) {
+                const cell = cells.itemAt(i)
+                if (cell && cell.camera && cell.streamOpen)
+                    return cell
+            }
+            return null
+        }
+
+        function updateSpans() {
+            spans = Object.values(spansOf).reduce((all, list) => all.concat(list), [])
+                .sort((a, b) => a.start - b.start)
+        }
+
+        onRecordingsChanged: {
+            if (!recordings || !win.inRecordings || !win.isPlayback(recordings.recorder, recordings.channel))
+                return
+            const key = win.cameraKey(recordings.recorder, recordings.channel)
+            const refreshed = refreshing[key] === true
+            delete refreshing[key]
+            const waiting = Object.assign({}, pending)
+            delete waiting[key]
+            pending = waiting
+            if (!refreshed && recordings.error)
+                errors = Object.assign({}, errors, { [key]: recordings.error })
+            if (!recordings.error) {
+                date = recordings.date
+                const now = recordings.now.split(" ")
+                today = now[0]
+                const clock = now[1].split(":")
+                nowSeconds = date === today ? parseInt(clock[0]) * 3600 + parseInt(clock[1]) * 60 + parseInt(clock[2]) : 86400
+                spansOf = Object.assign({}, spansOf, { [key]: recordings.spans })
+                updateSpans()
+            }
+            if (!loading)
+                requestedDate = ""
+            // With every answer in, so the cameras of a day open together.
+            if (!started && !loading && spans.length > 0) {
+                started = true
+                const end = Math.max(...spans.map(span => span.end))
+                seek(date === today ? Math.max(spans[spans.length - 1].start, end - 60) : spans[0].start)
+            } else if (started) {
+                syncCells()
+            }
+        }
+
+        function searchCamera(camera, day) {
+            pending = Object.assign({}, pending, { [keyOf(camera)]: true })
             requestedDate = day
             grid.searchRecordings(camera.recorder, camera.number, day)
         }
 
-        // The recorder keeps recording, so the current day goes stale on screen.
-        function refresh() {
-            if (!win.playbackCamera || loading || !date)
-                return
-            refreshing = true
-            grid.searchRecordings(win.playbackCamera.recorder, win.playbackCamera.number, date)
-        }
-
-        function open(camera) {
-            search(camera, date)
-        }
-
-        function close() {
+        // Nothing of the previous day stays on screen while the answers don't come.
+        function resetDay() {
             stop()
+            spansOf = {}
             spans = []
             position = 0
-            loading = false
-            searchError = ""
-            win.playbackCamera = null
+            errors = {}
+            started = false
+            refreshing = {}
+            pending = {}
+        }
+
+        // The recorder keeps recording, so the current day goes stale on screen.
+        function refresh() {
+            if (loading || !date)
+                return
+            for (const camera of win.playbackCameras) {
+                if (camera) {
+                    refreshing[keyOf(camera)] = true
+                    grid.searchRecordings(camera.recorder, camera.number, date)
+                }
+            }
+        }
+
+        function clear() {
+            resetDay()
+            win.playbackCameras = [null, null, null, null]
+        }
+
+        function removeCamera(slot) {
+            const camera = win.playbackCameras[slot]
+            grid.notice = ""
+            cells.itemAt(slot).close()
+            const cameras = win.playbackCameras.slice()
+            cameras[slot] = null
+            win.playbackCameras = cameras
+            const others = Object.assign({}, spansOf)
+            delete others[keyOf(camera)]
+            spansOf = others
+            updateSpans()
+            if (!win.playbackCamera)
+                clear()
         }
 
         function changeDay(day) {
-            if (win.playbackCamera)
-                search(win.playbackCamera, day)
+            const cameras = win.playbackCameras.filter(camera => camera)
+            resetDay()
+            for (const camera of cameras)
+                searchCamera(camera, day)
         }
 
         function stepDay(days) {
@@ -1588,10 +1673,7 @@ ApplicationWindow {
 
         function stop() {
             playing = false
-            failed = false
-            streamOpen = false
-            attempt = 0
-            grid.show(video, 0, 0, false, false)
+            eachCell(cell => cell.close())
         }
 
         // A time inside a gap goes to the next recording, and one after the last does nothing.
@@ -1609,12 +1691,16 @@ ApplicationWindow {
                 return
             timeline.following = true
             position = target
-            failed = false
-            openedAt = Math.floor(target)
-            attempt = grid.play(video, win.playbackCamera.recorder, win.playbackCamera.number, date, openedAt, rate)
-            streamOpen = attempt !== 0
-            playing = streamOpen
-            failed = !streamOpen
+            let opened = false
+            eachCell(cell => {
+                cell.finished = false
+                if (cell.recordedAt(target))
+                    cell.open(target)
+                else
+                    cell.close()
+                opened = opened || cell.streamOpen
+            })
+            playing = opened
         }
 
         function setRate(next) {
@@ -1623,30 +1709,45 @@ ApplicationWindow {
         }
 
         function togglePlaying() {
-            if (!streamOpen) {
+            if (!leadCell()) {
                 // After the last recording it starts the day over.
                 seek(recordedTime(position) < 0 ? spans[0].start : position)
                 return
             }
             playing = !playing
-            grid.pausePlayback(video, !playing)
+            eachCell(cell => {
+                if (cell.streamOpen)
+                    grid.pausePlayback(cell.video, !playing)
+            })
         }
 
-        // The stream counts only recorded time, so its elapsed seconds walk the recordings of the
-        // day to find the time on the clock, jumping over the gaps.
-        function timeAfter(elapsed) {
-            let time = openedAt
-            let left = elapsed
-            for (const span of spans) {
-                if (span.end <= time)
-                    continue
-                time = Math.max(time, span.start)
-                if (left <= span.end - time)
-                    return time + left
-                left -= span.end - time
-                time = span.end
-            }
-            return time
+        // Keeps the cameras on the same moment. Each stream is paced by the recorder on its own, so
+        // one that drifts is opened again at the time of the first, and cameras without a
+        // recording at this moment close until the bar reaches one.
+        function syncCells() {
+            if (!playing)
+                return
+            const lead = leadCell()
+            eachCell(cell => {
+                if (!cell.recordedAt(position)) {
+                    if (cell.streamOpen)
+                        cell.close()
+                } else if (!cell.streamOpen && !cell.failed && !cell.finished) {
+                    cell.open(position)
+                } else if (cell !== lead && cell.drifted(position)) {
+                    cell.open(position)
+                }
+            })
+            if (leadCell())
+                return
+            // All of them reached a gap, so the bar jumps to the next recording of any of them.
+            let failed = false
+            eachCell(cell => failed = failed || cell.failed)
+            const next = recordedTime(position + 1)
+            if (failed || next < 0)
+                playing = false
+            else
+                seek(next)
         }
 
         function clockText(seconds) {
@@ -1655,12 +1756,17 @@ ApplicationWindow {
         }
 
         onVisibleChanged: {
-            if (!visible)
+            if (!visible) {
                 stop()
-            else if (win.playbackCamera && spans.length === 0)
-                open(win.playbackCamera)
-            else
+            } else if (win.playbackCamera && spans.length === 0) {
+                const cameras = win.playbackCameras.filter(camera => camera)
+                const day = date
+                resetDay()
+                for (const camera of cameras)
+                    searchCamera(camera, day)
+            } else {
                 refresh()
+            }
         }
 
         Timer {
@@ -1670,58 +1776,220 @@ ApplicationWindow {
             onTriggered: playback.refresh()
         }
 
-        VideoItem {
-            id: video
-            gamma: win.gamma
+        Timer {
+            interval: 1000
+            repeat: true
+            running: playback.visible && playback.playing
+            onTriggered: playback.syncCells()
+        }
+
+        Item {
+            id: videoArea
+            // Slots in use, in order, which is how they take their place on screen.
+            readonly property var used: [0, 1, 2, 3].filter(slot => win.playbackCameras[slot] !== null)
+            readonly property int columns: used.length > 1 ? 2 : 1
+            readonly property int rows: used.length > 2 ? 2 : 1
             anchors.left: parent.left
             anchors.right: parent.right
             anchors.top: parent.top
             anchors.bottom: controls.top
 
-            onPlaybackPosition: (seconds, attempt) => {
-                if (attempt === playback.attempt)
-                    playback.position = playback.timeAfter(seconds)
-            }
-            onPlaybackEnded: attempt => {
-                if (attempt !== playback.attempt)
-                    return
-                playback.streamOpen = false
-                playback.playing = false
-            }
-            onPlaybackFailed: attempt => {
-                if (attempt !== playback.attempt)
-                    return
-                playback.streamOpen = false
-                playback.playing = false
-                playback.failed = true
-            }
-            onAuthRefused: {
-                playback.streamOpen = false
-                playback.playing = false
-                playback.failed = true
-                if (win.playbackCamera)
-                    Qt.callLater(grid.recorderRefused.bind(grid, win.playbackCamera.recorder))
-            }
-        }
+            Repeater {
+                id: cells
+                model: 4
 
-        Label {
-            anchors.centerIn: video
-            visible: !win.playbackCamera || playback.spans.length === 0 || playback.failed
-            padding: 12
-            // Failures can carry text from the recorder.
-            textFormat: Text.PlainText
-            font.pixelSize: 14
-            color: playback.failed ? colors.danger : colors.muted
-            background: Rectangle {
-                visible: playback.failed
-                radius: 8
-                color: colors.panel
+                Item {
+                    id: cell
+                    required property int index
+                    readonly property var camera: win.playbackCameras[index]
+                    readonly property string key: camera ? playback.keyOf(camera) : ""
+                    readonly property int place: videoArea.used.indexOf(index)
+                    readonly property var spans: playback.spansOf[key] ?? []
+                    readonly property string searchError: playback.errors[key] ?? ""
+                    readonly property alias video: video
+                    property int attempt: 0
+                    property bool streamOpen: false
+                    property bool failed: false
+                    // The recording of this camera ended before what the search listed.
+                    property bool finished: false
+                    // Where its stream opened, where it is now, and whether it already said so.
+                    property int openedAt: 0
+                    property real position: 0
+                    property bool reported: false
+
+                    visible: camera !== null
+                    x: (place % videoArea.columns) * width
+                    y: Math.floor(place / videoArea.columns) * height
+                    width: videoArea.width / videoArea.columns
+                    height: videoArea.height / videoArea.rows
+
+                    function recordedAt(seconds) {
+                        return spans.some(span => seconds >= span.start && seconds < span.end)
+                    }
+
+                    function open(seconds) {
+                        openedAt = Math.floor(seconds)
+                        position = openedAt
+                        reported = false
+                        failed = false
+                        attempt = grid.play(video, camera.recorder, camera.number, playback.date, openedAt, playback.rate)
+                        streamOpen = attempt !== 0
+                        failed = !streamOpen
+                    }
+
+                    function close() {
+                        attempt = 0
+                        streamOpen = false
+                        failed = false
+                        finished = false
+                        reported = false
+                        grid.show(video, 0, 0, false, false)
+                    }
+
+                    // A reopened stream starts up to a keyframe earlier, so small gaps are normal.
+                    function drifted(seconds) {
+                        return streamOpen && reported && Math.abs(position - seconds) > 3 * playback.rate
+                    }
+
+                    // The stream counts only recorded time, so its elapsed seconds walk the
+                    // recordings of the day to find the time on the clock, jumping over the gaps.
+                    function timeAfter(elapsed) {
+                        let time = openedAt
+                        let left = elapsed
+                        for (const span of spans) {
+                            if (span.end <= time)
+                                continue
+                            time = Math.max(time, span.start)
+                            if (left <= span.end - time)
+                                return time + left
+                            left -= span.end - time
+                            time = span.end
+                        }
+                        return time
+                    }
+
+                    VideoItem {
+                        id: video
+                        anchors.fill: parent
+                        anchors.margins: 1
+                        gamma: win.gamma
+
+                        onPlaybackPosition: (seconds, attempt) => {
+                            if (attempt !== cell.attempt)
+                                return
+                            cell.reported = true
+                            cell.position = cell.timeAfter(seconds)
+                            if (playback.leadCell() === cell)
+                                playback.position = cell.position
+                        }
+                        onPlaybackEnded: attempt => {
+                            if (attempt !== cell.attempt)
+                                return
+                            cell.streamOpen = false
+                            cell.finished = true
+                            playback.syncCells()
+                        }
+                        onPlaybackFailed: attempt => {
+                            if (attempt !== cell.attempt)
+                                return
+                            cell.streamOpen = false
+                            cell.failed = true
+                            playback.syncCells()
+                        }
+                        onAuthRefused: {
+                            cell.streamOpen = false
+                            cell.failed = true
+                            if (cell.camera)
+                                Qt.callLater(grid.recorderRefused.bind(grid, cell.camera.recorder))
+                        }
+                    }
+
+                    Rectangle {
+                        anchors.fill: parent
+                        anchors.margins: 1
+                        visible: !cell.streamOpen
+                        color: colors.page
+                    }
+
+                    Label {
+                        anchors.centerIn: parent
+                        width: Math.min(implicitWidth, parent.width - 24)
+                        visible: cell.failed || cell.searchError !== "" || (playback.started && !cell.streamOpen && !cell.recordedAt(playback.position))
+                        padding: 12
+                        wrapMode: Text.WordWrap
+                        horizontalAlignment: Text.AlignHCenter
+                        // Failures can carry text from the recorder.
+                        textFormat: Text.PlainText
+                        font.pixelSize: 14
+                        color: cell.failed || cell.searchError !== "" ? colors.danger : colors.muted
+                        text: cell.searchError !== "" ? win.msg(cell.searchError)
+                            : cell.failed ? qsTr("Could not open this recording. Try another time on the bar.")
+                            : qsTr("No recording at this time.")
+                    }
+
+                    Rectangle {
+                        visible: cell.camera !== null && videoArea.used.length > 1
+                        x: 8
+                        y: 8
+                        width: Math.min(cellName.implicitWidth + 14, cell.width - 16)
+                        height: cellName.implicitHeight + 6
+                        radius: 5
+                        color: colors.overVideo
+                        Text {
+                            id: cellName
+                            anchors.fill: parent
+                            anchors.leftMargin: 7
+                            anchors.rightMargin: 7
+                            verticalAlignment: Text.AlignVCenter
+                            text: cell.camera ? cell.camera.name : ""
+                            // The name comes from the recorder, so it can't be read as markup.
+                            textFormat: Text.PlainText
+                            elide: Text.ElideRight
+                            font.pixelSize: 12
+                            font.weight: Font.Medium
+                            color: colors.overVideoText
+                        }
+                    }
+
+                    AppButton {
+                        id: closeCell
+                        anchors.right: parent.right
+                        anchors.top: parent.top
+                        anchors.margins: 8
+                        visible: cellHover.hovered
+                        display: AbstractButton.IconOnly
+                        icon.source: "qrc:/rigelcam/icons/close.svg"
+                        icon.width: 14
+                        icon.height: 14
+                        text: qsTr("Close")
+                        implicitWidth: 26
+                        implicitHeight: 26
+                        leftPadding: 6
+                        rightPadding: 6
+                        fill: colors.overVideo
+                        contentColor: colors.overVideoText
+                        onClicked: playback.removeCamera(cell.index)
+                        AppToolTip {
+                            visible: closeCell.hovered
+                            text: closeCell.text
+                        }
+                    }
+
+                    HoverHandler { id: cellHover }
+                }
             }
-            text: !win.playbackCamera ? qsTr("Double-click a camera to see its recordings.")
-                : playback.loading ? qsTr("Searching recordings…")
-                : playback.searchError ? win.msg(playback.searchError)
-                : playback.spans.length === 0 ? qsTr("No recordings on this day.")
-                : qsTr("Could not open this recording. Try another time on the bar.")
+
+            Label {
+                anchors.centerIn: parent
+                visible: !win.playbackCamera || (playback.spans.length === 0 && Object.keys(playback.errors).length === 0)
+                padding: 12
+                textFormat: Text.PlainText
+                font.pixelSize: 14
+                color: colors.muted
+                text: !win.playbackCamera ? qsTr("Double-click a camera to see its recordings.")
+                    : playback.loading ? qsTr("Searching recordings…")
+                    : qsTr("No recordings on this day.")
+            }
         }
 
         Rectangle {

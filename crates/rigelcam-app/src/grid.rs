@@ -264,7 +264,8 @@ pub struct CameraGridRust {
     recorded_days: QString,
     /// Latest search of days, so an older one stops when another starts.
     days_search: Arc<AtomicU64>,
-    /// Latest search, so an answer to an older one is ignored.
+    /// Latest search of each channel, so an answer to an older one is ignored.
+    searches: HashMap<(i32, i32), u64>,
     search: u64,
     playbacks: i32,
     sidebar_collapsed: bool,
@@ -557,7 +558,9 @@ impl qobject::CameraGrid {
 
     fn search_recordings(mut self: Pin<&mut Self>, recorder: i32, channel: i32, date: &QString) {
         let search = self.search + 1;
-        self.as_mut().rust_mut().search = search;
+        let mut state = self.as_mut().rust_mut();
+        state.search = search;
+        state.searches.insert((recorder, channel), search);
         // The screen waits for this answer, even when there is nothing to search with.
         let failure = move |error: String| {
             json!({"search": search, "recorder": recorder, "channel": channel, "error": error})
@@ -582,7 +585,7 @@ impl qobject::CameraGrid {
                 Ok((now, day, spans))
             });
             let _ = thread.queue(move |mut grid: Pin<&mut qobject::CameraGrid>| {
-                if grid.search != search {
+                if grid.searches.get(&(recorder, channel)) != Some(&search) {
                     return;
                 }
                 match result {
