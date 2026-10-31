@@ -7,7 +7,7 @@ use std::net::Ipv4Addr;
 use std::time::{Duration, Instant};
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use digest_auth::{AuthContext, WwwAuthenticateHeader};
 use md5::{Digest, Md5};
@@ -160,6 +160,9 @@ pub struct Client {
     challenge: Mutex<Option<WwwAuthenticateHeader>>,
     /// The recorder refused the password, so this client stops talking to it.
     refused: AtomicBool,
+    /// The session login failed on this recorder, for this and for later clients. Each try would
+    /// count as a wrong password, even where the CGI login works.
+    sessions_refused: Arc<AtomicBool>,
 }
 
 impl Client {
@@ -184,6 +187,7 @@ impl Client {
             password: password.to_owned(),
             challenge: Mutex::new(None),
             refused: AtomicBool::new(false),
+            sessions_refused: Arc::default(),
             agent,
         }
     }
@@ -199,6 +203,12 @@ impl Client {
     pub fn with_ports(mut self, http_port: u16, rtsp_port: u16) -> Self {
         self.http_port = http_port;
         self.rtsp_port = rtsp_port;
+        self
+    }
+
+    /// Shares with the other clients of a recorder whether its session login failed.
+    pub fn with_session_memory(mut self, memory: Arc<AtomicBool>) -> Self {
+        self.sessions_refused = memory;
         self
     }
 
@@ -423,7 +433,8 @@ impl<'a> Session<'a> {
     /// Logs in, or returns None when the recorder doesn't offer this or refuses it, which the CGI
     /// path then answers for.
     fn open(client: &'a Client) -> Option<Self> {
-        if client.refused.load(Ordering::Relaxed) {
+        if client.refused.load(Ordering::Relaxed) || client.sessions_refused.load(Ordering::Relaxed)
+        {
             return None;
         }
         let login = |password: &str, session: &Value| {
@@ -450,6 +461,7 @@ impl<'a> Session<'a> {
         let session = challenge.get("session")?;
         let answer = login(&hash, session).ok()?;
         if answer.get("result")?.as_bool() != Some(true) {
+            client.sessions_refused.store(true, Ordering::Relaxed);
             return None;
         }
         Some(Self {
@@ -874,6 +886,57 @@ mod tests {
             }
         });
         (port, requests)
+    }
+
+    /// Answers by what the request asks for, and returns the login attempts that had a password.
+    fn fake_session_recorder() -> (u16, Arc<std::sync::atomic::AtomicUsize>) {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let logins = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = logins.clone();
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let mut buffer = [0; 2048];
+                let mut size = stream.read(&mut buffer).unwrap_or(0);
+                std::thread::sleep(Duration::from_millis(5));
+                let _ = stream.set_nonblocking(true);
+                size += stream.read(&mut buffer[size..]).unwrap_or(0);
+                let request = String::from_utf8_lossy(&buffer[..size]);
+                let body = if !request.starts_with("POST") {
+                    "result=1\r\n".to_owned()
+                } else if request.contains(r#""password":"""#) {
+                    json!({"result": false, "session": "s", "params": {
+                        "encryption": "Default", "realm": "r", "random": "1",
+                    }})
+                    .to_string()
+                } else {
+                    counter.fetch_add(1, Ordering::Relaxed);
+                    json!({"result": false, "session": "s"}).to_string()
+                };
+                let _ = stream.set_nonblocking(false);
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        });
+        (port, logins)
+    }
+
+    #[test]
+    fn a_refused_session_login_is_not_tried_again_by_later_clients() {
+        let (port, logins) = fake_session_recorder();
+        let memory = Arc::new(AtomicBool::new(false));
+        for _ in 0..3 {
+            let client = Client::new("127.0.0.1", "admin", "secret")
+                .with_ports(port, 554)
+                .with_session_memory(memory.clone());
+            assert!(Session::open(&client).is_none());
+        }
+        assert_eq!(logins.load(Ordering::Relaxed), 1);
     }
 
     #[test]

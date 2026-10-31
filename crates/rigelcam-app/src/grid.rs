@@ -296,11 +296,13 @@ struct Connection {
     /// Channels whose recordings answer 404 over RTSP, so they stop asking.
     without_rtsp: Arc<Mutex<HashSet<u32>>>,
     direct_cameras: Arc<DirectCameras>,
+    sessions_refused: Arc<AtomicBool>,
 }
 
 impl Connection {
     fn client(&self) -> Client {
         client_for(&self.address, &self.user, &self.password)
+            .with_session_memory(self.sessions_refused.clone())
     }
 }
 
@@ -516,6 +518,7 @@ impl qobject::CameraGrid {
                         gate: Arc::new(LoginGate::new(gate)),
                         without_rtsp: Arc::default(),
                         direct_cameras: Arc::default(),
+                        sessions_refused: Arc::default(),
                     };
                     match connection.client().channels() {
                         Ok(channels) => {
