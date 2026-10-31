@@ -1,7 +1,7 @@
 //! The saved recorders. Addresses go in a JSON file, passwords in the system keyring.
 
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -65,9 +65,13 @@ impl Secrets for SystemKeyring {
     }
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct Saved {
     recorders: Vec<Recorder>,
+    /// Never goes back, so an answer that was still on its way from a removed recorder can't be
+    /// taken for a new one.
+    #[serde(default)]
+    next_id: u64,
     /// None until the first recorder answers with its channels.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     layout: Option<Layout>,
@@ -94,11 +98,14 @@ impl RecorderList<SystemKeyring> {
 
 impl<S: Secrets> RecorderList<S> {
     pub fn open(path: PathBuf, secrets: S) -> Result<Self, Error> {
-        let saved = match fs::read(&path) {
+        let mut saved: Saved = match fs::read(&path) {
             Ok(bytes) => serde_json::from_slice(&bytes)?,
             Err(e) if e.kind() == io::ErrorKind::NotFound => Saved::default(),
             Err(e) => return Err(e.into()),
         };
+        if let Some(layout) = &mut saved.layout {
+            layout.normalize();
+        }
         Ok(Self {
             path,
             secrets,
@@ -119,25 +126,43 @@ impl<S: Secrets> RecorderList<S> {
         user: &str,
         password: &str,
     ) -> Result<u64, Error> {
-        let id = self.saved.recorders.iter().map(|r| r.id).max().unwrap_or(0) + 1;
+        let highest = self.saved.recorders.iter().map(|r| r.id).max();
+        let id = self.saved.next_id.max(highest.unwrap_or(0) + 1);
         self.secrets.set(id, password)?;
+        let before = self.saved.clone();
+        self.saved.next_id = id + 1;
         self.saved.recorders.push(Recorder {
             id,
             name: name.to_owned(),
             host: host.to_owned(),
             user: user.to_owned(),
         });
-        self.write()?;
+        if let Err(error) = self.write() {
+            self.saved = before;
+            let _ = self.secrets.delete(id);
+            return Err(error);
+        }
         Ok(id)
     }
 
     pub fn remove(&mut self, id: u64) -> Result<(), Error> {
+        let password = self.secrets.get(id).ok();
         self.secrets.delete(id)?;
+        let before = self.saved.clone();
+        // A list saved before next_id existed has to remember the id going away too.
+        self.saved.next_id = self.saved.next_id.max(id + 1);
         self.saved.recorders.retain(|r| r.id != id);
         if let Some(layout) = &mut self.saved.layout {
             layout.remove_recorder(id);
         }
-        self.write()
+        if let Err(error) = self.write() {
+            self.saved = before;
+            if let Some(password) = password {
+                let _ = self.secrets.set(id, &password);
+            }
+            return Err(error);
+        }
+        Ok(())
     }
 
     pub fn layout(&self) -> Option<&Layout> {
@@ -165,15 +190,43 @@ impl<S: Secrets> RecorderList<S> {
     fn write(&self) -> Result<(), Error> {
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent)?;
+            restrict_folder(parent)?;
         }
         write_atomically(&self.path, &serde_json::to_vec_pretty(&self.saved)?)
     }
 }
 
-// Through a temporary file, so a crash while saving can't lose the list.
+// The list tells which recorders exist and which user opens them, so it stays private.
+#[cfg(unix)]
+fn restrict_folder(path: &Path) -> Result<(), Error> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn restrict_folder(_: &Path) -> Result<(), Error> {
+    Ok(())
+}
+
+fn create_private(path: &Path) -> io::Result<fs::File> {
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path)
+}
+
+// Through a temporary file, so a crash or a power cut while saving can't lose the list.
 fn write_atomically(path: &Path, bytes: &[u8]) -> Result<(), Error> {
     let temporary = path.with_extension("json.tmp");
-    fs::write(&temporary, bytes)?;
+    let _ = fs::remove_file(&temporary);
+    let mut file = create_private(&temporary)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
     fs::rename(&temporary, path)?;
     Ok(())
 }
@@ -298,6 +351,71 @@ mod tests {
         assert_eq!(list.recorders().len(), 1);
         assert_eq!(list.layout(), None);
         assert!(!list.sidebar_collapsed());
+    }
+
+    #[test]
+    fn ids_never_come_back() {
+        let path = temp_path("ids");
+        let mut list = RecorderList::open(path, MemorySecrets::default()).unwrap();
+        let first = list.add("A", "192.0.2.1", "u", "p").unwrap();
+        list.remove(first).unwrap();
+        assert_ne!(list.add("B", "192.0.2.2", "u", "p").unwrap(), first);
+    }
+
+    #[test]
+    fn removing_from_a_list_older_than_next_id_keeps_the_id_used() {
+        let path = temp_path("old-ids");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            r#"{"recorders":[{"id":5,"name":"A","host":"192.0.2.1","user":"u"}]}"#,
+        )
+        .unwrap();
+        let mut list = RecorderList::open(path, MemorySecrets::default()).unwrap();
+        list.remove(5).unwrap();
+        assert_eq!(list.add("B", "192.0.2.2", "u", "p").unwrap(), 6);
+    }
+
+    #[test]
+    fn failing_to_save_undoes_adding_and_removing() {
+        let path = temp_path("unsaved");
+        let secrets = MemorySecrets::default();
+        let mut list = RecorderList::open(path.clone(), secrets.clone()).unwrap();
+        let id = list.add("A", "192.0.2.1", "u", "p").unwrap();
+        // A folder in the way of the temporary file makes every save fail.
+        fs::create_dir(path.with_extension("json.tmp")).unwrap();
+        assert!(list.add("B", "192.0.2.2", "u", "p").is_err());
+        assert_eq!(list.recorders().len(), 1);
+        assert!(secrets.get(id + 1).is_err());
+        assert!(list.remove(id).is_err());
+        assert_eq!(list.recorders().len(), 1);
+        assert_eq!(list.password(id).unwrap(), "p");
+    }
+
+    #[test]
+    fn layout_read_from_the_file_stays_within_the_limits() {
+        let path = temp_path("huge");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            r#"{"recorders":[],"layout":{"columns":1000,"cameras":[]}}"#,
+        )
+        .unwrap();
+        let list = RecorderList::open(path, MemorySecrets::default()).unwrap();
+        let layout = list.layout().unwrap();
+        assert_eq!((layout.columns, layout.cameras.len()), (6, 36));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn saved_list_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = temp_path("private");
+        let mut list = RecorderList::open(path.clone(), MemorySecrets::default()).unwrap();
+        list.add("A", "192.0.2.1", "u", "p").unwrap();
+        let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&path), 0o600);
+        assert_eq!(mode(path.parent().unwrap()), 0o700);
     }
 
     #[test]

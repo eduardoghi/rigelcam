@@ -71,6 +71,10 @@ impl Client {
     pub fn channels(&self) -> Result<Vec<Channel>, Error> {
         let body = self.get("/cgi-bin/configManager.cgi?action=getConfig&name=ChannelTitle")?;
         let mut channels = parse_channel_titles(&body);
+        // Some models answer an error with status 200, and that can't look like an empty recorder.
+        if channels.is_empty() {
+            return Err(Error::Unexpected("the channel list is empty".to_owned()));
+        }
         // Not every model or user can read this table, and then all channels stay listed.
         if let Ok(devices) =
             self.get("/cgi-bin/configManager.cgi?action=getConfig&name=RemoteDevice")

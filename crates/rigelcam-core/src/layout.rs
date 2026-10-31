@@ -103,13 +103,18 @@ impl Layout {
         self.columns = columns;
     }
 
+    /// Keeps a layout read from a file within the sizes the grid can show.
+    pub fn normalize(&mut self) {
+        self.columns = self.columns.clamp(1, MAX_COLUMNS);
+        self.cameras.resize(squares(self.columns), None);
+    }
+
     /// Fixes a saved layout once a recorder answers with its channels. It drops the channels that
     /// recorder no longer has, repeated cameras and a list of the wrong size, which only a file
     /// edited by hand or a changed recorder would bring. Other recorders may be offline, so their
     /// cameras keep their squares.
     pub fn repair(&mut self, recorder: u64, channels: &[u32]) {
-        self.columns = self.columns.clamp(1, MAX_COLUMNS);
-        self.cameras.resize(squares(self.columns), None);
+        self.normalize();
         let mut seen = Vec::new();
         for camera in &mut self.cameras {
             if let Some(id) = *camera {

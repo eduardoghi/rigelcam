@@ -96,7 +96,7 @@ use cxx_qt::{CxxQtType, Threading};
 use cxx_qt_lib::QString;
 use rigelcam_core::dahua::{Channel, Client, Error as RecorderError, Stream};
 use rigelcam_core::layout::{CameraId, Layout};
-use rigelcam_core::recorders::{RecorderList, SystemKeyring};
+use rigelcam_core::recorders::{RecorderList, Secrets, SystemKeyring};
 use serde_json::json;
 
 use crate::camera_stream::{CameraStream, Source};
@@ -122,7 +122,9 @@ fn recorder_message(error: &RecorderError) -> String {
         RecorderError::Unauthorized => "O gravador recusou o usuário ou a senha.".to_owned(),
         RecorderError::Status(code) => format!("O gravador respondeu com o erro HTTP {code}."),
         RecorderError::Challenge(_) | RecorderError::Unexpected(_) => {
-            format!("O gravador enviou uma resposta inesperada ({error}).")
+            // The whole body of an answer can be in the error.
+            let detail: String = error.to_string().chars().take(200).collect();
+            format!("O gravador enviou uma resposta inesperada ({detail}).")
         }
     }
 }
@@ -227,25 +229,25 @@ impl qobject::CameraGrid {
         let Some(recorder) = list.recorders().iter().find(|r| r.id == id).cloned() else {
             return;
         };
-        let password = match list.password(id) {
-            Ok(password) => password,
-            Err(error) => {
-                let message = error.to_string();
-                self.as_mut().rust_mut().failures.insert(id, message);
-                self.publish_tree();
-                return;
-            }
-        };
-        let connection = Connection {
-            host: recorder.host,
-            user: recorder.user,
-            password,
-        };
         self.as_mut().rust_mut().failures.remove(&id);
         self.as_mut().publish_tree();
         let thread = self.qt_thread();
         std::thread::spawn(move || {
-            let result = connection.client().channels();
+            // Off the interface thread, since a locked keyring waits for the user to unlock it.
+            let result = SystemKeyring
+                .get(id)
+                .map_err(|error| error.to_string())
+                .and_then(|password| {
+                    let connection = Connection {
+                        host: recorder.host,
+                        user: recorder.user,
+                        password,
+                    };
+                    match connection.client().channels() {
+                        Ok(channels) => Ok((connection, channels)),
+                        Err(error) => Err(recorder_message(&error)),
+                    }
+                });
             let _ = thread.queue(move |mut grid: Pin<&mut qobject::CameraGrid>| {
                 // The recorder may have been removed while it was answering.
                 let exists = grid
@@ -256,15 +258,14 @@ impl qobject::CameraGrid {
                     return;
                 }
                 match result {
-                    Ok(channels) => {
+                    Ok((connection, channels)) => {
                         let mut state = grid.as_mut().rust_mut();
                         state.connections.insert(id, connection);
                         state.channels.insert(id, channels.clone());
                         // Before the tree, so no camera outside the grid gets opened.
                         grid.as_mut().merge_layout(id, &channels, fill_empty_grid);
                     }
-                    Err(error) => {
-                        let message = recorder_message(&error);
+                    Err(message) => {
                         grid.as_mut().rust_mut().failures.insert(id, message);
                     }
                 }
@@ -304,10 +305,11 @@ impl qobject::CameraGrid {
             .list
             .as_mut()
             .map(|list| list.set_layout(layout.clone()));
-        if let Some(Err(error)) = result {
-            self.as_mut()
-                .set_error(QString::from(error.to_string().as_str()));
-        }
+        let message = match result {
+            Some(Err(error)) => error.to_string(),
+            _ => String::new(),
+        };
+        self.as_mut().set_error(QString::from(message.as_str()));
         self.publish_layout(&layout);
     }
 
@@ -445,6 +447,10 @@ impl qobject::CameraGrid {
         let item = item as *mut c_void;
         let mut stream = rigel_item_stream(item) as *mut CameraStream;
         if stream.is_null() {
+            // Each stream has a thread, which a camera outside the grid doesn't need.
+            if !visible {
+                return;
+            }
             stream = Box::into_raw(Box::new(CameraStream::new(item)));
             rigel_item_set_stream(item, stream as *mut c_void, destroy_stream);
         }
