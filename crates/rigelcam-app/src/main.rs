@@ -8,7 +8,7 @@ use rigelcam_core::recorders::RecorderList;
 use cxx_qt_lib::{QGuiApplication, QQmlApplicationEngine, QUrl};
 
 extern "C" {
-    fn rigel_use_gles();
+    fn rigel_prepare_graphics();
     fn rigel_register_types();
     fn rigel_set_app_identity();
 }
@@ -19,6 +19,9 @@ fn main() {
         std::env::set_var("GIO_USE_PROXY_RESOLVER", "dummy");
     }
     gstreamer::init().expect("could not start GStreamer");
+    #[cfg(windows)]
+    std::env::set_var("QSG_RHI_BACKEND", "d3d11");
+    #[cfg(not(windows))]
     std::env::set_var("QSG_RHI_BACKEND", "opengl");
     // Under X11 Qt defaults to GLX, and the video item imports frames through EGL.
     if std::env::var_os("QT_XCB_GL_INTEGRATION").is_none() {
@@ -28,8 +31,8 @@ fn main() {
         std::env::set_var("QT_QUICK_CONTROLS_STYLE", "Basic");
     }
 
-    // Tiled NV12 can only be imported as an external texture, which needs OpenGL ES.
-    unsafe { rigel_use_gles() };
+    // Linux needs OpenGL ES for external textures, and Windows a device shared with the decoders.
+    unsafe { rigel_prepare_graphics() };
 
     let mut app = QGuiApplication::new();
     unsafe {

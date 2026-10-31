@@ -14,15 +14,33 @@ use rigelcam_core::dav::{Codec, Frame, Reader};
 
 use gstreamer as gst;
 use gstreamer::prelude::*;
+#[cfg(unix)]
 use gstreamer_allocators::DmaBufMemory;
 use gstreamer_app::{AppSink, AppSinkCallbacks, AppSrc};
+#[cfg(windows)]
+use gstreamer_video::VideoInfo;
 use gstreamer_video::{VideoColorMatrix, VideoColorRange, VideoColorimetry, VideoMeta};
 
 use crate::export::{self, LAST_SECOND_OF_DAY};
 
+#[cfg(windows)]
+const H264_DECODER: &str = "d3d11h264dec";
+#[cfg(windows)]
+const H265_DECODER: &str = "d3d11h265dec";
+/// Frames stay on the GPU, in the memory the video item can read without copying them to the CPU.
+#[cfg(windows)]
+const DECODED_CAPS: &str = "video/x-raw(memory:D3D11Memory),format=NV12";
+#[cfg(unix)]
+const H264_DECODER: &str = "vah264dec";
+#[cfg(unix)]
+const H265_DECODER: &str = "vah265dec";
+#[cfg(unix)]
+const DECODED_CAPS: &str = "video/x-raw(memory:DMABuf),format=DMA_DRM";
+
 /// Without these no camera opens, whatever the recorder sends.
-const REQUIRED_ELEMENTS: [&str; 4] = ["rtspsrc", "rtph264depay", "h264parse", "vah264dec"];
-const H265_ELEMENTS: [&str; 3] = ["rtph265depay", "h265parse", "vah265dec"];
+const REQUIRED_ELEMENTS: [&str; 4] = ["rtspsrc", "rtph264depay", "h264parse", H264_DECODER];
+const H265_ELEMENTS: [&str; 3] = ["rtph265depay", "h265parse", H265_DECODER];
+#[cfg(unix)]
 const DRM_FORMAT_NV12: u32 = 0x3231_564e;
 /// A stream that stops sending frames without an error counts as lost after this long.
 const STALL_TIMEOUT: Duration = Duration::from_secs(15);
@@ -51,12 +69,15 @@ struct RigelFrame {
     fds: [i32; 4],
     offsets: [u32; 4],
     strides: [u32; 4],
+    sample: *mut c_void,
     owner: *mut c_void,
     release: extern "C" fn(*mut c_void),
 }
 
 extern "C" {
     fn rigel_item_set_frame(item: *mut c_void, frame: *const RigelFrame);
+    #[cfg(windows)]
+    fn rigel_decoder_context() -> *mut gst::ffi::GstContext;
     fn rigel_item_set_status(item: *mut c_void, has_video: bool, signal_lost: bool);
     fn rigel_item_auth_refused(item: *mut c_void);
     fn rigel_item_position(item: *mut c_void, seconds: f64, attempt: i32);
@@ -682,8 +703,8 @@ fn feed(
 
 fn decoder_elements(codec: Codec) -> (&'static str, &'static str) {
     match codec {
-        Codec::H264 => ("h264parse", "vah264dec"),
-        Codec::H265 => ("h265parse", "vah265dec"),
+        Codec::H264 => ("h264parse", H264_DECODER),
+        Codec::H265 => ("h265parse", H265_DECODER),
     }
 }
 
@@ -701,12 +722,13 @@ fn build_stretch_pipeline(
     };
     let description = format!(
         "appsrc name=video format=time block=true max-bytes=8388608 ! {parse} ! {decoder} \
-         ! video/x-raw(memory:DMABuf),format=DMA_DRM ! appsink name=sink sync=true max-buffers=1"
+         ! {DECODED_CAPS} ! appsink name=sink sync=true max-buffers=1"
     );
     let pipeline = gst::parse::launch(&description)
         .ok()?
         .downcast::<gst::Pipeline>()
         .ok()?;
+    share_decoder_device(&pipeline);
     let video = pipeline.by_name("video")?.downcast::<AppSrc>().ok()?;
     video.set_caps(Some(
         &gst::Caps::builder(caps)
@@ -774,6 +796,7 @@ fn build_pipeline(
     progress: Progress,
 ) -> Option<gst::Pipeline> {
     let pipeline = gst::Pipeline::new();
+    share_decoder_device(&pipeline);
     let src = gst::ElementFactory::make("rtspsrc")
         .property("location", source.url.as_str())
         .property_from_str("protocols", "tcp")
@@ -830,7 +853,7 @@ fn build_pipeline(
             }
         };
         let description = format!(
-            "{depay} ! {parse} name=parser ! {decoder} ! video/x-raw(memory:DMABuf),format=DMA_DRM \
+            "{depay} ! {parse} name=parser ! {decoder} ! {DECODED_CAPS} \
              ! appsink name=sink sync=false max-buffers=1 drop=true"
         );
         let Ok(branch) = gst::parse::bin_from_description(&description, true) else {
@@ -883,11 +906,23 @@ fn build_pipeline(
     Some(pipeline)
 }
 
+/// Makes the decoders of a pipeline use the device of the interface, so frames don't leave the GPU.
+#[cfg(windows)]
+fn share_decoder_device(pipeline: &gst::Pipeline) {
+    use gst::glib::translate::from_glib_full;
+    let context: gst::Context = unsafe { from_glib_full(rigel_decoder_context()) };
+    pipeline.set_context(&context);
+}
+
+#[cfg(unix)]
+fn share_decoder_device(_: &gst::Pipeline) {}
+
 /// Reports a failure from a streaming thread to the loop in `play`, which handles it as a lost stream.
 fn fail(pipeline: &gst::Pipeline, reason: &str) {
     let _ = pipeline.post_message(gst::message::Error::new(gst::CoreError::Failed, reason));
 }
 
+#[cfg(unix)]
 fn modifier_of(sample: &gst::Sample) -> Option<u64> {
     let caps = sample.caps()?;
     let drm = caps.structure(0)?.get::<String>("drm-format").ok()?;
@@ -922,6 +957,38 @@ fn color_of(sample: &gst::Sample) -> Option<(i32, i32)> {
     ))
 }
 
+#[cfg(windows)]
+fn push_sample(shared: &Shared, sample: gst::Sample, generation: u64) -> Option<()> {
+    use gst::glib::translate::ToGlibPtr;
+    let info = VideoInfo::from_caps(sample.caps()?).ok()?;
+    let (full_range, matrix) = color_of(&sample).unwrap_or((0, 0));
+    let raw: *const gst::ffi::GstSample = sample.to_glib_none().0;
+    let mut frame = RigelFrame {
+        width: info.width() as i32,
+        height: info.height() as i32,
+        fourcc: 0,
+        modifier: 0,
+        generation,
+        n_planes: 0,
+        full_range,
+        matrix,
+        fds: [-1; 4],
+        offsets: [0; 4],
+        strides: [0; 4],
+        sample: raw as *mut c_void,
+        owner: std::ptr::null_mut(),
+        release: release_sample,
+    };
+    let item = shared.item.lock().unwrap();
+    if *item == 0 {
+        return None;
+    }
+    frame.owner = Box::into_raw(Box::new(sample)) as *mut c_void;
+    unsafe { rigel_item_set_frame(*item as *mut c_void, &frame) };
+    Some(())
+}
+
+#[cfg(unix)]
 fn push_sample(shared: &Shared, sample: gst::Sample, generation: u64) -> Option<()> {
     let buffer = sample.buffer()?;
     let meta = buffer.meta::<VideoMeta>()?;
@@ -938,6 +1005,7 @@ fn push_sample(shared: &Shared, sample: gst::Sample, generation: u64) -> Option<
         fds: [-1; 4],
         offsets: [0; 4],
         strides: [0; 4],
+        sample: std::ptr::null_mut(),
         owner: std::ptr::null_mut(),
         release: release_sample,
     };

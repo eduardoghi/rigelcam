@@ -434,7 +434,11 @@ ApplicationWindow {
         updateLiveCount()
     }
 
-    Component.onCompleted: win.showMaximized()
+    GraphicsSetup { id: graphicsSetup }
+    Component.onCompleted: {
+        graphicsSetup.prepare(win)
+        win.showMaximized()
+    }
 
     function setMode(next) {
         if (next === mode)
@@ -2625,7 +2629,8 @@ ApplicationWindow {
         function showVideo(savedIn, file, error) {
             failed = error !== ""
             title = failed ? win.msg(error) : qsTr("Video saved")
-            folder = failed ? "" : encodeURI("file://" + savedIn)
+            const prefix = Qt.platform.os === "windows" ? "file:///" : "file://"
+            folder = failed ? "" : encodeURI(prefix + savedIn.replace(/\\/g, "/"))
             fileName = file
             hideToast.restart()
         }

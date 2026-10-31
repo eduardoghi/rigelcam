@@ -1611,6 +1611,7 @@ dependencies = [
  "gstreamer-allocators",
  "gstreamer-app",
  "gstreamer-video",
+ "pkg-config",
  "rigelcam-core",
  "serde_json",
  "thiserror 2.0.21",

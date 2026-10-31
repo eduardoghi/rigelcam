@@ -23,3 +23,4 @@ thiserror = "2"
 
 [build-dependencies]
 cxx-qt-build = "0.10"
+pkg-config = "0.3"

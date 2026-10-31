@@ -21,11 +21,14 @@ struct RigelFrame {
     int fds[4];
     uint32_t offsets[4];
     uint32_t strides[4];
+    // The GstSample behind `owner`, for the systems that read it directly instead of `fds`.
+    void *sample;
     void *owner;
     void (*release)(void *);
 };
 
-void rigel_use_gles();
+void rigel_prepare_graphics();
+bool rigel_has_window();
 void rigel_register_types();
 void rigel_set_app_identity();
 int rigel_system_language();
@@ -48,8 +51,18 @@ public:
     Q_INVOKABLE void run();
 };
 
+class QQuickWindow;
+
+/// Hands the window what it has to render with, which has to happen before it is shown.
+class GraphicsSetup : public QObject {
+    Q_OBJECT
+public:
+    using QObject::QObject;
+    Q_INVOKABLE void prepare(QQuickWindow *window);
+};
+
 struct VideoResources;
-struct PhotoLink;
+struct ItemLink;
 
 /// QML item that draws the latest DMABuf frame it received, imported as an external texture.
 class VideoItem : public QQuickItem {
@@ -100,7 +113,7 @@ private:
     void releaseVideo();
 
     std::shared_ptr<VideoResources> m_resources;
-    std::shared_ptr<PhotoLink> m_photoLink;
+    std::shared_ptr<ItemLink> m_link;
     QString m_photoName;
     QMutex m_mutex;
     RigelFrame m_pending{};
