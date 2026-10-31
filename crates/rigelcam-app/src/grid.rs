@@ -19,6 +19,7 @@ pub mod qobject {
         #[qproperty(QString, tree)]
         #[qproperty(QString, layout)]
         #[qproperty(QString, recordings)]
+        #[qproperty(QString, recorded_days, cxx_name = "recordedDays")]
         #[qproperty(bool, sidebar_collapsed, cxx_name = "sidebarCollapsed")]
         #[qproperty(QString, theme)]
         #[qproperty(QString, language)]
@@ -119,6 +120,12 @@ pub mod qobject {
         #[cxx_name = "searchRecordings"]
         fn search_recordings(self: Pin<&mut Self>, recorder: i32, channel: i32, date: &QString);
 
+        /// Finds which days of a month, given as `YYYY-MM`, have recordings of a channel. The days
+        /// reach the `recordedDays` property as they are found.
+        #[qinvokable]
+        #[cxx_name = "searchRecordedDays"]
+        fn search_recorded_days(self: Pin<&mut Self>, recorder: i32, channel: i32, month: &QString);
+
         /// Plays a recording in an item from `seconds` after the midnight of `date`.
         #[qinvokable]
         unsafe fn play(
@@ -154,6 +161,8 @@ pub mod qobject {
 use core::pin::Pin;
 use std::collections::HashMap;
 use std::ffi::c_void;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use cxx_qt::{CxxQtType, Threading};
@@ -244,6 +253,9 @@ pub struct CameraGridRust {
     tree: QString,
     layout: QString,
     recordings: QString,
+    recorded_days: QString,
+    /// Latest search of days, so an older one stops when another starts.
+    days_search: Arc<AtomicU64>,
     /// Latest search, so an answer to an older one is ignored.
     search: u64,
     sidebar_collapsed: bool,
@@ -563,6 +575,52 @@ impl qobject::CameraGrid {
                     Err(error) => grid.set_notice(QString::from(recorder_message(&error).as_str())),
                 }
             });
+        });
+    }
+
+    fn search_recorded_days(self: Pin<&mut Self>, recorder: i32, channel: i32, month: &QString) {
+        let Some(connection) = self.connections.get(&(recorder as u64)).cloned() else {
+            return;
+        };
+        let month = month.to_string();
+        let latest = self.days_search.clone();
+        let search = latest.fetch_add(1, Ordering::Relaxed) + 1;
+        let thread = self.qt_thread();
+        std::thread::spawn(move || {
+            let client = connection.client();
+            let today = client.clock().unwrap_or_default();
+            let today = today.split(' ').next().unwrap_or_default().to_owned();
+            // From the end, which is what someone looking for a recent event wants first.
+            let dates: Vec<String> = (1..=31)
+                .rev()
+                .map(|day| format!("{month}-{day:02}"))
+                .filter(|date| today.is_empty() || *date <= today)
+                .collect();
+            let mut days: Vec<u32> = Vec::new();
+            let key = format!("{recorder}:{channel}:{month}");
+            let _ = client.recorded_days(
+                channel as u32,
+                dates.iter().map(String::as_str),
+                |date, recorded| {
+                    if latest.load(Ordering::Relaxed) != search {
+                        return false;
+                    }
+                    if recorded {
+                        days.extend(date.rsplit('-').next().and_then(|d| d.parse::<u32>().ok()));
+                        let text = json!({"key": key, "days": days, "done": false}).to_string();
+                        let _ = thread.queue(move |grid: Pin<&mut qobject::CameraGrid>| {
+                            grid.set_recorded_days(QString::from(text.as_str()));
+                        });
+                    }
+                    true
+                },
+            );
+            if latest.load(Ordering::Relaxed) == search {
+                let text = json!({"key": key, "days": days, "done": true}).to_string();
+                let _ = thread.queue(move |grid: Pin<&mut qobject::CameraGrid>| {
+                    grid.set_recorded_days(QString::from(text.as_str()));
+                });
+            }
         });
     }
 

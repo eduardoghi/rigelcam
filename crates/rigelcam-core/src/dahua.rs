@@ -2,7 +2,9 @@
 
 use std::time::Duration;
 
-use digest_auth::AuthContext;
+use std::sync::Mutex;
+
+use digest_auth::{AuthContext, WwwAuthenticateHeader};
 use ureq::http::StatusCode;
 
 #[derive(Debug, thiserror::Error)]
@@ -52,6 +54,9 @@ pub struct Client {
     user: String,
     password: String,
     agent: ureq::Agent,
+    /// The last Digest challenge, answered again without asking for a new one. Otherwise every
+    /// request costs two round trips, which adds up in a search of many days.
+    challenge: Mutex<Option<WwwAuthenticateHeader>>,
 }
 
 impl Client {
@@ -71,6 +76,7 @@ impl Client {
             rtsp_port: 554,
             user: user.to_owned(),
             password: password.to_owned(),
+            challenge: Mutex::new(None),
             agent,
         }
     }
@@ -131,15 +137,64 @@ impl Client {
         result
     }
 
-    fn search_files(&self, finder: &str, channel: u32, date: &str) -> Result<Vec<Span>, Error> {
+    /// Tells which of the given days, as `YYYY-MM-DD`, have recordings of a channel, one at a time
+    /// through `found`, which returns false to stop. They share one search on the recorder,
+    /// because opening one per day takes more than twice as long.
+    pub fn recorded_days<'a>(
+        &self,
+        channel: u32,
+        dates: impl IntoIterator<Item = &'a str>,
+        mut found: impl FnMut(&str, bool) -> bool,
+    ) -> Result<(), Error> {
+        let created = self.get("/cgi-bin/mediaFileFind.cgi?action=factory.create")?;
+        let finder = parse_value(&created, "result")
+            .ok_or_else(|| Error::Unexpected(created.clone()))?
+            .to_owned();
+        let mut result = Ok(());
+        for date in dates {
+            let answer = self.find_files(&finder, channel, date).and_then(|any| {
+                if !any {
+                    return Ok(false);
+                }
+                let body = self.get(&format!(
+                    "/cgi-bin/mediaFileFind.cgi?action=findNextFile&object={finder}&count=1"
+                ))?;
+                Ok(!parse_files(&body).is_empty())
+            });
+            match answer {
+                Ok(recorded) => {
+                    if !found(date, recorded) {
+                        break;
+                    }
+                }
+                Err(error) => {
+                    result = Err(error);
+                    break;
+                }
+            }
+        }
+        let base = "/cgi-bin/mediaFileFind.cgi?action";
+        let _ = self.get(&format!("{base}=close&object={finder}"));
+        let _ = self.get(&format!("{base}=destroy&object={finder}"));
+        result
+    }
+
+    /// Starts a search. The recorder answers an error to one that finds nothing.
+    fn find_files(&self, finder: &str, channel: u32, date: &str) -> Result<bool, Error> {
         let path = format!(
             "/cgi-bin/mediaFileFind.cgi?action=findFile&object={finder}&condition.Channel={channel}\
              &condition.StartTime={date}%2000:00:00&condition.EndTime={date}%2023:59:59"
         );
         match self.get(&path) {
-            Ok(_) => {}
-            Err(Error::Status(400)) => return Ok(Vec::new()),
-            Err(error) => return Err(error),
+            Ok(_) => Ok(true),
+            Err(Error::Status(400)) => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn search_files(&self, finder: &str, channel: u32, date: &str) -> Result<Vec<Span>, Error> {
+        if !self.find_files(finder, channel, date)? {
+            return Ok(Vec::new());
         }
         let mut spans = Vec::new();
         loop {
@@ -185,7 +240,17 @@ impl Client {
 
     fn get(&self, path: &str) -> Result<String, Error> {
         let url = format!("http://{}:{}{path}", self.host, self.http_port);
-        let mut response = self.agent.get(&url).call()?;
+        let saved = self.challenge.lock().unwrap().as_mut().map(|prompt| {
+            let context = AuthContext::new(self.user.as_str(), self.password.as_str(), path);
+            prompt
+                .respond(&context)
+                .map(|answer| answer.to_header_string())
+        });
+        let mut request = self.agent.get(&url);
+        if let Some(Ok(answer)) = saved {
+            request = request.header("Authorization", answer);
+        }
+        let mut response = request.call()?;
         if response.status() == StatusCode::UNAUTHORIZED {
             let challenge = response
                 .headers()
@@ -200,6 +265,7 @@ impl Client {
                 .respond(&context)
                 .map_err(|e| Error::Challenge(e.to_string()))?
                 .to_header_string();
+            *self.challenge.lock().unwrap() = Some(prompt);
             response = self
                 .agent
                 .get(&url)

@@ -1639,6 +1639,39 @@ ApplicationWindow {
                         focus: true
                         padding: 10
                         property date shown: playback.date ? new Date(playback.date + "T12:00:00") : new Date()
+                        // Days with recordings, by camera and month, since searching takes seconds.
+                        property var knownDays: ({})
+                        readonly property string monthText: Qt.formatDate(shown, "yyyy-MM")
+                        readonly property string monthKey: win.playbackCamera
+                            ? win.playbackCamera.recorder + ":" + win.playbackCamera.number + ":" + monthText : ""
+                        readonly property var days: knownDays[monthKey] ?? []
+
+                        // Months whose search finished, which don't need another one.
+                        property var finished: ({})
+
+                        function search() {
+                            if (!win.playbackCamera || finished[monthKey])
+                                return
+                            grid.searchRecordedDays(win.playbackCamera.recorder, win.playbackCamera.number, monthText)
+                        }
+                        // Before anyone opens it, so it opens with the days already marked.
+                        onMonthKeyChanged: search()
+                        onAboutToShow: {
+                            if (playback.date)
+                                shown = new Date(playback.date + "T12:00:00")
+                        }
+
+                        Connections {
+                            target: grid
+                            function onRecordedDaysChanged() {
+                                const found = JSON.parse(grid.recordedDays)
+                                const known = calendar.knownDays
+                                known[found.key] = found.days
+                                calendar.knownDays = Object.assign({}, known)
+                                if (found.done)
+                                    calendar.finished[found.key] = true
+                            }
+                        }
                         background: Rectangle {
                             radius: 10
                             color: colors.surface
@@ -1673,14 +1706,23 @@ ApplicationWindow {
                                     calendar.close()
                                     playback.changeDay(Qt.formatDate(date, "yyyy-MM-dd"))
                                 }
-                                delegate: Text {
+                                delegate: Rectangle {
+                                    id: dayCell
                                     required property var model
-                                    horizontalAlignment: Text.AlignHCenter
-                                    verticalAlignment: Text.AlignVCenter
-                                    opacity: model.month === calendar.shown.getMonth() ? 1 : 0.35
-                                    color: colors.text
-                                    font.pixelSize: 13
-                                    text: model.day
+                                    readonly property bool inMonth: model.month === calendar.shown.getMonth()
+                                    readonly property bool recorded: inMonth && calendar.days.includes(model.day)
+                                    implicitWidth: 34
+                                    implicitHeight: 28
+                                    radius: 5
+                                    color: recorded ? colors.accent : "transparent"
+                                    opacity: inMonth ? 1 : 0.35
+                                    Text {
+                                        anchors.centerIn: parent
+                                        color: dayCell.recorded ? "#FFFFFF" : colors.text
+                                        font.pixelSize: 13
+                                        font.weight: dayCell.recorded ? Font.DemiBold : Font.Normal
+                                        text: dayCell.model.day
+                                    }
                                 }
                             }
                         }
