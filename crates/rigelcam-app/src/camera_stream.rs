@@ -268,12 +268,14 @@ enum Outcome {
 fn play(shared: &Arc<Shared>, source: &Source, revision: u64, generation: u64) -> Outcome {
     let last_frame = Arc::new(Mutex::new(Instant::now()));
     let received_video = Arc::new(AtomicBool::new(false));
+    let waiting_keyframe = Arc::new(AtomicBool::new(true));
     let Some(pipeline) = build_pipeline(
         shared.clone(),
         source,
         generation,
         last_frame.clone(),
         received_video.clone(),
+        waiting_keyframe.clone(),
     ) else {
         return Outcome::Lost {
             received_video: false,
@@ -311,6 +313,7 @@ fn play(shared: &Arc<Shared>, source: &Source, revision: u64, generation: u64) -
             // Only once frames flow, because rtspsrc can't seek before it is playing.
             if !speed_applied && received_video.load(Ordering::Relaxed) {
                 speed_applied = true;
+                waiting_keyframe.store(true, Ordering::Relaxed);
                 let seek = pipeline.seek(
                     f64::from(source.rate),
                     gst::SeekFlags::FLUSH,
@@ -322,6 +325,8 @@ fn play(shared: &Arc<Shared>, source: &Source, revision: u64, generation: u64) -
                 if let Err(error) = seek {
                     eprintln!("could not change the speed of {} ({error})", source.url);
                 }
+                // The seek flushed the decoder, and buffers may have passed before it did.
+                waiting_keyframe.store(true, Ordering::Relaxed);
             }
             if let Some(message) = bus.timed_pop(gst::ClockTime::from_mseconds(200)) {
                 match message.view() {
@@ -361,6 +366,7 @@ fn build_pipeline(
     generation: u64,
     last_frame: Arc<Mutex<Instant>>,
     received_video: Arc<AtomicBool>,
+    waiting_keyframe: Arc<AtomicBool>,
 ) -> Option<gst::Pipeline> {
     let pipeline = gst::Pipeline::new();
     let src = gst::ElementFactory::make("rtspsrc")
@@ -405,7 +411,7 @@ fn build_pipeline(
             }
         };
         let description = format!(
-            "{depay} ! {parse} ! {decoder} ! video/x-raw(memory:DMABuf),format=DMA_DRM \
+            "{depay} ! {parse} name=parser ! {decoder} ! video/x-raw(memory:DMABuf),format=DMA_DRM \
              ! appsink name=sink sync=false max-buffers=1 drop=true"
         );
         let Ok(branch) = gst::parse::bin_from_description(&description, true) else {
@@ -429,6 +435,26 @@ fn build_pipeline(
                 gst::PadProbeReturn::Ok
             },
         );
+        // A frame that depends on a keyframe the decoder doesn't have comes out green, which is
+        // what the stream starts with when it opens or changes speed between two keyframes.
+        let waiting = waiting_keyframe.clone();
+        let parser = branch.by_name("parser").unwrap();
+        parser
+            .static_pad("src")
+            .unwrap()
+            .add_probe(gst::PadProbeType::BUFFER, move |_, info| {
+                let Some(gst::PadProbeData::Buffer(buffer)) = &info.data else {
+                    return gst::PadProbeReturn::Ok;
+                };
+                if !waiting.load(Ordering::Relaxed) {
+                    return gst::PadProbeReturn::Ok;
+                }
+                if buffer.flags().contains(gst::BufferFlags::DELTA_UNIT) {
+                    return gst::PadProbeReturn::Drop;
+                }
+                waiting.store(false, Ordering::Relaxed);
+                gst::PadProbeReturn::Ok
+            });
         let last_frame = last_frame.clone();
         let received_video = received_video.clone();
         let shared = shared.clone();
