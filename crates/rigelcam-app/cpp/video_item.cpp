@@ -382,6 +382,14 @@ extern "C" void rigel_item_set_frame(void *item, const RigelFrame *frame) {
     static_cast<VideoItem *>(item)->setFrame(*frame);
 }
 
+extern "C" void rigel_item_position(void *item, double seconds) {
+    QMetaObject::invokeMethod(static_cast<VideoItem *>(item), "playbackPosition", Qt::QueuedConnection, Q_ARG(double, seconds));
+}
+
+extern "C" void rigel_item_ended(void *item) {
+    QMetaObject::invokeMethod(static_cast<VideoItem *>(item), "playbackEnded", Qt::QueuedConnection);
+}
+
 extern "C" void rigel_item_auth_refused(void *item) {
     QMetaObject::invokeMethod(static_cast<VideoItem *>(item), "authRefused", Qt::QueuedConnection);
 }

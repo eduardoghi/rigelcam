@@ -221,6 +221,7 @@ ApplicationWindow {
     // Key of the camera shown alone after a double click, or empty for the whole grid.
     property string zoomed: ""
     property string zoomedName: ""
+    property var zoomedCamera: null
     readonly property bool fullScreen: visibility === Window.FullScreen
     // Where F11 goes back to, since the window may have been maximized or not.
     property int windowedVisibility: Window.Maximized
@@ -235,6 +236,11 @@ ApplicationWindow {
         zoomX = 0
         zoomY = 0
     }
+    // "live" or "recordings", which stops the live cameras to free the network and the decoder.
+    property string mode: "live"
+    readonly property bool inRecordings: mode === "recordings"
+    // The camera being watched in the recordings: { recorder, number, name }, or null.
+    property var playbackCamera: null
     // The camera being dragged to a square.
     property var dragged: null
     // Recorders with their cameras folded in the sidebar, for this session.
@@ -314,6 +320,18 @@ ApplicationWindow {
 
     Component.onCompleted: win.showMaximized()
 
+    function setMode(next) {
+        if (next === mode)
+            return
+        zoomed = ""
+        mode = next
+    }
+
+    function openPlayback(camera) {
+        playbackCamera = camera
+        playback.open(camera)
+    }
+
     function updateLiveCount() {
         let live = 0
         const status = {}
@@ -355,6 +373,19 @@ ApplicationWindow {
             else
                 win.toggleFullScreen()
         }
+    }
+
+    // Text fields keep these keys for their cursor, so they work in the search box as usual.
+    Shortcut {
+        sequence: "Left"
+        enabled: win.inRecordings && playback.spans.length > 0
+        onActivated: playback.seek(playback.position - 10)
+    }
+
+    Shortcut {
+        sequence: "Right"
+        enabled: win.inRecordings && playback.spans.length > 0
+        onActivated: playback.seek(playback.position + 10)
     }
 
     Shortcut {
@@ -406,8 +437,15 @@ ApplicationWindow {
                 sourceSize.height: 60
             }
 
-            Rectangle {
+            AppButton {
                 visible: win.recorderList.length > 0
+                text: win.inRecordings ? qsTr("Live") : qsTr("Recordings")
+                edge: colors.line
+                onClicked: win.setMode(win.inRecordings ? "live" : "recordings")
+            }
+
+            Rectangle {
+                visible: win.recorderList.length > 0 && !win.inRecordings
                 width: 7
                 height: 7
                 radius: 4
@@ -415,7 +453,7 @@ ApplicationWindow {
                 Layout.leftMargin: 4
             }
             Label {
-                visible: win.recorderList.length > 0
+                visible: win.recorderList.length > 0 && !win.inRecordings
                 font.pixelSize: 13
                 color: colors.muted
                 text: qsTr("%1 of %2 live").arg(win.liveCount).arg(win.includedCount)
@@ -440,7 +478,7 @@ ApplicationWindow {
 
             AppComboBox {
                 Layout.preferredWidth: 150
-                visible: win.recorderList.length > 0
+                visible: win.recorderList.length > 0 && !win.inRecordings
                 // Fixed, because a new list would reset the current row when the language changes.
                 model: [1, 2, 3, 4, 5, 6].map(columns => ({ columns: columns }))
                 labelOf: item => item.columns === 1 ? qsTr("1 square") : qsTr("%1 squares").arg(item.columns * item.columns)
@@ -881,7 +919,8 @@ ApplicationWindow {
                                     onTapped: if (tapCount === 1) foldLater.restart()
                                     onDoubleTapped: {
                                         foldLater.stop()
-                                        grid.openRecorder(recorderGroup.modelData.id)
+                                        if (!win.inRecordings)
+                                            grid.openRecorder(recorderGroup.modelData.id)
                                     }
                                 }
                             }
@@ -926,7 +965,11 @@ ApplicationWindow {
                                     required property var modelData
                                     readonly property string key: win.cameraKey(recorderGroup.modelData.id, modelData.number)
                                     readonly property bool onGrid: win.gridKeys.includes(key)
-                                    readonly property string status: win.cameraStatus[key] ?? ""
+                                    readonly property bool isPlayback: win.inRecordings && win.playbackCamera !== null
+                                        && win.playbackCamera.recorder === recorderGroup.modelData.id
+                                        && win.playbackCamera.number === modelData.number
+                                    // The live cameras are stopped in the recordings, so their state means nothing.
+                                    readonly property string status: win.inRecordings ? "" : (win.cameraStatus[key] ?? "")
                                     readonly property var payload: ({
                                         recorder: recorderGroup.modelData.id,
                                         number: modelData.number,
@@ -946,11 +989,12 @@ ApplicationWindow {
                                             width: 8
                                             height: 8
                                             radius: 4
-                                            color: cameraRow.status === "live" ? colors.live
+                                            color: cameraRow.isPlayback ? colors.accent
+                                                 : cameraRow.status === "live" ? colors.live
                                                  : cameraRow.status === "lost" ? colors.danger
                                                  : cameraRow.status === "connecting" ? colors.waiting
                                                  : "transparent"
-                                            border.color: cameraRow.onGrid ? color : colors.muted
+                                            border.color: cameraRow.onGrid && !win.inRecordings ? color : cameraRow.isPlayback ? colors.accent : colors.muted
                                         }
                                         Text {
                                             Layout.fillWidth: true
@@ -958,12 +1002,12 @@ ApplicationWindow {
                                             textFormat: Text.PlainText
                                             elide: Text.ElideRight
                                             font.pixelSize: 13
-                                            color: cameraRow.onGrid ? colors.text : colors.muted
+                                            color: cameraRow.onGrid || cameraRow.isPlayback ? colors.text : colors.muted
                                         }
                                     }
 
                                     AppToolTip {
-                                        visible: rowHover.hovered
+                                        visible: rowHover.hovered && !win.inRecordings
                                         text: cameraRow.status === "live" ? qsTr("Live")
                                             : cameraRow.status === "lost" ? qsTr("No signal")
                                             : cameraRow.status === "connecting" ? qsTr("Connecting…")
@@ -972,7 +1016,12 @@ ApplicationWindow {
 
                                     HoverHandler { id: rowHover }
                                     TapHandler {
-                                        onDoubleTapped: grid.addCamera(recorderGroup.modelData.id, cameraRow.modelData.number)
+                                        onDoubleTapped: {
+                                            if (win.inRecordings)
+                                                win.openPlayback(cameraRow.payload)
+                                            else
+                                                grid.addCamera(recorderGroup.modelData.id, cameraRow.modelData.number)
+                                        }
                                     }
                                     CameraDrag { camera: cameraRow.payload }
                                 }
@@ -992,6 +1041,7 @@ ApplicationWindow {
         anchors.right: parent.right
         anchors.top: parent.top
         anchors.bottom: parent.bottom
+        visible: !win.inRecordings
 
         ListModel { id: tileModel }
 
@@ -1009,7 +1059,7 @@ ApplicationWindow {
                 readonly property var payload: ({ recorder: recorder, number: number, name: label })
                 readonly property int square: win.gridKeys.indexOf(key)
                 readonly property bool included: square >= 0
-                readonly property bool shown: included && (win.zoomed === "" || win.zoomed === key)
+                readonly property bool shown: included && !win.inRecordings && (win.zoomed === "" || win.zoomed === key)
                 readonly property bool isMain: win.zoomed === key
                 view: isMain ? win.zoomView : Qt.rect(0, 0, 1, 1)
 
@@ -1170,6 +1220,7 @@ ApplicationWindow {
                 TapHandler {
                     onDoubleTapped: {
                         win.zoomedName = tile.label
+                        win.zoomedCamera = tile.payload
                         win.zoomed = win.zoomed ? "" : tile.key
                     }
                 }
@@ -1189,7 +1240,7 @@ ApplicationWindow {
                 required property int index
                 readonly property var key: win.gridKeys[index] ?? null
                 readonly property bool hasTile: key !== null && win.tileKeys.includes(key)
-                visible: win.zoomed === ""
+                visible: win.zoomed === "" && !win.inRecordings
                 x: (index % win.cols) * (cameraArea.cellWidth + 2)
                 y: Math.floor(index / win.cols) * (cameraArea.cellHeight + 2)
                 width: cameraArea.cellWidth
@@ -1280,6 +1331,14 @@ ApplicationWindow {
                 text: qsTr("Back")
                 onClicked: win.zoomed = ""
             }
+            AppButton {
+                text: qsTr("Recordings")
+                onClicked: {
+                    const camera = win.zoomedCamera
+                    win.setMode("recordings")
+                    win.openPlayback(camera)
+                }
+            }
             Text {
                 text: win.zoomedName
                 textFormat: Text.PlainText
@@ -1323,6 +1382,469 @@ ApplicationWindow {
                 AppToolTip {
                     visible: zoomIn.hovered
                     text: zoomIn.text
+                }
+            }
+        }
+    }
+
+    Item {
+        id: playback
+        anchors.left: sidebar.right
+        anchors.right: parent.right
+        anchors.top: parent.top
+        anchors.bottom: parent.bottom
+        visible: win.inRecordings
+
+        // The day shown, as YYYY-MM-DD on the clock of the recorder.
+        property string date: ""
+        property var spans: []
+        property int nowSeconds: 86400
+        property string today: ""
+        property int rate: 1
+        property bool playing: false
+        // Where a pipeline was opened, and where the bar is.
+        property int openedAt: 0
+        property real position: 0
+        // Set by a seek until the new stream speaks, so the bar never goes back by itself.
+        property bool seeking: false
+        property real lastElapsed: 0
+
+        readonly property var recordings: grid.recordings ? JSON.parse(grid.recordings) : null
+
+        onRecordingsChanged: {
+            if (!recordings)
+                return
+            date = recordings.date
+            spans = recordings.spans
+            const now = recordings.now.split(" ")
+            today = now[0]
+            const clock = now[1].split(":")
+            nowSeconds = date === today ? parseInt(clock[0]) * 3600 + parseInt(clock[1]) * 60 + parseInt(clock[2]) : 86400
+            if (spans.length === 0) {
+                stop()
+                return
+            }
+            // Opens near the end of the current day, and at the start of older ones.
+            const last = spans[spans.length - 1]
+            seek(date === today ? Math.max(last.start, last.end - 60) : spans[0].start)
+        }
+
+        function open(camera) {
+            stop()
+            grid.searchRecordings(camera.recorder, camera.number, date)
+        }
+
+        function changeDay(day) {
+            if (win.playbackCamera)
+                grid.searchRecordings(win.playbackCamera.recorder, win.playbackCamera.number, day)
+        }
+
+        function stepDay(days) {
+            const day = new Date(date + "T12:00:00")
+            day.setDate(day.getDate() + days)
+            changeDay(Qt.formatDate(day, "yyyy-MM-dd"))
+        }
+
+        function stop() {
+            playing = false
+            seeking = false
+            grid.show(video, 0, 0, false, false)
+        }
+
+        // A time inside a gap goes to the next recording, and one after the last does nothing.
+        function recordedTime(seconds) {
+            for (const span of spans) {
+                if (seconds < span.end)
+                    return Math.max(seconds, span.start)
+            }
+            return -1
+        }
+
+        function seek(seconds) {
+            const target = recordedTime(seconds)
+            if (target < 0 || !win.playbackCamera)
+                return
+            position = target
+            openedAt = Math.floor(target)
+            seeking = true
+            playing = true
+            grid.play(video, win.playbackCamera.recorder, win.playbackCamera.number, date, openedAt, rate)
+        }
+
+        function setRate(next) {
+            rate = next
+            seek(position)
+        }
+
+        function togglePlaying() {
+            playing = !playing
+            grid.pausePlayback(video, !playing)
+        }
+
+        // The stream counts only recorded time, so its elapsed seconds walk the recordings of the
+        // day to find the time on the clock, jumping over the gaps.
+        function timeAfter(elapsed) {
+            let time = openedAt
+            let left = elapsed
+            for (const span of spans) {
+                if (span.end <= time)
+                    continue
+                time = Math.max(time, span.start)
+                if (left <= span.end - time)
+                    return time + left
+                left -= span.end - time
+                time = span.end
+            }
+            return time
+        }
+
+        function clockText(seconds) {
+            const pad = n => String(Math.floor(n)).padStart(2, "0")
+            return pad(seconds / 3600) + ":" + pad(seconds / 60 % 60) + ":" + pad(seconds % 60)
+        }
+
+        onVisibleChanged: if (!visible) stop()
+
+        VideoItem {
+            id: video
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.top: parent.top
+            anchors.bottom: controls.top
+
+            onPlaybackPosition: seconds => {
+                // Reports of the stream that a seek replaced still arrive for a moment. The new
+                // one counts from zero again.
+                if (playback.seeking) {
+                    if (seconds >= playback.lastElapsed && playback.lastElapsed > 0)
+                        return
+                    playback.seeking = false
+                }
+                playback.lastElapsed = seconds
+                playback.position = playback.timeAfter(seconds)
+            }
+            onPlaybackEnded: playback.playing = false
+        }
+
+        Label {
+            anchors.centerIn: video
+            visible: !win.playbackCamera || playback.spans.length === 0
+            font.pixelSize: 14
+            color: colors.muted
+            text: win.playbackCamera ? qsTr("No recordings on this day.") : qsTr("Double-click a camera to see its recordings.")
+        }
+
+        Rectangle {
+            id: controls
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.bottom: parent.bottom
+            height: 112
+            color: colors.bar
+
+            RowLayout {
+                id: playerRow
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.top: parent.top
+                anchors.margins: 10
+                spacing: 6
+
+                AppButton {
+                    enabled: win.playbackCamera !== null
+                    text: "‹"
+                    implicitWidth: 34
+                    onClicked: playback.stepDay(-1)
+                    AppToolTip { visible: parent.hovered; text: qsTr("Previous day") }
+                }
+                AppButton {
+                    enabled: win.playbackCamera !== null
+                    text: playback.date ? new Date(playback.date + "T12:00:00").toLocaleDateString(Qt.locale(grid.language), Locale.ShortFormat) : ""
+                    edge: colors.line
+                    onClicked: calendar.open()
+                    AppToolTip { visible: parent.hovered; text: qsTr("Pick a day") }
+
+                    Popup {
+                        id: calendar
+                        y: -height - 6
+                        modal: true
+                        dim: false
+                        focus: true
+                        padding: 10
+                        property date shown: playback.date ? new Date(playback.date + "T12:00:00") : new Date()
+                        background: Rectangle {
+                            radius: 10
+                            color: colors.surface
+                            border.color: colors.line
+                        }
+                        ColumnLayout {
+                            RowLayout {
+                                Layout.fillWidth: true
+                                AppButton {
+                                    text: "‹"
+                                    implicitWidth: 30
+                                    onClicked: calendar.shown = new Date(calendar.shown.getFullYear(), calendar.shown.getMonth() - 1, 1)
+                                }
+                                Label {
+                                    Layout.fillWidth: true
+                                    horizontalAlignment: Text.AlignHCenter
+                                    color: colors.text
+                                    font.pixelSize: 13
+                                    text: Qt.locale(grid.language).standaloneMonthName(calendar.shown.getMonth()) + " " + calendar.shown.getFullYear()
+                                }
+                                AppButton {
+                                    text: "›"
+                                    implicitWidth: 30
+                                    onClicked: calendar.shown = new Date(calendar.shown.getFullYear(), calendar.shown.getMonth() + 1, 1)
+                                }
+                            }
+                            MonthGrid {
+                                month: calendar.shown.getMonth()
+                                year: calendar.shown.getFullYear()
+                                locale: Qt.locale(grid.language)
+                                onClicked: date => {
+                                    calendar.close()
+                                    playback.changeDay(Qt.formatDate(date, "yyyy-MM-dd"))
+                                }
+                                delegate: Text {
+                                    required property var model
+                                    horizontalAlignment: Text.AlignHCenter
+                                    verticalAlignment: Text.AlignVCenter
+                                    opacity: model.month === calendar.shown.getMonth() ? 1 : 0.35
+                                    color: colors.text
+                                    font.pixelSize: 13
+                                    text: model.day
+                                }
+                            }
+                        }
+                    }
+                }
+                AppButton {
+                    enabled: win.playbackCamera !== null && playback.date < playback.today
+                    text: "›"
+                    implicitWidth: 34
+                    onClicked: playback.stepDay(1)
+                    AppToolTip { visible: parent.hovered; text: qsTr("Next day") }
+                }
+
+                Item { Layout.fillWidth: true }
+
+                AppButton {
+                    enabled: playback.spans.length > 0
+                    text: "-10"
+                    implicitWidth: 40
+                    leftPadding: 4
+                    rightPadding: 4
+                    onClicked: playback.seek(playback.position - 10)
+                    AppToolTip { visible: parent.hovered; text: qsTr("Back 10 s") }
+                }
+                AppButton {
+                    enabled: playback.spans.length > 0
+                    text: playback.playing ? "II" : "▶"
+                    implicitWidth: 40
+                    leftPadding: 4
+                    rightPadding: 4
+                    fill: colors.raised
+                    onClicked: playback.togglePlaying()
+                    AppToolTip { visible: parent.hovered; text: playback.playing ? qsTr("Pause") : qsTr("Play") }
+                }
+                AppButton {
+                    enabled: playback.spans.length > 0
+                    text: "+10"
+                    implicitWidth: 40
+                    leftPadding: 4
+                    rightPadding: 4
+                    onClicked: playback.seek(playback.position + 10)
+                    AppToolTip { visible: parent.hovered; text: qsTr("Forward 10 s") }
+                }
+                Text {
+                    Layout.leftMargin: 8
+                    font.pixelSize: 15
+                    font.weight: Font.Medium
+                    color: colors.text
+                    text: playback.clockText(playback.position)
+                }
+
+                Item { Layout.fillWidth: true }
+
+                Repeater {
+                    model: [1, 2, 4, 8]
+                    AppButton {
+                        required property int modelData
+                        enabled: playback.spans.length > 0
+                        text: modelData + "x"
+                        implicitWidth: 40
+                        leftPadding: 4
+                        rightPadding: 4
+                        fill: playback.rate === modelData ? colors.raised : "transparent"
+                        onClicked: playback.setRate(modelData)
+                    }
+                }
+            }
+
+            Item {
+                id: timeline
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.top: playerRow.bottom
+                anchors.bottom: parent.bottom
+                anchors.margins: 10
+
+                // The part of the day on screen, in seconds, which the wheel changes.
+                property real viewStart: 0
+                property real viewEnd: 86400
+                readonly property real scale: width / (viewEnd - viewStart)
+                // Marks sit on round times of the clock, so they slide with the bar when it moves.
+                readonly property int tickStep: {
+                    for (const step of [60, 120, 300, 600, 900, 1800, 3600, 7200, 10800]) {
+                        if (step * scale >= 70)
+                            return step
+                    }
+                    return 21600
+                }
+                readonly property real firstTick: Math.ceil(viewStart / tickStep) * tickStep
+                readonly property int tickCount: Math.max(0, Math.floor((viewEnd - firstTick) / tickStep) + 1)
+
+                function xOf(seconds) {
+                    return (seconds - viewStart) * scale
+                }
+
+                function timeAt(x) {
+                    return viewStart + x / scale
+                }
+
+                function panTo(start) {
+                    const span = viewEnd - viewStart
+                    viewStart = win.clamp(start, 0, 86400 - span)
+                    viewEnd = viewStart + span
+                }
+
+                // A zoomed bar follows the playback until the user moves it to look elsewhere,
+                // and goes back to following after the next seek.
+                property bool following: true
+
+                Connections {
+                    target: playback
+                    function onSeekingChanged() {
+                        if (playback.seeking)
+                            timeline.following = true
+                    }
+                    function onPositionChanged() {
+                        const span = timeline.viewEnd - timeline.viewStart
+                        const outside = playback.position < timeline.viewStart || playback.position > timeline.viewEnd
+                        if (outside && timeline.following)
+                            timeline.panTo(playback.position - span * 0.1)
+                    }
+                }
+
+                Rectangle {
+                    id: track
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+                    height: 22
+                    radius: 3
+                    color: colors.surface
+                    clip: true
+
+                    Repeater {
+                        model: playback.spans
+                        Rectangle {
+                            required property var modelData
+                            x: timeline.xOf(modelData.start)
+                            width: Math.max(1, (modelData.end - modelData.start) * timeline.scale)
+                            height: track.height
+                            color: modelData.event ? colors.waiting : colors.accent
+                            opacity: 0.75
+                        }
+                    }
+
+                    Repeater {
+                        model: timeline.tickCount
+                        Rectangle {
+                            required property int index
+                            x: timeline.xOf(timeline.firstTick + index * timeline.tickStep)
+                            width: 1
+                            height: track.height
+                            color: colors.page
+                            opacity: 0.5
+                        }
+                    }
+
+                    // After the current moment nothing was recorded yet.
+                    Rectangle {
+                        x: timeline.xOf(playback.nowSeconds)
+                        width: Math.max(0, track.width - x)
+                        height: track.height
+                        color: colors.page
+                        opacity: 0.6
+                    }
+
+                    Rectangle {
+                        x: timeline.xOf(playback.position) - 1
+                        width: 2
+                        height: track.height
+                        color: colors.text
+                    }
+                }
+
+                Repeater {
+                    model: timeline.tickCount
+                    Text {
+                        required property int index
+                        readonly property real time: timeline.firstTick + index * timeline.tickStep
+                        y: track.height + 4
+                        x: timeline.xOf(time) - implicitWidth / 2
+                        visible: x >= 0 && x + implicitWidth <= timeline.width
+                        font.pixelSize: 11
+                        color: colors.muted
+                        text: playback.clockText(time).slice(0, 5)
+                    }
+                }
+
+                MouseArea {
+                    id: timelineMouse
+                    property real pressX: 0
+                    property real pressStart: 0
+                    property bool panning: false
+                    anchors.fill: track
+                    cursorShape: panning ? Qt.ClosedHandCursor : Qt.PointingHandCursor
+                    onPressed: mouse => {
+                        pressX = mouse.x
+                        pressStart = timeline.viewStart
+                        panning = false
+                    }
+                    onPositionChanged: mouse => {
+                        if (Math.abs(mouse.x - pressX) > 4)
+                            panning = true
+                        if (panning) {
+                            timeline.following = false
+                            timeline.panTo(pressStart - (mouse.x - pressX) / timeline.scale)
+                        }
+                    }
+                    // Dragging only moves the bar, so it never changes what is playing by accident.
+                    onReleased: mouse => {
+                        if (!panning)
+                            playback.seek(timeline.timeAt(mouse.x))
+                        panning = false
+                    }
+                    onWheel: wheel => {
+                        const shift = wheel.modifiers & Qt.ShiftModifier
+                        if (shift || wheel.angleDelta.x !== 0) {
+                            // With Shift, some systems report the wheel as horizontal and inverted.
+                            const delta = shift ? (wheel.angleDelta.y || -wheel.angleDelta.x) : wheel.angleDelta.x
+                            const span = timeline.viewEnd - timeline.viewStart
+                            timeline.following = false
+                            timeline.panTo(timeline.viewStart - delta / 120 * span * 0.1)
+                            return
+                        }
+                        const anchor = timeline.timeAt(wheel.x)
+                        const span = timeline.viewEnd - timeline.viewStart
+                        const next = win.clamp(span * Math.pow(0.9985, wheel.angleDelta.y), 300, 86400)
+                        const start = win.clamp(anchor - (anchor - timeline.viewStart) * next / span, 0, 86400 - next)
+                        timeline.viewStart = start
+                        timeline.viewEnd = start + next
+                    }
                 }
             }
         }

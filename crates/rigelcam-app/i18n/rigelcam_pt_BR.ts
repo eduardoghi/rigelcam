@@ -223,5 +223,45 @@
         <source>The recorder list is corrupted. The file was not changed.</source>
         <translation>A lista de gravadores está corrompida. O arquivo não foi alterado.</translation>
     </message>
+    <message>
+        <source>Recordings</source>
+        <translation>Gravações</translation>
+    </message>
+    <message>
+        <source>Double-click a camera to see its recordings.</source>
+        <translation>Dê dois cliques em uma câmera para ver as gravações.</translation>
+    </message>
+    <message>
+        <source>No recordings on this day.</source>
+        <translation>Sem gravações neste dia.</translation>
+    </message>
+    <message>
+        <source>Play</source>
+        <translation>Reproduzir</translation>
+    </message>
+    <message>
+        <source>Pause</source>
+        <translation>Pausar</translation>
+    </message>
+    <message>
+        <source>Back 10 s</source>
+        <translation>Voltar 10 s</translation>
+    </message>
+    <message>
+        <source>Forward 10 s</source>
+        <translation>Avançar 10 s</translation>
+    </message>
+    <message>
+        <source>Previous day</source>
+        <translation>Dia anterior</translation>
+    </message>
+    <message>
+        <source>Next day</source>
+        <translation>Próximo dia</translation>
+    </message>
+    <message>
+        <source>Pick a day</source>
+        <translation>Escolher o dia</translation>
+    </message>
 </context>
 </TS>

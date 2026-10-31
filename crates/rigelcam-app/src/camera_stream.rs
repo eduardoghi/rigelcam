@@ -18,6 +18,8 @@ const DRM_FORMAT_NV12: u32 = 0x3231_564e;
 /// A stream that stops sending frames without an error counts as lost after this long.
 const STALL_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_RETRY_DELAY: Duration = Duration::from_secs(30);
+/// How often a recording tells where it is, which is enough for a moving bar.
+const POSITION_INTERVAL: Duration = Duration::from_millis(250);
 
 #[repr(C)]
 struct RigelFrame {
@@ -40,6 +42,8 @@ extern "C" {
     fn rigel_item_set_frame(item: *mut c_void, frame: *const RigelFrame);
     fn rigel_item_set_status(item: *mut c_void, has_video: bool, signal_lost: bool);
     fn rigel_item_auth_refused(item: *mut c_void);
+    fn rigel_item_position(item: *mut c_void, seconds: f64);
+    fn rigel_item_ended(item: *mut c_void);
 }
 
 extern "C" fn release_sample(owner: *mut c_void) {
@@ -51,11 +55,17 @@ pub struct Source {
     pub url: String,
     pub user: String,
     pub password: String,
+    /// A recording, which reports its position and doesn't reconnect, since starting over would
+    /// go back to where it was opened.
+    pub recording: bool,
+    /// Speed of a recording, in times the normal one.
+    pub rate: u32,
 }
 
 #[derive(Default)]
 struct Control {
     source: Option<Source>,
+    paused: bool,
     /// Bumped on every change, so the worker knows its pipeline is out of date.
     revision: u64,
     stop: bool,
@@ -74,6 +84,20 @@ impl Shared {
         let item = self.item.lock().unwrap();
         if *item != 0 {
             unsafe { rigel_item_set_status(*item as *mut c_void, has_video, signal_lost) };
+        }
+    }
+
+    fn report_position(&self, seconds: f64) {
+        let item = self.item.lock().unwrap();
+        if *item != 0 {
+            unsafe { rigel_item_position(*item as *mut c_void, seconds) };
+        }
+    }
+
+    fn report_ended(&self) {
+        let item = self.item.lock().unwrap();
+        if *item != 0 {
+            unsafe { rigel_item_ended(*item as *mut c_void) };
         }
     }
 
@@ -137,6 +161,12 @@ impl CameraStream {
     }
 }
 
+impl CameraStream {
+    pub fn set_paused(&self, paused: bool) {
+        self.shared.control.lock().unwrap().paused = paused;
+    }
+}
+
 impl Drop for CameraStream {
     // Doesn't wait for the worker, since closing an RTSP session can take seconds and this runs on
     // the interface thread. After this the worker can't reach the item anymore.
@@ -194,6 +224,18 @@ fn run(shared: Arc<Shared>) {
                 reason,
             } => {
                 shared.set_status(false, true);
+                if source.recording {
+                    eprintln!("{} ({reason})", source.url);
+                    shared.report_ended();
+                    let guard = shared.control.lock().unwrap();
+                    drop(
+                        shared
+                            .changed
+                            .wait_while(guard, |c| !c.stop && c.revision == revision)
+                            .unwrap(),
+                    );
+                    continue;
+                }
                 if received_video {
                     retry_delay = Duration::from_secs(2);
                     last_reason.clear();
@@ -239,6 +281,8 @@ fn play(shared: &Arc<Shared>, source: &Source, revision: u64, generation: u64) -
         };
     };
     let bus = pipeline.bus().unwrap();
+    let mut paused = false;
+    let mut speed_applied = source.rate <= 1;
     let outcome = if pipeline.set_state(gst::State::Playing).is_err() {
         Outcome::Lost {
             received_video: false,
@@ -250,6 +294,33 @@ fn play(shared: &Arc<Shared>, source: &Source, revision: u64, generation: u64) -
                 let control = shared.control.lock().unwrap();
                 if control.stop || control.revision != revision {
                     break Outcome::Changed;
+                }
+                if control.paused != paused {
+                    paused = control.paused;
+                    let state = if paused {
+                        gst::State::Paused
+                    } else {
+                        gst::State::Playing
+                    };
+                    let _ = pipeline.set_state(state);
+                }
+            }
+            if paused {
+                *last_frame.lock().unwrap() = Instant::now();
+            }
+            // Only once frames flow, because rtspsrc can't seek before it is playing.
+            if !speed_applied && received_video.load(Ordering::Relaxed) {
+                speed_applied = true;
+                let seek = pipeline.seek(
+                    f64::from(source.rate),
+                    gst::SeekFlags::FLUSH,
+                    gst::SeekType::Set,
+                    gst::ClockTime::ZERO,
+                    gst::SeekType::None,
+                    gst::ClockTime::NONE,
+                );
+                if let Err(error) = seek {
+                    eprintln!("could not change the speed of {} ({error})", source.url);
                 }
             }
             if let Some(message) = bus.timed_pop(gst::ClockTime::from_mseconds(200)) {
@@ -312,6 +383,7 @@ fn build_pipeline(
         Some((media.as_deref() == Some("video")).to_value())
     });
 
+    let recording = source.recording;
     let weak_pipeline = pipeline.downgrade();
     src.connect_pad_added(move |_, pad| {
         let Some(pipeline) = weak_pipeline.upgrade() else {
@@ -360,10 +432,17 @@ fn build_pipeline(
         let last_frame = last_frame.clone();
         let received_video = received_video.clone();
         let shared = shared.clone();
+        let mut last_report = Instant::now();
         sink.set_callbacks(
             AppSinkCallbacks::builder()
                 .new_sample(move |sink| {
                     let sample = sink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
+                    if recording && last_report.elapsed() >= POSITION_INTERVAL {
+                        if let Some(seconds) = stream_time_of(&sample) {
+                            last_report = Instant::now();
+                            shared.report_position(seconds);
+                        }
+                    }
                     // A frame the item can't take doesn't count, so the stream ends up as lost.
                     if push_sample(&shared, sample, generation).is_some() {
                         *last_frame.lock().unwrap() = Instant::now();
@@ -401,6 +480,14 @@ fn modifier_of(sample: &gst::Sample) -> Option<u64> {
         return None;
     }
     u64::from_str_radix(modifier.trim_start_matches("0x"), 16).ok()
+}
+
+/// Seconds of recording this frame is at, since the point the stream was opened at.
+fn stream_time_of(sample: &gst::Sample) -> Option<f64> {
+    let position = sample.buffer()?.pts()?;
+    let segment = sample.segment()?.downcast_ref::<gst::ClockTime>()?;
+    let time = segment.to_stream_time(position)?;
+    Some(time.nseconds() as f64 / 1e9)
 }
 
 /// Whether the range is full, and the code of the color matrix for the video item.

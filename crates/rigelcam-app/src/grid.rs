@@ -18,6 +18,7 @@ pub mod qobject {
         #[qml_element]
         #[qproperty(QString, tree)]
         #[qproperty(QString, layout)]
+        #[qproperty(QString, recordings)]
         #[qproperty(bool, sidebar_collapsed, cxx_name = "sidebarCollapsed")]
         #[qproperty(QString, theme)]
         #[qproperty(QString, language)]
@@ -111,6 +112,28 @@ pub mod qobject {
         #[qinvokable]
         #[cxx_name = "saveSidebarCollapsed"]
         fn save_sidebar_collapsed(self: Pin<&mut Self>, collapsed: bool);
+
+        /// Asks for the recordings of a channel on a day, or on the current one of the recorder
+        /// when `date` is empty. The answer goes to the `recordings` property.
+        #[qinvokable]
+        #[cxx_name = "searchRecordings"]
+        fn search_recordings(self: Pin<&mut Self>, recorder: i32, channel: i32, date: &QString);
+
+        /// Plays a recording in an item from `seconds` after the midnight of `date`.
+        #[qinvokable]
+        unsafe fn play(
+            self: Pin<&mut Self>,
+            item: *mut QQuickItem,
+            recorder: i32,
+            channel: i32,
+            date: &QString,
+            seconds: i32,
+            rate: i32,
+        );
+
+        #[qinvokable]
+        #[cxx_name = "pausePlayback"]
+        unsafe fn pause_playback(self: Pin<&mut Self>, item: *mut QQuickItem, paused: bool);
 
         /// Points an item at a camera. `visible` false stops its video, and `main_stream` picks
         /// the full resolution stream over the substream.
@@ -220,6 +243,9 @@ impl Connection {
 pub struct CameraGridRust {
     tree: QString,
     layout: QString,
+    recordings: QString,
+    /// Latest search, so an answer to an older one is ignored.
+    search: u64,
     sidebar_collapsed: bool,
     theme: QString,
     language: QString,
@@ -502,6 +528,84 @@ impl qobject::CameraGrid {
         self.set_notice(QString::from(notice.as_str()));
     }
 
+    fn search_recordings(mut self: Pin<&mut Self>, recorder: i32, channel: i32, date: &QString) {
+        let Some(connection) = self.connections.get(&(recorder as u64)).cloned() else {
+            return;
+        };
+        let date = date.to_string();
+        let search = self.search + 1;
+        self.as_mut().rust_mut().search = search;
+        let thread = self.qt_thread();
+        std::thread::spawn(move || {
+            let client = connection.client();
+            let result = client.clock().and_then(|now| {
+                let day = if date.is_empty() {
+                    now.split(' ').next().unwrap_or_default().to_owned()
+                } else {
+                    date
+                };
+                let spans = client.recordings(channel as u32, &day)?;
+                Ok((now, day, spans))
+            });
+            let _ = thread.queue(move |mut grid: Pin<&mut qobject::CameraGrid>| {
+                if grid.search != search {
+                    return;
+                }
+                match result {
+                    Ok((now, day, spans)) => {
+                        let spans: Vec<_> = spans
+                            .iter()
+                            .map(|s| json!({"start": s.start, "end": s.end, "event": s.event}))
+                            .collect();
+                        let text = json!({"date": day, "now": now, "spans": spans}).to_string();
+                        grid.set_recordings(QString::from(text.as_str()));
+                    }
+                    Err(error) => grid.set_notice(QString::from(recorder_message(&error).as_str())),
+                }
+            });
+        });
+    }
+
+    unsafe fn play(
+        self: Pin<&mut Self>,
+        item: *mut qobject::QQuickItem,
+        recorder: i32,
+        channel: i32,
+        date: &QString,
+        seconds: i32,
+        rate: i32,
+    ) {
+        let Some(connection) = self.connections.get(&(recorder as u64)) else {
+            return;
+        };
+        let url =
+            connection
+                .client()
+                .playback_url(channel as u32, &date.to_string(), seconds as u32);
+        let source = Source {
+            url,
+            user: connection.user.clone(),
+            password: connection.password.clone(),
+            recording: true,
+            rate: rate as u32,
+        };
+        let item = item as *mut c_void;
+        let mut stream = rigel_item_stream(item) as *mut CameraStream;
+        if stream.is_null() {
+            stream = Box::into_raw(Box::new(CameraStream::new(item)));
+            rigel_item_set_stream(item, stream as *mut c_void, destroy_stream);
+        }
+        (*stream).set_paused(false);
+        (*stream).set_source(Some(source));
+    }
+
+    unsafe fn pause_playback(self: Pin<&mut Self>, item: *mut qobject::QQuickItem, paused: bool) {
+        let stream = rigel_item_stream(item as *mut c_void) as *mut CameraStream;
+        if !stream.is_null() {
+            (*stream).set_paused(paused);
+        }
+    }
+
     fn add_camera(mut self: Pin<&mut Self>, recorder: i32, channel: i32) {
         let mut added = true;
         self.as_mut().change_layout(|layout| {
@@ -775,6 +879,8 @@ impl qobject::CameraGrid {
                     url: connection.client().live_url(channel as u32, kind),
                     user: connection.user.clone(),
                     password: connection.password.clone(),
+                    recording: false,
+                    rate: 1,
                 }
             });
         (*stream).set_source(source);
