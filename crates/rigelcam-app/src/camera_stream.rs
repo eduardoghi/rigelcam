@@ -11,6 +11,9 @@ use gstreamer_allocators::DmaBufMemory;
 use gstreamer_app::{AppSink, AppSinkCallbacks};
 use gstreamer_video::{VideoColorMatrix, VideoColorRange, VideoColorimetry, VideoMeta};
 
+/// Without these no camera opens, whatever the recorder sends.
+const REQUIRED_ELEMENTS: [&str; 4] = ["rtspsrc", "rtph264depay", "h264parse", "vah264dec"];
+const H265_ELEMENTS: [&str; 3] = ["rtph265depay", "h265parse", "vah265dec"];
 const DRM_FORMAT_NV12: u32 = 0x3231_564e;
 /// A stream that stops sending frames without an error counts as lost after this long.
 const STALL_TIMEOUT: Duration = Duration::from_secs(15);
@@ -36,6 +39,7 @@ struct RigelFrame {
 extern "C" {
     fn rigel_item_set_frame(item: *mut c_void, frame: *const RigelFrame);
     fn rigel_item_set_status(item: *mut c_void, has_video: bool, signal_lost: bool);
+    fn rigel_item_auth_refused(item: *mut c_void);
 }
 
 extern "C" fn release_sample(owner: *mut c_void) {
@@ -72,6 +76,31 @@ impl Shared {
             unsafe { rigel_item_set_status(*item as *mut c_void, has_video, signal_lost) };
         }
     }
+
+    fn report_refused(&self) {
+        let item = self.item.lock().unwrap();
+        if *item != 0 {
+            unsafe { rigel_item_auth_refused(*item as *mut c_void) };
+        }
+    }
+}
+
+fn missing_from<'a>(elements: &[&'a str]) -> Vec<&'a str> {
+    elements
+        .iter()
+        .copied()
+        .filter(|name| gst::ElementFactory::find(name).is_none())
+        .collect()
+}
+
+/// GStreamer elements this system lacks to show video.
+pub fn missing_elements() -> Vec<&'static str> {
+    missing_from(&REQUIRED_ELEMENTS)
+}
+
+/// GStreamer elements this system lacks to show H.265 cameras, which H.264 cameras don't need.
+pub fn missing_h265_elements() -> Vec<&'static str> {
+    missing_from(&H265_ELEMENTS)
 }
 
 /// Owned by the video item, which drops it before going away.
@@ -146,6 +175,20 @@ fn run(shared: Arc<Shared>) {
                     shared.set_status(false, false);
                 }
             }
+            // Repeating a refused password can lock the user on the recorder, so this stream waits
+            // for a new source, and the grid stops the other cameras of the recorder.
+            Outcome::Refused => {
+                eprintln!("the recorder refused the login for {}", source.url);
+                shared.set_status(false, true);
+                shared.report_refused();
+                let guard = shared.control.lock().unwrap();
+                drop(
+                    shared
+                        .changed
+                        .wait_while(guard, |c| !c.stop && c.revision == revision)
+                        .unwrap(),
+                );
+            }
             Outcome::Lost {
                 received_video,
                 reason,
@@ -173,6 +216,7 @@ fn run(shared: Arc<Shared>) {
 enum Outcome {
     /// The source changed or the stream was asked to stop.
     Changed,
+    Refused,
     Lost {
         received_video: bool,
         reason: String,
@@ -211,6 +255,9 @@ fn play(shared: &Arc<Shared>, source: &Source, revision: u64, generation: u64) -
             if let Some(message) = bus.timed_pop(gst::ClockTime::from_mseconds(200)) {
                 match message.view() {
                     gst::MessageView::Error(error) => {
+                        if error.error().matches(gst::ResourceError::NotAuthorized) {
+                            break Outcome::Refused;
+                        }
                         break Outcome::Lost {
                             received_video: received_video.load(Ordering::Relaxed),
                             reason: error.error().to_string(),

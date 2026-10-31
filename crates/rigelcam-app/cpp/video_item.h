@@ -29,6 +29,7 @@ void rigel_register_types();
 void rigel_set_app_identity();
 void rigel_item_set_frame(void *item, const RigelFrame *frame);
 void rigel_item_set_status(void *item, bool has_video, bool signal_lost);
+void rigel_item_auth_refused(void *item);
 void rigel_item_set_stream(void *item, void *stream, void (*destroy)(void *));
 void *rigel_item_stream(void *item);
 }
@@ -57,6 +58,8 @@ public:
 signals:
     void statusChanged();
     void viewChanged();
+    /// The recorder refused the user or password, and this stream stopped trying.
+    void authRefused();
 
 protected:
     QSGNode *updatePaintNode(QSGNode *old, UpdatePaintNodeData *) override;

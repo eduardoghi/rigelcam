@@ -47,6 +47,9 @@ impl Client {
         // Status codes are handled here because a 401 is the normal first step of Digest.
         let agent = ureq::Agent::config_builder()
             .http_status_as_error(false)
+            // A recorder sits on the local network, and a proxy of the system would only see its
+            // address and user, or block it. RTSP doesn't go through one either.
+            .proxy(None)
             .timeout_global(Some(Duration::from_secs(15)))
             .build()
             .into();
@@ -65,6 +68,13 @@ impl Client {
         parse_value(&body, "type")
             .map(str::to_owned)
             .ok_or_else(|| Error::Unexpected(body.clone()))
+    }
+
+    /// Points at ports other than the HTTP 80 and RTSP 554 of a factory recorder.
+    pub fn with_ports(mut self, http_port: u16, rtsp_port: u16) -> Self {
+        self.http_port = http_port;
+        self.rtsp_port = rtsp_port;
+        self
     }
 
     /// Lists every channel the recorder has, including the ones with no camera connected.
@@ -168,6 +178,21 @@ fn parse_disabled_cameras(body: &str) -> Vec<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ignores_the_proxy_of_the_system() {
+        let client = Client::new("recorder.local", "admin", "secret");
+        assert!(client.agent.config().proxy().is_none());
+    }
+
+    #[test]
+    fn urls_use_the_chosen_ports() {
+        let client = Client::new("recorder.local", "admin", "secret").with_ports(8080, 8554);
+        assert_eq!(
+            client.live_url(1, Stream::Sub),
+            "rtsp://recorder.local:8554/cam/realmonitor?channel=1&subtype=1"
+        );
+    }
 
     #[test]
     fn finds_channels_without_a_camera() {

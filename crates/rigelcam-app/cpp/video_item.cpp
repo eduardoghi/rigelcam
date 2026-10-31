@@ -352,6 +352,10 @@ extern "C" void rigel_item_set_frame(void *item, const RigelFrame *frame) {
     static_cast<VideoItem *>(item)->setFrame(*frame);
 }
 
+extern "C" void rigel_item_auth_refused(void *item) {
+    QMetaObject::invokeMethod(static_cast<VideoItem *>(item), "authRefused", Qt::QueuedConnection);
+}
+
 extern "C" void rigel_item_set_status(void *item, bool has_video, bool signal_lost) {
     QMetaObject::invokeMethod(static_cast<VideoItem *>(item), "setStatus", Qt::QueuedConnection, Q_ARG(bool, has_video), Q_ARG(bool, signal_lost));
 }

@@ -397,18 +397,18 @@ ApplicationWindow {
 
             // With cameras on screen the centered message below is covered.
             Label {
-                visible: win.recorderList.length > 0 && grid.error !== ""
+                visible: win.recorderList.length > 0 && text !== ""
                 Layout.leftMargin: 8
                 Layout.fillWidth: true
                 textFormat: Text.PlainText
                 elide: Text.ElideRight
                 font.pixelSize: 13
-                color: colors.danger
-                text: grid.error
+                color: grid.error !== "" || grid.videoUnavailable ? colors.danger : colors.waiting
+                text: grid.error || grid.missing || grid.notice
             }
 
             Item {
-                visible: win.recorderList.length === 0 || grid.error === ""
+                visible: win.recorderList.length === 0 || (grid.error === "" && grid.missing === "" && grid.notice === "")
                 Layout.fillWidth: true
             }
 
@@ -444,28 +444,97 @@ ApplicationWindow {
 
     AppDialog {
         id: addDialog
-        title: "Adicionar gravador"
+        // The recorder being edited, or null when adding one.
+        property var editing: null
+        property bool advanced: false
+        title: editing ? "Editar gravador" : "Adicionar gravador"
         width: Math.min(440, parent.width - 32)
         closePolicy: grid.formBusy ? Popup.NoAutoClose : Popup.CloseOnEscape
         onOpened: { hostField.forceActiveFocus(); grid.formError = "" }
         onClosed: passwordField.text = ""
 
+        readonly property bool complete: hostField.text.trim() !== "" && userField.text !== "" && (editing !== null || passwordField.text !== "")
+
+        function openFor(recorder) {
+            editing = recorder
+            hostField.text = recorder ? recorder.host : ""
+            nameField.text = recorder ? recorder.name : ""
+            userField.text = recorder ? recorder.user : ""
+            httpField.text = recorder ? recorder.httpPort : 80
+            rtspField.text = recorder ? recorder.rtspPort : 554
+            advanced = recorder !== null && (recorder.httpPort !== 80 || recorder.rtspPort !== 554)
+            open()
+        }
+
         function submit() {
-            if (hostField.text.trim() && userField.text && passwordField.text && !grid.formBusy)
-                grid.addRecorder(nameField.text, hostField.text, userField.text, passwordField.text)
+            if (!complete || grid.formBusy)
+                return
+            const http = parseInt(httpField.text) || 0
+            const rtsp = parseInt(rtspField.text) || 0
+            if (editing)
+                grid.updateRecorder(editing.id, nameField.text, hostField.text, http, rtsp, userField.text, passwordField.text)
+            else
+                grid.addRecorder(nameField.text, hostField.text, http, rtsp, userField.text, passwordField.text)
         }
 
         ColumnLayout {
             anchors.fill: parent
             spacing: 4
             FormLabel { text: "Endereço" }
-            FormField { id: hostField; placeholderText: "192.168.0.10"; onAccepted: addDialog.submit() }
+            FormField {
+                id: hostField
+                placeholderText: "192.168.0.10"
+                onAccepted: addDialog.submit()
+                // Shows the port someone typed along with the address where it ends up.
+                onEditingFinished: {
+                    const port = text.trim().match(/^(?:https?:\/\/)?[^\/:@\s]+:(\d+)(?:\/.*)?$/)
+                    if (port)
+                        httpField.text = port[1]
+                }
+            }
             FormLabel { text: "Nome (opcional)" }
             FormField { id: nameField; placeholderText: "Usa o modelo do gravador"; onAccepted: addDialog.submit() }
             FormLabel { text: "Usuário" }
             FormField { id: userField; onAccepted: addDialog.submit() }
             FormLabel { text: "Senha" }
-            FormField { id: passwordField; echoMode: TextInput.Password; onAccepted: addDialog.submit() }
+            FormField {
+                id: passwordField
+                echoMode: TextInput.Password
+                placeholderText: addDialog.editing ? "Em branco para manter a atual" : ""
+                onAccepted: addDialog.submit()
+            }
+            AppButton {
+                Layout.topMargin: 6
+                Layout.leftMargin: -12
+                implicitHeight: 28
+                icon.source: "qrc:/rigelcam/icons/chevron.svg"
+                icon.width: 14
+                icon.height: 14
+                text: "Avançado"
+                onClicked: addDialog.advanced = !addDialog.advanced
+            }
+            RowLayout {
+                visible: addDialog.advanced
+                spacing: 8
+                ColumnLayout {
+                    spacing: 4
+                    FormLabel { text: "Porta HTTP"; Layout.topMargin: 0 }
+                    FormField {
+                        id: httpField
+                        validator: IntValidator { bottom: 1; top: 65535 }
+                        onAccepted: addDialog.submit()
+                    }
+                }
+                ColumnLayout {
+                    spacing: 4
+                    FormLabel { text: "Porta RTSP"; Layout.topMargin: 0 }
+                    FormField {
+                        id: rtspField
+                        validator: IntValidator { bottom: 1; top: 65535 }
+                        onAccepted: addDialog.submit()
+                    }
+                }
+            }
             Label {
                 Layout.fillWidth: true
                 Layout.topMargin: 10
@@ -491,7 +560,7 @@ ApplicationWindow {
                 AppButton { text: "Cancelar"; enabled: !grid.formBusy; onClicked: addDialog.close() }
                 PrimaryButton {
                     text: grid.formBusy ? "Testando…" : "Testar e salvar"
-                    enabled: !grid.formBusy && hostField.text.trim() !== "" && userField.text !== "" && passwordField.text !== ""
+                    enabled: !grid.formBusy && addDialog.complete
                     onClicked: addDialog.submit()
                 }
             }
@@ -502,9 +571,6 @@ ApplicationWindow {
             target: grid
             function onFormBusyChanged() {
                 if (!grid.formBusy && grid.formError === "" && addDialog.opened) {
-                    hostField.text = ""
-                    nameField.text = ""
-                    userField.text = ""
                     addDialog.close()
                 }
             }
@@ -568,7 +634,7 @@ ApplicationWindow {
             visible: grid.error === ""
             icon.source: "qrc:/rigelcam/icons/plus.svg"
             text: "Adicionar gravador"
-            onClicked: addDialog.open()
+            onClicked: addDialog.openFor(null)
         }
         Label {
             anchors.horizontalCenter: parent.horizontalCenter
@@ -577,6 +643,30 @@ ApplicationWindow {
             font.pixelSize: 14
             color: colors.danger
             text: grid.error
+        }
+        // Only on a click, since the file may still be recoverable.
+        AppButton {
+            anchors.horizontalCenter: parent.horizontalCenter
+            visible: grid.listCorrupted
+            text: "Começar do zero"
+            edge: colors.line
+            onClicked: grid.startOver()
+        }
+        Label {
+            anchors.horizontalCenter: parent.horizontalCenter
+            visible: grid.missing !== ""
+            textFormat: Text.PlainText
+            font.pixelSize: 13
+            color: grid.videoUnavailable ? colors.danger : colors.waiting
+            text: grid.missing
+        }
+        Label {
+            anchors.horizontalCenter: parent.horizontalCenter
+            visible: grid.notice !== ""
+            textFormat: Text.PlainText
+            font.pixelSize: 13
+            color: colors.waiting
+            text: grid.notice
         }
     }
 
@@ -622,7 +712,7 @@ ApplicationWindow {
                     implicitHeight: 30
                     leftPadding: 7
                     rightPadding: 7
-                    onClicked: addDialog.open()
+                    onClicked: addDialog.openFor(null)
                     AppToolTip {
                         visible: addButton.hovered
                         text: addButton.text
@@ -688,6 +778,24 @@ ApplicationWindow {
                                         font.pixelSize: 13
                                         font.weight: Font.DemiBold
                                         color: colors.text
+                                    }
+                                    AppButton {
+                                        id: editButton
+                                        visible: recorderHover.hovered
+                                        display: AbstractButton.IconOnly
+                                        icon.source: "qrc:/rigelcam/icons/edit.svg"
+                                        icon.width: 14
+                                        icon.height: 14
+                                        text: "Editar gravador"
+                                        implicitWidth: 26
+                                        implicitHeight: 26
+                                        leftPadding: 6
+                                        rightPadding: 6
+                                        onClicked: addDialog.openFor(recorderGroup.modelData)
+                                        AppToolTip {
+                                            visible: editButton.hovered
+                                            text: editButton.text
+                                        }
                                     }
                                     AppButton {
                                         id: removeButton
@@ -862,6 +970,8 @@ ApplicationWindow {
                 height: isMain ? cameraArea.height : cameraArea.cellHeight
 
                 onStatusChanged: win.updateLiveCount()
+                // Later, because this closes the tile that is emitting the signal.
+                onAuthRefused: Qt.callLater(grid.recorderRefused, recorder)
                 onIncludedChanged: win.updateLiveCount()
 
                 // Hidden cameras keep running for a while, since going back to the grid right after
@@ -915,6 +1025,7 @@ ApplicationWindow {
                     anchors.fill: parent
                     visible: hasVideo && tile.isMain
                     view: tile.view
+                    onAuthRefused: Qt.callLater(grid.recorderRefused, tile.recorder)
                     Connections {
                         target: tile
                         function onIsMainChanged() {
@@ -1037,6 +1148,34 @@ ApplicationWindow {
                     anchors.fill: parent
                     visible: !square.hasTile
                     color: colors.surface
+
+                    // A camera the recorder stopped listing can be gone for good, and only the
+                    // user knows that.
+                    AppButton {
+                        id: clearSquare
+                        anchors.right: parent.right
+                        anchors.top: parent.top
+                        anchors.margins: 6
+                        visible: square.key !== null && squareHover.hovered
+                        display: AbstractButton.IconOnly
+                        icon.source: "qrc:/rigelcam/icons/close.svg"
+                        icon.width: 14
+                        icon.height: 14
+                        text: "Tirar da grade"
+                        implicitWidth: 26
+                        implicitHeight: 26
+                        leftPadding: 6
+                        rightPadding: 6
+                        fill: "#B30B101C"
+                        onClicked: {
+                            const camera = win.gridLayout.cameras[square.index]
+                            grid.removeCamera(camera.recorder, camera.channel)
+                        }
+                        AppToolTip {
+                            visible: clearSquare.hovered
+                            text: clearSquare.text
+                        }
+                    }
                     Text {
                         anchors.centerIn: parent
                         // A camera of a recorder that is offline or hasn't answered keeps its square.
@@ -1052,6 +1191,12 @@ ApplicationWindow {
                     color: "transparent"
                     border.color: colors.accent
                     border.width: 3
+                }
+
+                // Only without a tile, since this layer is above the tiles and would take their hover.
+                HoverHandler {
+                    id: squareHover
+                    enabled: square.key !== null && !square.hasTile
                 }
 
                 DropArea {

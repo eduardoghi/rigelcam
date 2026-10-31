@@ -3,6 +3,7 @@
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
@@ -22,12 +23,109 @@ pub enum Error {
     NoConfigDir,
 }
 
+const DEFAULT_HTTP_PORT: u16 = 80;
+const DEFAULT_RTSP_PORT: u16 = 554;
+
+fn default_http_port() -> u16 {
+    DEFAULT_HTTP_PORT
+}
+
+fn default_rtsp_port() -> u16 {
+    DEFAULT_RTSP_PORT
+}
+
+fn is_default_http_port(port: &u16) -> bool {
+    *port == DEFAULT_HTTP_PORT
+}
+
+fn is_default_rtsp_port(port: &u16) -> bool {
+    *port == DEFAULT_RTSP_PORT
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Recorder {
     pub id: u64,
     pub name: String,
     pub host: String,
     pub user: String,
+    #[serde(
+        default = "default_http_port",
+        skip_serializing_if = "is_default_http_port"
+    )]
+    pub http_port: u16,
+    #[serde(
+        default = "default_rtsp_port",
+        skip_serializing_if = "is_default_rtsp_port"
+    )]
+    pub rtsp_port: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum AddressError {
+    #[error("the address carries a user or password")]
+    Credentials,
+    #[error("the address isn't a valid host")]
+    Invalid,
+}
+
+/// Where a recorder answers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Address {
+    pub host: String,
+    pub http_port: u16,
+    pub rtsp_port: u16,
+}
+
+impl Address {
+    /// Reads what someone typed, which may be a URL copied from a browser. A port in the text wins
+    /// over `http_port`, and a missing port is the factory one. A user or password is refused,
+    /// because this text goes to a plain file and to the logs.
+    pub fn parse(
+        text: &str,
+        http_port: Option<u16>,
+        rtsp_port: Option<u16>,
+    ) -> Result<Self, AddressError> {
+        let text = text.trim();
+        let text = text
+            .strip_prefix("http://")
+            .or_else(|| text.strip_prefix("https://"))
+            .unwrap_or(text);
+        let authority = text.split('/').next().unwrap_or(text);
+        if authority.contains('@') {
+            return Err(AddressError::Credentials);
+        }
+        let (host, port) = split_port(authority)?;
+        let valid = |c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':');
+        let bare = host.trim_start_matches('[').trim_end_matches(']');
+        if bare.is_empty() || !bare.chars().all(valid) {
+            return Err(AddressError::Invalid);
+        }
+        Ok(Self {
+            host: host.to_owned(),
+            http_port: port.or(http_port).unwrap_or(DEFAULT_HTTP_PORT),
+            rtsp_port: rtsp_port.unwrap_or(DEFAULT_RTSP_PORT),
+        })
+    }
+}
+
+// An IPv6 address has colons of its own, so it needs brackets to carry a port.
+fn split_port(authority: &str) -> Result<(&str, Option<u16>), AddressError> {
+    let (host, port) = match authority.rfind(':') {
+        Some(colon) if !authority[colon..].contains(']') => {
+            (&authority[..colon], Some(&authority[colon + 1..]))
+        }
+        _ => (authority, None),
+    };
+    if host.contains(':') && !host.starts_with('[') {
+        return Err(AddressError::Invalid);
+    }
+    match port {
+        None => Ok((host, None)),
+        Some(port) => match port.parse::<u16>() {
+            Ok(number) if number != 0 => Ok((host, Some(number))),
+            _ => Err(AddressError::Invalid),
+        },
+    }
 }
 
 /// Where passwords are kept, so tests don't touch the keyring of the machine.
@@ -88,15 +186,36 @@ pub struct RecorderList<S: Secrets> {
 impl RecorderList<SystemKeyring> {
     /// Opens the list in the configuration folder of the user.
     pub fn open_default() -> Result<Self, Error> {
-        let path = dirs::config_dir()
-            .ok_or(Error::NoConfigDir)?
-            .join("rigelcam")
-            .join("recorders.json");
-        Self::open(path, SystemKeyring)
+        Self::open(default_path()?, SystemKeyring)
+    }
+
+    /// Starts an empty list after setting the file of the user aside.
+    pub fn start_over_default() -> Result<Self, Error> {
+        Self::start_over(default_path()?, SystemKeyring)
     }
 }
 
+fn default_path() -> Result<PathBuf, Error> {
+    Ok(dirs::config_dir()
+        .ok_or(Error::NoConfigDir)?
+        .join("rigelcam")
+        .join("recorders.json"))
+}
+
 impl<S: Secrets> RecorderList<S> {
+    /// Keeps a damaged file next to the list under a new name, so it can still be fixed by hand,
+    /// and opens an empty list. The name has the time so that an older copy isn't overwritten.
+    pub fn start_over(path: PathBuf, secrets: S) -> Result<Self, Error> {
+        let seconds = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_secs());
+        fs::rename(
+            &path,
+            path.with_extension(format!("json.corrupted-{seconds}")),
+        )?;
+        Self::open(path, secrets)
+    }
+
     pub fn open(path: PathBuf, secrets: S) -> Result<Self, Error> {
         let mut saved: Saved = match fs::read(&path) {
             Ok(bytes) => serde_json::from_slice(&bytes)?,
@@ -122,7 +241,7 @@ impl<S: Secrets> RecorderList<S> {
     pub fn add(
         &mut self,
         name: &str,
-        host: &str,
+        address: &Address,
         user: &str,
         password: &str,
     ) -> Result<u64, Error> {
@@ -134,8 +253,10 @@ impl<S: Secrets> RecorderList<S> {
         self.saved.recorders.push(Recorder {
             id,
             name: name.to_owned(),
-            host: host.to_owned(),
+            host: address.host.clone(),
             user: user.to_owned(),
+            http_port: address.http_port,
+            rtsp_port: address.rtsp_port,
         });
         if let Err(error) = self.write() {
             self.saved = before;
@@ -145,9 +266,43 @@ impl<S: Secrets> RecorderList<S> {
         Ok(id)
     }
 
-    pub fn remove(&mut self, id: u64) -> Result<(), Error> {
+    /// Changes a recorder and keeps its id, so its squares in the grid stay. Without a `password`,
+    /// the saved one stays too.
+    pub fn update(
+        &mut self,
+        id: u64,
+        name: &str,
+        address: &Address,
+        user: &str,
+        password: Option<&str>,
+    ) -> Result<(), Error> {
+        let old_password = password.and_then(|_| self.secrets.get(id).ok());
+        if let Some(password) = password {
+            self.secrets.set(id, password)?;
+        }
+        let before = self.saved.clone();
+        if let Some(recorder) = self.saved.recorders.iter_mut().find(|r| r.id == id) {
+            recorder.name = name.to_owned();
+            recorder.host = address.host.clone();
+            recorder.user = user.to_owned();
+            recorder.http_port = address.http_port;
+            recorder.rtsp_port = address.rtsp_port;
+        }
+        if let Err(error) = self.write() {
+            self.saved = before;
+            if let Some(password) = old_password {
+                let _ = self.secrets.set(id, &password);
+            }
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    /// Removes a recorder and returns whether its password went too. Without the keyring the
+    /// recorder couldn't be used anyway, so that doesn't keep it in the list.
+    pub fn remove(&mut self, id: u64) -> Result<bool, Error> {
         let password = self.secrets.get(id).ok();
-        self.secrets.delete(id)?;
+        let password_removed = self.secrets.delete(id).is_ok();
         let before = self.saved.clone();
         // A list saved before next_id existed has to remember the id going away too.
         self.saved.next_id = self.saved.next_id.max(id + 1);
@@ -162,7 +317,7 @@ impl<S: Secrets> RecorderList<S> {
             }
             return Err(error);
         }
-        Ok(())
+        Ok(password_removed)
     }
 
     pub fn layout(&self) -> Option<&Layout> {
@@ -274,6 +429,24 @@ mod tests {
         }
     }
 
+    struct UndeletableSecrets;
+
+    impl Secrets for UndeletableSecrets {
+        fn set(&self, _: u64, _: &str) -> Result<(), Error> {
+            Ok(())
+        }
+        fn get(&self, _: u64) -> Result<String, Error> {
+            Err(Error::Keyring("locked".to_owned()))
+        }
+        fn delete(&self, _: u64) -> Result<(), Error> {
+            Err(Error::Keyring("locked".to_owned()))
+        }
+    }
+
+    fn addr(host: &str) -> Address {
+        Address::parse(host, None, None).unwrap()
+    }
+
     fn temp_path(test: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("rigelcam-{test}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
@@ -285,7 +458,7 @@ mod tests {
         let path = temp_path("password");
         let mut list = RecorderList::open(path.clone(), MemorySecrets::default()).unwrap();
         let id = list
-            .add("Depot", "192.0.2.1", "viewer", "s3cret-value")
+            .add("Depot", &addr("192.0.2.1"), "viewer", "s3cret-value")
             .unwrap();
         assert_eq!(list.password(id).unwrap(), "s3cret-value");
         let file = fs::read_to_string(&path).unwrap();
@@ -298,8 +471,8 @@ mod tests {
         let path = temp_path("reopen");
         let secrets = MemorySecrets::default();
         let mut list = RecorderList::open(path.clone(), secrets.clone()).unwrap();
-        let first = list.add("A", "192.0.2.1", "u", "p").unwrap();
-        list.add("B", "192.0.2.2", "u", "p").unwrap();
+        let first = list.add("A", &addr("192.0.2.1"), "u", "p").unwrap();
+        list.add("B", &addr("192.0.2.2"), "u", "p").unwrap();
         let layout = Layout::fitting(&[CameraId {
             recorder: first,
             channel: 1,
@@ -316,8 +489,8 @@ mod tests {
     fn removing_deletes_the_password_and_empties_its_squares() {
         let path = temp_path("remove");
         let mut list = RecorderList::open(path, MemorySecrets::default()).unwrap();
-        let first = list.add("A", "192.0.2.1", "u", "p").unwrap();
-        let second = list.add("B", "192.0.2.2", "u", "p").unwrap();
+        let first = list.add("A", &addr("192.0.2.1"), "u", "p").unwrap();
+        let second = list.add("B", &addr("192.0.2.2"), "u", "p").unwrap();
         let camera = |recorder| {
             Some(CameraId {
                 recorder,
@@ -349,17 +522,134 @@ mod tests {
         .unwrap();
         let list = RecorderList::open(path, MemorySecrets::default()).unwrap();
         assert_eq!(list.recorders().len(), 1);
+        assert_eq!(list.recorders()[0].http_port, 80);
+        assert_eq!(list.recorders()[0].rtsp_port, 554);
         assert_eq!(list.layout(), None);
         assert!(!list.sidebar_collapsed());
+    }
+
+    #[test]
+    fn updating_keeps_the_id_and_the_password_when_none_is_given() {
+        let path = temp_path("update");
+        let mut list = RecorderList::open(path, MemorySecrets::default()).unwrap();
+        let id = list.add("A", &addr("192.0.2.1"), "u", "p").unwrap();
+        list.update(id, "B", &addr("192.0.2.2"), "v", None).unwrap();
+        assert_eq!(list.password(id).unwrap(), "p");
+        list.update(id, "B", &addr("192.0.2.2"), "v", Some("q"))
+            .unwrap();
+        assert_eq!(list.password(id).unwrap(), "q");
+        let recorder = &list.recorders()[0];
+        assert_eq!(recorder.id, id);
+        assert_eq!(recorder.name, "B");
+        assert_eq!(recorder.host, "192.0.2.2");
+        assert_eq!(recorder.user, "v");
+    }
+
+    #[test]
+    fn failing_to_save_undoes_the_update() {
+        let path = temp_path("update-unsaved");
+        let mut list = RecorderList::open(path.clone(), MemorySecrets::default()).unwrap();
+        let id = list.add("A", &addr("192.0.2.1"), "u", "p").unwrap();
+        fs::create_dir(path.with_extension("json.tmp")).unwrap();
+        assert!(list
+            .update(id, "B", &addr("192.0.2.2"), "v", Some("q"))
+            .is_err());
+        assert_eq!(list.recorders()[0].name, "A");
+        assert_eq!(list.password(id).unwrap(), "p");
+    }
+
+    #[test]
+    fn removing_works_without_the_keyring_and_tells_the_password_stayed() {
+        let path = temp_path("no-keyring");
+        let mut list = RecorderList::open(path, UndeletableSecrets).unwrap();
+        let id = list.add("A", &addr("192.0.2.1"), "u", "p").unwrap();
+        assert!(!list.remove(id).unwrap());
+        assert!(list.recorders().is_empty());
+    }
+
+    #[test]
+    fn address_accepts_what_people_paste() {
+        let parsed = |text| Address::parse(text, None, None).unwrap();
+        assert_eq!(parsed("  192.0.2.1 ").host, "192.0.2.1");
+        assert_eq!(parsed("nvr-1.local").host, "nvr-1.local");
+        assert_eq!(parsed("http://192.0.2.1/").host, "192.0.2.1");
+        assert_eq!(parsed("https://192.0.2.1/login.html").host, "192.0.2.1");
+        assert_eq!(parsed("[2001:db8::1]").host, "[2001:db8::1]");
+        assert_eq!(parsed("[2001:db8::1]:8080").http_port, 8080);
+        assert_eq!(parsed("192.0.2.1:8080").http_port, 8080);
+        assert_eq!(parsed("http://192.0.2.1:8080/").host, "192.0.2.1");
+    }
+
+    #[test]
+    fn port_in_the_address_wins_and_missing_ports_are_the_factory_ones() {
+        let address = Address::parse("192.0.2.1:8080", Some(81), Some(8554)).unwrap();
+        assert_eq!((address.http_port, address.rtsp_port), (8080, 8554));
+        let address = Address::parse("192.0.2.1", Some(81), None).unwrap();
+        assert_eq!((address.http_port, address.rtsp_port), (81, 554));
+        let address = Address::parse("192.0.2.1", None, None).unwrap();
+        assert_eq!((address.http_port, address.rtsp_port), (80, 554));
+    }
+
+    #[test]
+    fn address_refuses_credentials_and_junk() {
+        let refused = |text| Address::parse(text, None, None).unwrap_err();
+        assert_eq!(refused("admin:secret@192.0.2.1"), AddressError::Credentials);
+        assert_eq!(
+            refused("http://admin@192.0.2.1/"),
+            AddressError::Credentials
+        );
+        for text in [
+            "",
+            "http://",
+            "192.0.2.1 nvr",
+            "192.0.2.1:0",
+            "192.0.2.1:99999",
+        ] {
+            assert_eq!(refused(text), AddressError::Invalid, "{text}");
+        }
+        assert_eq!(refused("2001:db8::1"), AddressError::Invalid);
+    }
+
+    #[test]
+    fn ports_survive_reopening_and_stay_out_of_the_file_when_they_are_the_default() {
+        let path = temp_path("ports");
+        let secrets = MemorySecrets::default();
+        let mut list = RecorderList::open(path.clone(), secrets.clone()).unwrap();
+        list.add("A", &addr("192.0.2.1"), "u", "p").unwrap();
+        assert!(!fs::read_to_string(&path).unwrap().contains("port"));
+        let custom = Address::parse("192.0.2.2:8080", None, Some(8554)).unwrap();
+        list.add("B", &custom, "u", "p").unwrap();
+        let reopened = RecorderList::open(path, secrets).unwrap();
+        assert_eq!(reopened.recorders()[1].http_port, 8080);
+        assert_eq!(reopened.recorders()[1].rtsp_port, 8554);
+    }
+
+    #[test]
+    fn starting_over_keeps_the_damaged_file_and_opens_an_empty_list() {
+        let path = temp_path("start-over");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, "not json").unwrap();
+        let list = RecorderList::start_over(path.clone(), MemorySecrets::default()).unwrap();
+        assert!(list.recorders().is_empty());
+        assert!(!path.exists());
+        let kept: Vec<_> = fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        assert_eq!(kept.len(), 1);
+        assert!(kept[0]
+            .to_string_lossy()
+            .contains("recorders.json.corrupted-"));
+        assert_eq!(fs::read_to_string(&kept[0]).unwrap(), "not json");
     }
 
     #[test]
     fn ids_never_come_back() {
         let path = temp_path("ids");
         let mut list = RecorderList::open(path, MemorySecrets::default()).unwrap();
-        let first = list.add("A", "192.0.2.1", "u", "p").unwrap();
+        let first = list.add("A", &addr("192.0.2.1"), "u", "p").unwrap();
         list.remove(first).unwrap();
-        assert_ne!(list.add("B", "192.0.2.2", "u", "p").unwrap(), first);
+        assert_ne!(list.add("B", &addr("192.0.2.2"), "u", "p").unwrap(), first);
     }
 
     #[test]
@@ -373,7 +663,7 @@ mod tests {
         .unwrap();
         let mut list = RecorderList::open(path, MemorySecrets::default()).unwrap();
         list.remove(5).unwrap();
-        assert_eq!(list.add("B", "192.0.2.2", "u", "p").unwrap(), 6);
+        assert_eq!(list.add("B", &addr("192.0.2.2"), "u", "p").unwrap(), 6);
     }
 
     #[test]
@@ -381,10 +671,10 @@ mod tests {
         let path = temp_path("unsaved");
         let secrets = MemorySecrets::default();
         let mut list = RecorderList::open(path.clone(), secrets.clone()).unwrap();
-        let id = list.add("A", "192.0.2.1", "u", "p").unwrap();
+        let id = list.add("A", &addr("192.0.2.1"), "u", "p").unwrap();
         // A folder in the way of the temporary file makes every save fail.
         fs::create_dir(path.with_extension("json.tmp")).unwrap();
-        assert!(list.add("B", "192.0.2.2", "u", "p").is_err());
+        assert!(list.add("B", &addr("192.0.2.2"), "u", "p").is_err());
         assert_eq!(list.recorders().len(), 1);
         assert!(secrets.get(id + 1).is_err());
         assert!(list.remove(id).is_err());
@@ -412,7 +702,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let path = temp_path("private");
         let mut list = RecorderList::open(path.clone(), MemorySecrets::default()).unwrap();
-        list.add("A", "192.0.2.1", "u", "p").unwrap();
+        list.add("A", &addr("192.0.2.1"), "u", "p").unwrap();
         let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode(&path), 0o600);
         assert_eq!(mode(path.parent().unwrap()), 0o700);
@@ -422,7 +712,7 @@ mod tests {
     fn keyring_failure_adds_nothing() {
         let path = temp_path("keyring");
         let mut list = RecorderList::open(path.clone(), FailingSecrets).unwrap();
-        assert!(list.add("A", "192.0.2.1", "u", "p").is_err());
+        assert!(list.add("A", &addr("192.0.2.1"), "u", "p").is_err());
         assert!(list.recorders().is_empty());
         assert!(!path.exists());
     }

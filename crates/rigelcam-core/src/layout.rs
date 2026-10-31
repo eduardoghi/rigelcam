@@ -41,6 +41,11 @@ impl Layout {
         }
     }
 
+    /// How many cameras the largest grid holds.
+    pub const fn capacity() -> usize {
+        (MAX_COLUMNS * MAX_COLUMNS) as usize
+    }
+
     pub fn is_empty(&self) -> bool {
         self.cameras.iter().all(Option::is_none)
     }
@@ -50,16 +55,20 @@ impl Layout {
     }
 
     /// Puts a camera in the first empty square, growing a full grid to the next size. A camera
-    /// already in the grid stays where it is, and so does everything when the largest grid is full.
-    pub fn add(&mut self, camera: CameraId) {
+    /// already in the grid stays where it is. Returns false when the largest grid is full.
+    pub fn add(&mut self, camera: CameraId) -> bool {
         if self.square_of(camera).is_some() {
-            return;
+            return true;
         }
         if !self.cameras.contains(&None) {
             self.resize(self.columns + 1);
         }
-        if let Some(square) = self.cameras.iter().position(Option::is_none) {
-            self.cameras[square] = Some(camera);
+        match self.cameras.iter().position(Option::is_none) {
+            Some(square) => {
+                self.cameras[square] = Some(camera);
+                true
+            }
+            None => false,
         }
     }
 
@@ -109,17 +118,15 @@ impl Layout {
         self.cameras.resize(squares(self.columns), None);
     }
 
-    /// Fixes a saved layout once a recorder answers with its channels. It drops the channels that
-    /// recorder no longer has, repeated cameras and a list of the wrong size, which only a file
-    /// edited by hand or a changed recorder would bring. Other recorders may be offline, so their
-    /// cameras keep their squares.
-    pub fn repair(&mut self, recorder: u64, channels: &[u32]) {
+    /// Fixes a saved layout with repeated cameras or a list of the wrong size, which only a file
+    /// edited by hand would bring. Cameras a recorder doesn't list keep their squares, since a
+    /// camera disabled for maintenance comes back and only the user knows it won't.
+    pub fn repair(&mut self) {
         self.normalize();
         let mut seen = Vec::new();
         for camera in &mut self.cameras {
             if let Some(id) = *camera {
-                let gone = id.recorder == recorder && !channels.contains(&id.channel);
-                if gone || seen.contains(&id) {
+                if seen.contains(&id) {
                     *camera = None;
                 }
                 seen.push(id);
@@ -176,7 +183,8 @@ mod tests {
     fn add_does_nothing_when_the_largest_grid_is_full() {
         let cameras = cams(&(1..=36).collect::<Vec<u32>>());
         let mut layout = Layout::fitting(&cameras);
-        layout.add(cam(37));
+        assert!(!layout.add(cam(37)));
+        assert!(layout.add(cam(36)));
         assert_eq!(layout, Layout::fitting(&cameras));
     }
 
@@ -246,16 +254,12 @@ mod tests {
     }
 
     #[test]
-    fn repair_drops_unknown_and_repeated_cameras_and_fixes_the_size() {
-        let other = CameraId {
-            recorder: 2,
-            channel: 9,
-        };
+    fn repair_drops_repeated_cameras_and_fixes_the_size() {
         let mut layout = Layout {
             columns: 2,
-            cameras: vec![Some(cam(1)), Some(cam(1)), Some(cam(9)), Some(other), None],
+            cameras: vec![Some(cam(1)), Some(cam(1)), Some(cam(9)), None, Some(cam(2))],
         };
-        layout.repair(1, &[1, 2]);
-        assert_eq!(layout.cameras, vec![Some(cam(1)), None, None, Some(other)]);
+        layout.repair();
+        assert_eq!(layout.cameras, vec![Some(cam(1)), None, Some(cam(9)), None]);
     }
 }

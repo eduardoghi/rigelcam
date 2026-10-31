@@ -20,6 +20,10 @@ pub mod qobject {
         #[qproperty(QString, layout)]
         #[qproperty(bool, sidebar_collapsed, cxx_name = "sidebarCollapsed")]
         #[qproperty(QString, error)]
+        #[qproperty(bool, list_corrupted, cxx_name = "listCorrupted")]
+        #[qproperty(QString, notice)]
+        #[qproperty(QString, missing)]
+        #[qproperty(bool, video_unavailable, cxx_name = "videoUnavailable")]
         #[qproperty(QString, form_error, cxx_name = "formError")]
         #[qproperty(bool, form_busy, cxx_name = "formBusy")]
         type CameraGrid = super::CameraGridRust;
@@ -28,6 +32,11 @@ pub mod qobject {
         #[qinvokable]
         fn load(self: Pin<&mut Self>);
 
+        /// Sets a damaged recorder list aside and starts an empty one.
+        #[qinvokable]
+        #[cxx_name = "startOver"]
+        fn start_over(self: Pin<&mut Self>);
+
         /// Tests the connection and, if it works, saves the recorder and connects to it.
         #[qinvokable]
         #[cxx_name = "addRecorder"]
@@ -35,9 +44,30 @@ pub mod qobject {
             self: Pin<&mut Self>,
             name: &QString,
             host: &QString,
+            http_port: i32,
+            rtsp_port: i32,
             user: &QString,
             password: &QString,
         );
+
+        /// Tests the connection and, if it works, saves the changes and reconnects.
+        #[qinvokable]
+        #[cxx_name = "updateRecorder"]
+        fn update_recorder(
+            self: Pin<&mut Self>,
+            id: i32,
+            name: &QString,
+            host: &QString,
+            http_port: i32,
+            rtsp_port: i32,
+            user: &QString,
+            password: &QString,
+        );
+
+        /// Closes the cameras of a recorder after it refused the password, until someone acts.
+        #[qinvokable]
+        #[cxx_name = "recorderRefused"]
+        fn recorder_refused(self: Pin<&mut Self>, id: i32);
 
         #[qinvokable]
         #[cxx_name = "removeRecorder"]
@@ -91,15 +121,18 @@ pub mod qobject {
 use core::pin::Pin;
 use std::collections::HashMap;
 use std::ffi::c_void;
+use std::time::Duration;
 
 use cxx_qt::{CxxQtType, Threading};
 use cxx_qt_lib::QString;
 use rigelcam_core::dahua::{Channel, Client, Error as RecorderError, Stream};
 use rigelcam_core::layout::{CameraId, Layout};
-use rigelcam_core::recorders::{RecorderList, Secrets, SystemKeyring};
+use rigelcam_core::recorders::{
+    Address, AddressError, Error as RecordersError, RecorderList, Secrets, SystemKeyring,
+};
 use serde_json::json;
 
-use crate::camera_stream::{CameraStream, Source};
+use crate::camera_stream::{missing_elements, missing_h265_elements, CameraStream, Source};
 
 extern "C" {
     fn rigel_item_set_stream(
@@ -129,6 +162,9 @@ fn recorder_message(error: &RecorderError) -> String {
     }
 }
 
+const FIRST_RETRY_DELAY: Duration = Duration::from_secs(5);
+const MAX_RETRY_DELAY: Duration = Duration::from_secs(60);
+
 fn camera_id(recorder: i32, channel: i32) -> CameraId {
     CameraId {
         recorder: recorder as u64,
@@ -136,16 +172,27 @@ fn camera_id(recorder: i32, channel: i32) -> CameraId {
     }
 }
 
+fn address_message(error: AddressError) -> &'static str {
+    match error {
+        AddressError::Credentials => "Informe só o endereço, sem usuário ou senha.",
+        AddressError::Invalid => "Endereço inválido. Use um IP ou nome de máquina.",
+    }
+}
+
+fn client_for(address: &Address, user: &str, password: &str) -> Client {
+    Client::new(&address.host, user, password).with_ports(address.http_port, address.rtsp_port)
+}
+
 #[derive(Clone)]
 struct Connection {
-    host: String,
+    address: Address,
     user: String,
     password: String,
 }
 
 impl Connection {
     fn client(&self) -> Client {
-        Client::new(&self.host, &self.user, &self.password)
+        client_for(&self.address, &self.user, &self.password)
     }
 }
 
@@ -155,23 +202,37 @@ pub struct CameraGridRust {
     layout: QString,
     sidebar_collapsed: bool,
     error: QString,
+    list_corrupted: bool,
+    notice: QString,
+    missing: QString,
+    video_unavailable: bool,
     form_error: QString,
     form_busy: bool,
     list: Option<RecorderList<SystemKeyring>>,
     connections: HashMap<u64, Connection>,
     channels: HashMap<u64, Vec<Channel>>,
     failures: HashMap<u64, String>,
+    /// Latest try for each recorder, so an older answer or retry is ignored.
+    attempts: HashMap<u64, u64>,
+    retry_delays: HashMap<u64, Duration>,
 }
 
 impl qobject::CameraGrid {
     fn load(mut self: Pin<&mut Self>) {
-        let list = match RecorderList::open_default() {
-            Ok(list) => list,
-            Err(error) => {
-                self.set_error(QString::from(error.to_string().as_str()));
-                return;
+        self.as_mut().check_components();
+        match RecorderList::open_default() {
+            Ok(list) => self.adopt_list(list),
+            Err(RecordersError::Format(_)) => {
+                self.as_mut().set_list_corrupted(true);
+                self.set_error(QString::from(
+                    "A lista de gravadores está corrompida. O arquivo não foi alterado.",
+                ));
             }
-        };
+            Err(error) => self.set_error(QString::from(error.to_string().as_str())),
+        }
+    }
+
+    fn adopt_list(mut self: Pin<&mut Self>, list: RecorderList<SystemKeyring>) {
         let ids: Vec<u64> = list.recorders().iter().map(|r| r.id).collect();
         let layout = list.layout().cloned();
         let collapsed = list.sidebar_collapsed();
@@ -184,6 +245,39 @@ impl qobject::CameraGrid {
         for id in ids {
             self.as_mut().connect_recorder(id, false);
         }
+    }
+
+    fn start_over(mut self: Pin<&mut Self>) {
+        match RecorderList::start_over_default() {
+            Ok(list) => {
+                self.as_mut().set_list_corrupted(false);
+                self.as_mut().set_error(QString::default());
+                self.adopt_list(list);
+            }
+            Err(error) => self.set_error(QString::from(error.to_string().as_str())),
+        }
+    }
+
+    // A missing element looks like an offline camera otherwise, on the first run of a new install.
+    fn check_components(mut self: Pin<&mut Self>) {
+        let missing = missing_elements();
+        let h265 = missing_h265_elements();
+        let message = if !missing.is_empty() {
+            format!(
+                "Faltam componentes do GStreamer para exibir vídeo ({}). \
+                 Instale os plugins do GStreamer e o suporte a VA-API.",
+                missing.join(", ")
+            )
+        } else if !h265.is_empty() {
+            format!(
+                "Câmeras H.265 não vão abrir porque faltam componentes do GStreamer ({}).",
+                h265.join(", ")
+            )
+        } else {
+            return;
+        };
+        self.as_mut().set_video_unavailable(!missing.is_empty());
+        self.set_missing(QString::from(message.as_str()));
     }
 
     fn publish_tree(self: Pin<&mut Self>) {
@@ -210,6 +304,9 @@ impl qobject::CameraGrid {
                     "id": r.id,
                     "name": r.name,
                     "host": r.host,
+                    "user": r.user,
+                    "httpPort": r.http_port,
+                    "rtspPort": r.rtsp_port,
                     "state": state,
                     "failure": failure,
                     "cameras": cameras,
@@ -220,53 +317,76 @@ impl qobject::CameraGrid {
         self.set_tree(QString::from(text.as_str()));
     }
 
-    /// Asks a recorder for its channels, off the interface thread. With `fill_empty_grid`, an
-    /// empty grid takes its cameras, which is what someone adding a recorder expects to see.
+    /// Starts connecting to a recorder from scratch. With `fill_empty_grid`, an empty grid takes
+    /// its cameras, which is what someone adding a recorder expects to see.
     fn connect_recorder(mut self: Pin<&mut Self>, id: u64, fill_empty_grid: bool) {
+        let mut state = self.as_mut().rust_mut();
+        state.failures.remove(&id);
+        state.retry_delays.remove(&id);
+        self.as_mut().publish_tree();
+        self.attempt_recorder(id, fill_empty_grid);
+    }
+
+    /// Asks a recorder for its channels, off the interface thread. A network failure tries again
+    /// by itself, because a recorder can take longer than the computer to come back from a power
+    /// cut. A refused password doesn't, since repeating it can lock the user on the recorder.
+    fn attempt_recorder(mut self: Pin<&mut Self>, id: u64, fill_empty_grid: bool) {
         let Some(list) = self.list.as_ref() else {
             return;
         };
         let Some(recorder) = list.recorders().iter().find(|r| r.id == id).cloned() else {
             return;
         };
-        self.as_mut().rust_mut().failures.remove(&id);
-        self.as_mut().publish_tree();
+        let attempt = {
+            let mut state = self.as_mut().rust_mut();
+            let attempt = state.attempts.entry(id).or_default();
+            *attempt += 1;
+            *attempt
+        };
         let thread = self.qt_thread();
         std::thread::spawn(move || {
             // Off the interface thread, since a locked keyring waits for the user to unlock it.
             let result = SystemKeyring
                 .get(id)
-                .map_err(|error| error.to_string())
+                .map_err(|error| (error.to_string(), false))
                 .and_then(|password| {
                     let connection = Connection {
-                        host: recorder.host,
+                        address: Address {
+                            host: recorder.host,
+                            http_port: recorder.http_port,
+                            rtsp_port: recorder.rtsp_port,
+                        },
                         user: recorder.user,
                         password,
                     };
                     match connection.client().channels() {
                         Ok(channels) => Ok((connection, channels)),
-                        Err(error) => Err(recorder_message(&error)),
+                        Err(error) => {
+                            let retry = matches!(error, RecorderError::Http(_));
+                            Err((recorder_message(&error), retry))
+                        }
                     }
                 });
             let _ = thread.queue(move |mut grid: Pin<&mut qobject::CameraGrid>| {
-                // The recorder may have been removed while it was answering.
-                let exists = grid
-                    .list
-                    .as_ref()
-                    .is_some_and(|list| list.recorders().iter().any(|r| r.id == id));
-                if !exists {
+                // The recorder may have been removed or tried again while it was answering.
+                if grid.attempts.get(&id) != Some(&attempt) {
                     return;
                 }
                 match result {
                     Ok((connection, channels)) => {
                         let mut state = grid.as_mut().rust_mut();
+                        state.failures.remove(&id);
+                        state.retry_delays.remove(&id);
                         state.connections.insert(id, connection);
                         state.channels.insert(id, channels.clone());
                         // Before the tree, so no camera outside the grid gets opened.
                         grid.as_mut().merge_layout(id, &channels, fill_empty_grid);
                     }
-                    Err(message) => {
+                    Err((message, retry)) => {
                         grid.as_mut().rust_mut().failures.insert(id, message);
+                        if retry {
+                            grid.as_mut().schedule_retry(id, attempt, fill_empty_grid);
+                        }
                     }
                 }
                 grid.publish_tree();
@@ -274,7 +394,24 @@ impl qobject::CameraGrid {
         });
     }
 
-    /// Fixes the saved grid with the channels of a recorder, or starts it with them the first time.
+    fn schedule_retry(mut self: Pin<&mut Self>, id: u64, attempt: u64, fill_empty_grid: bool) {
+        let mut state = self.as_mut().rust_mut();
+        let delay = *state.retry_delays.get(&id).unwrap_or(&FIRST_RETRY_DELAY);
+        state
+            .retry_delays
+            .insert(id, (delay * 2).min(MAX_RETRY_DELAY));
+        let thread = self.qt_thread();
+        std::thread::spawn(move || {
+            std::thread::sleep(delay);
+            let _ = thread.queue(move |grid: Pin<&mut qobject::CameraGrid>| {
+                if grid.attempts.get(&id) == Some(&attempt) {
+                    grid.attempt_recorder(id, fill_empty_grid);
+                }
+            });
+        });
+    }
+
+    /// Starts the grid with the channels of a recorder the first time, and fixes the saved one.
     fn merge_layout(self: Pin<&mut Self>, recorder: u64, channels: &[Channel], fill_empty: bool) {
         let numbers: Vec<u32> = channels.iter().map(|c| c.number).collect();
         let saved = self.list.as_ref().and_then(|list| list.layout().cloned());
@@ -282,13 +419,14 @@ impl qobject::CameraGrid {
             Some(layout) if !(fill_empty && layout.is_empty()) => layout,
             _ => Layout::fitting(&recorder_cameras(recorder, &numbers)),
         };
-        layout.repair(recorder, &numbers);
+        layout.repair();
         if saved.as_ref() != Some(&layout) {
             self.save_layout(layout);
         }
     }
 
-    fn change_layout(self: Pin<&mut Self>, change: impl FnOnce(&mut Layout)) {
+    fn change_layout(mut self: Pin<&mut Self>, change: impl FnOnce(&mut Layout)) {
+        self.as_mut().set_notice(QString::default());
         let layout = self.list.as_ref().and_then(|list| list.layout().cloned());
         let Some(mut layout) = layout else {
             return;
@@ -318,17 +456,34 @@ impl qobject::CameraGrid {
         self.set_layout(QString::from(text.as_str()));
     }
 
-    fn open_recorder(self: Pin<&mut Self>, id: i32) {
+    fn open_recorder(mut self: Pin<&mut Self>, id: i32) {
         let id = id as u64;
         let Some(channels) = self.channels.get(&id) else {
             return;
         };
         let numbers: Vec<u32> = channels.iter().map(|c| c.number).collect();
-        self.save_layout(Layout::fitting(&recorder_cameras(id, &numbers)));
+        let cameras = numbers.len();
+        self.as_mut()
+            .save_layout(Layout::fitting(&recorder_cameras(id, &numbers)));
+        let capacity = Layout::capacity();
+        let notice = if cameras > capacity {
+            format!("Mostrando {capacity} de {cameras} câmeras deste gravador.")
+        } else {
+            String::new()
+        };
+        self.set_notice(QString::from(notice.as_str()));
     }
 
-    fn add_camera(self: Pin<&mut Self>, recorder: i32, channel: i32) {
-        self.change_layout(|layout| layout.add(camera_id(recorder, channel)));
+    fn add_camera(mut self: Pin<&mut Self>, recorder: i32, channel: i32) {
+        let mut added = true;
+        self.as_mut().change_layout(|layout| {
+            added = layout.add(camera_id(recorder, channel));
+        });
+        if !added {
+            self.set_notice(QString::from(
+                "A grade está cheia. Tire uma câmera para colocar outra.",
+            ));
+        }
     }
 
     fn place_camera(self: Pin<&mut Self>, recorder: i32, channel: i32, square: i32) {
@@ -358,45 +513,97 @@ impl qobject::CameraGrid {
     }
 
     fn add_recorder(
-        mut self: Pin<&mut Self>,
+        self: Pin<&mut Self>,
         name: &QString,
         host: &QString,
+        http_port: i32,
+        rtsp_port: i32,
         user: &QString,
         password: &QString,
     ) {
-        let name = name.to_string();
-        let connection = Connection {
-            host: host.to_string().trim().to_owned(),
-            user: user.to_string(),
-            password: password.to_string(),
-        };
-        self.as_mut().set_form_busy(true);
+        let ports = (http_port, rtsp_port);
+        self.save_recorder(None, name, host, ports, user, password);
+    }
+
+    fn update_recorder(
+        self: Pin<&mut Self>,
+        id: i32,
+        name: &QString,
+        host: &QString,
+        http_port: i32,
+        rtsp_port: i32,
+        user: &QString,
+        password: &QString,
+    ) {
+        let ports = (http_port, rtsp_port);
+        self.save_recorder(Some(id as u64), name, host, ports, user, password);
+    }
+
+    /// Tests the connection before saving. Editing with an empty password keeps the saved one.
+    fn save_recorder(
+        mut self: Pin<&mut Self>,
+        id: Option<u64>,
+        name: &QString,
+        host: &QString,
+        ports: (i32, i32),
+        user: &QString,
+        password: &QString,
+    ) {
         self.as_mut().set_form_error(QString::default());
+        self.as_mut().set_notice(QString::default());
+        let port = |number: i32| u16::try_from(number).ok().filter(|&port| port != 0);
+        let address = match Address::parse(&host.to_string(), port(ports.0), port(ports.1)) {
+            Ok(address) => address,
+            Err(error) => {
+                self.set_form_error(QString::from(address_message(error)));
+                return;
+            }
+        };
+        let name = name.to_string();
+        let user = user.to_string();
+        let password = password.to_string();
+        self.as_mut().set_form_busy(true);
         let thread = self.qt_thread();
         std::thread::spawn(move || {
-            let result = connection.client().device_type();
+            let saved_password = match id {
+                Some(id) if password.is_empty() => SystemKeyring.get(id),
+                _ => Ok(password.clone()),
+            };
+            let result = saved_password
+                .map_err(|error| error.to_string())
+                .and_then(|tested| {
+                    client_for(&address, &user, &tested)
+                        .device_type()
+                        .map_err(|error| recorder_message(&error))
+                });
             let _ = thread.queue(move |mut grid: Pin<&mut qobject::CameraGrid>| {
                 let model = match result {
                     Ok(model) => model,
-                    Err(error) => {
+                    Err(message) => {
                         grid.as_mut()
-                            .set_form_error(QString::from(recorder_message(&error).as_str()));
+                            .set_form_error(QString::from(message.as_str()));
                         grid.as_mut().set_form_busy(false);
                         return;
                     }
                 };
                 let label = if name.trim().is_empty() { model } else { name };
-                let added = match grid.as_mut().rust_mut().list.as_mut() {
-                    Some(list) => list.add(
-                        label.trim(),
-                        &connection.host,
-                        &connection.user,
-                        &connection.password,
-                    ),
-                    None => return,
+                let new_password = Some(password.as_str()).filter(|p| !p.is_empty());
+                let saved = grid.as_mut().rust_mut().list.as_mut().map(|list| match id {
+                    Some(id) => list
+                        .update(id, label.trim(), &address, &user, new_password)
+                        .map(|()| id),
+                    None => list.add(label.trim(), &address, &user, &password),
+                });
+                let Some(saved) = saved else {
+                    return;
                 };
-                match added {
-                    Ok(id) => grid.as_mut().connect_recorder(id, true),
+                match saved {
+                    Ok(saved_id) => {
+                        if id.is_some() {
+                            grid.as_mut().forget_recorder(saved_id);
+                        }
+                        grid.as_mut().connect_recorder(saved_id, id.is_none());
+                    }
                     Err(error) => grid
                         .as_mut()
                         .set_form_error(QString::from(error.to_string().as_str())),
@@ -404,6 +611,28 @@ impl qobject::CameraGrid {
                 grid.as_mut().set_form_busy(false);
             });
         });
+    }
+
+    /// Drops what was learned from a recorder, which closes its cameras once the tree is published.
+    fn forget_recorder(self: Pin<&mut Self>, id: u64) {
+        let mut state = self.rust_mut();
+        state.connections.remove(&id);
+        state.channels.remove(&id);
+        state.failures.remove(&id);
+        state.attempts.remove(&id);
+        state.retry_delays.remove(&id);
+    }
+
+    fn recorder_refused(mut self: Pin<&mut Self>, id: i32) {
+        let id = id as u64;
+        // Every camera of the recorder reports it, and only the first one counts.
+        if !self.connections.contains_key(&id) {
+            return;
+        }
+        let message = "O gravador recusou o usuário ou a senha.".to_owned();
+        self.as_mut().forget_recorder(id);
+        self.as_mut().rust_mut().failures.insert(id, message);
+        self.publish_tree();
     }
 
     fn remove_recorder(mut self: Pin<&mut Self>, id: i32) {
@@ -417,14 +646,20 @@ impl qobject::CameraGrid {
         else {
             return;
         };
-        if let Err(error) = result {
-            self.set_error(QString::from(error.to_string().as_str()));
-            return;
-        }
-        let mut state = self.as_mut().rust_mut();
-        state.connections.remove(&id);
-        state.channels.remove(&id);
-        state.failures.remove(&id);
+        let password_removed = match result {
+            Ok(password_removed) => password_removed,
+            Err(error) => {
+                self.set_error(QString::from(error.to_string().as_str()));
+                return;
+            }
+        };
+        let notice = if password_removed {
+            ""
+        } else {
+            "Gravador removido, mas a senha ficou no cofre do sistema."
+        };
+        self.as_mut().set_notice(QString::from(notice));
+        self.as_mut().forget_recorder(id);
         let layout = self.list.as_ref().and_then(|list| list.layout().cloned());
         if let Some(layout) = layout {
             self.as_mut().publish_layout(&layout);
