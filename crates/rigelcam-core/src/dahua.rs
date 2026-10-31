@@ -1,5 +1,6 @@
 //! Client for the Dahua HTTP API, which answers plain `key=value` lines behind Digest auth.
 
+use std::collections::HashMap;
 use std::io::Read;
 use std::time::{Duration, Instant};
 
@@ -24,6 +25,8 @@ pub enum Error {
     Unexpected(String),
 }
 
+const DEFAULT_RTSP_PORT: u16 = 554;
+
 /// For requests with no limit on their total time, which still have to start answering.
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -35,6 +38,30 @@ const SEARCH_PAGE: usize = 100;
 pub struct Channel {
     pub number: u32,
     pub name: String,
+    /// Where the camera of this channel answers, when the recorder tells.
+    pub camera: Option<Camera>,
+}
+
+/// Network address of the camera behind a channel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Camera {
+    pub host: String,
+    pub rtsp_port: u16,
+}
+
+impl Camera {
+    /// RTSP address of its live stream, in which a camera is always channel 1.
+    pub fn live_url(&self, stream: Stream) -> String {
+        live_url(&self.host, self.rtsp_port, 1, stream)
+    }
+}
+
+fn live_url(host: &str, port: u16, channel: u32, stream: Stream) -> String {
+    let subtype = match stream {
+        Stream::Main => 0,
+        Stream::Sub => 1,
+    };
+    format!("rtsp://{host}:{port}/cam/realmonitor?channel={channel}&subtype={subtype}")
 }
 
 /// How long a confirmed login spares the next opening of a stream from checking again. Long enough
@@ -143,7 +170,7 @@ impl Client {
         Self {
             host: host.to_owned(),
             http_port: 80,
-            rtsp_port: 554,
+            rtsp_port: DEFAULT_RTSP_PORT,
             user: user.to_owned(),
             password: password.to_owned(),
             challenge: Mutex::new(None),
@@ -180,6 +207,10 @@ impl Client {
         {
             let disabled = parse_disabled_cameras(&devices);
             channels.retain(|channel| !disabled.contains(&channel.number));
+            let cameras = parse_cameras(&devices);
+            for channel in &mut channels {
+                channel.camera = cameras.get(&channel.number).cloned();
+            }
         }
         Ok(channels)
     }
@@ -323,14 +354,7 @@ impl Client {
 
     /// RTSP address of the live stream. It has no credentials, so it is safe to log.
     pub fn live_url(&self, channel: u32, stream: Stream) -> String {
-        let subtype = match stream {
-            Stream::Main => 0,
-            Stream::Sub => 1,
-        };
-        format!(
-            "rtsp://{}:{}/cam/realmonitor?channel={channel}&subtype={subtype}",
-            self.host, self.rtsp_port
-        )
+        live_url(&self.host, self.rtsp_port, channel, stream)
     }
 
     fn get(&self, path: &str) -> Result<String, Error> {
@@ -504,6 +528,7 @@ fn parse_channel_titles(body: &str) -> Vec<Channel> {
                 .strip_prefix("table.ChannelTitle[")?
                 .strip_suffix("].Name")?;
             Some(Channel {
+                camera: None,
                 number: index.parse::<u32>().ok()? + 1,
                 name: name.to_owned(),
             })
@@ -511,6 +536,40 @@ fn parse_channel_titles(body: &str) -> Vec<Channel> {
         .collect();
     channels.sort_by_key(|channel| channel.number);
     channels
+}
+
+/// The address of each channel that has one, from the fields of its entry.
+fn parse_cameras(body: &str) -> HashMap<u32, Camera> {
+    let mut hosts = HashMap::new();
+    let mut ports = HashMap::new();
+    for line in body.lines() {
+        let Some(field) = line
+            .trim_end()
+            .strip_prefix("table.RemoteDevice.uuid:System_CONFIG_NETCAMERA_INFO_")
+        else {
+            continue;
+        };
+        let Some((index, field)) = field.split_once('.') else {
+            continue;
+        };
+        let Ok(channel) = index.parse::<u32>().map(|index| index + 1) else {
+            continue;
+        };
+        if let Some(host) = field.strip_prefix("Address=") {
+            if !host.is_empty() && host != "0.0.0.0" {
+                hosts.insert(channel, host.to_owned());
+            }
+        } else if let Some(port) = field.strip_prefix("RtspPort=") {
+            ports.insert(channel, port.parse().unwrap_or(DEFAULT_RTSP_PORT));
+        }
+    }
+    hosts
+        .into_iter()
+        .map(|(channel, host)| {
+            let rtsp_port = ports.get(&channel).copied().unwrap_or(DEFAULT_RTSP_PORT);
+            (channel, Camera { host, rtsp_port })
+        })
+        .collect()
 }
 
 /// Channels with no camera assigned. Their titles are still listed, as "CAM 32" for example.
@@ -632,6 +691,22 @@ mod tests {
     }
 
     #[test]
+    fn reads_where_each_camera_answers() {
+        let body = "table.RemoteDevice.uuid:System_CONFIG_NETCAMERA_INFO_0.Address=192.0.2.1\r\n\
+                    table.RemoteDevice.uuid:System_CONFIG_NETCAMERA_INFO_0.RtspPort=8554\r\n\
+                    table.RemoteDevice.uuid:System_CONFIG_NETCAMERA_INFO_1.Address=192.0.2.2\r\n\
+                    table.RemoteDevice.uuid:System_CONFIG_NETCAMERA_INFO_2.Address=0.0.0.0\r\n\
+                    table.RemoteDevice.uuid:System_CONFIG_NETCAMERA_INFO_3.Address=\r\n";
+        let cameras = parse_cameras(body);
+        assert_eq!(cameras.len(), 2);
+        assert_eq!(
+            cameras[&1].live_url(Stream::Sub),
+            "rtsp://192.0.2.1:8554/cam/realmonitor?channel=1&subtype=1"
+        );
+        assert_eq!(cameras[&2].rtsp_port, 554);
+    }
+
+    #[test]
     fn a_download_returns_the_body_of_one_request() {
         let client = Client::new("127.0.0.1", "admin", "secret");
         let (port, requests) = fake_recorder(
@@ -716,10 +791,12 @@ mod tests {
             parse_channel_titles(body),
             vec![
                 Channel {
+                    camera: None,
                     number: 1,
                     name: "Gate = East".to_owned()
                 },
                 Channel {
+                    camera: None,
                     number: 2,
                     name: "Yard".to_owned()
                 },

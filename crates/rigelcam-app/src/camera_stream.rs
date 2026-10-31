@@ -1,5 +1,6 @@
 //! Pipeline of a camera, which hands DMABuf frames to a video item and reconnects by itself. Video
-//! comes over RTSP, and recordings the recorder doesn't serve that way come from its HTTP API.
+//! comes from the recorder over RTSP. What it answers 404 to while the camera works comes from
+//! elsewhere, live video from the camera itself and recordings from the HTTP API.
 
 use std::collections::HashSet;
 use std::ffi::c_void;
@@ -78,6 +79,22 @@ pub struct Stretch {
     pub without_rtsp: Arc<Mutex<HashSet<u32>>>,
 }
 
+/// Channels of a recorder whose live video comes from the camera.
+#[derive(Default)]
+pub struct DirectCameras {
+    opened: Mutex<HashSet<u32>>,
+    /// Cameras with a password other than the one of the recorder. Each try is a wrong password,
+    /// and those can lock the user on the camera.
+    refused: Mutex<HashSet<u32>>,
+}
+
+/// The camera to go to if the recorder answers 404 to its live video.
+pub struct Direct {
+    pub url: String,
+    pub channel: u32,
+    pub cameras: Arc<DirectCameras>,
+}
+
 #[derive(Clone)]
 pub struct Source {
     pub url: String,
@@ -94,6 +111,8 @@ pub struct Source {
     pub gate: Arc<LoginGate>,
     /// Only on a recording.
     pub stretch: Option<Arc<Stretch>>,
+    /// Only on live video of a channel whose camera the recorder told about.
+    pub direct: Option<Arc<Direct>>,
 }
 
 // The gate belongs to the recorder, and it comes along with these from the same connection.
@@ -257,7 +276,8 @@ fn run(shared: Arc<Shared>) {
         };
         generation += 1;
         let result = if source.gate.allows() {
-            open(&shared, &source, revision, generation)
+            let failed_before = failed_revision == Some(revision);
+            open(&shared, &source, revision, generation, failed_before)
         } else {
             Outcome::Refused
         };
@@ -354,7 +374,16 @@ fn lost(reason: &str) -> Outcome {
     }
 }
 
-fn open(shared: &Arc<Shared>, source: &Source, revision: u64, generation: u64) -> Outcome {
+fn open(
+    shared: &Arc<Shared>,
+    source: &Source,
+    revision: u64,
+    generation: u64,
+    failed_before: bool,
+) -> Outcome {
+    if let Some(direct) = &source.direct {
+        return open_live(shared, source, direct, revision, generation, failed_before);
+    }
     let Some(stretch) = &source.stretch else {
         return play(shared, source, revision, generation);
     };
@@ -370,6 +399,43 @@ fn open(shared: &Arc<Shared>, source: &Source, revision: u64, generation: u64) -
         }
     }
     play_stretch(shared, source, stretch, revision, generation)
+}
+
+/// Opens a live stream from the recorder or, for a channel it keeps answering 404 to, from the
+/// camera. A healthy channel can get a 404 for a moment, so one isn't enough to leave the recorder.
+fn open_live(
+    shared: &Arc<Shared>,
+    source: &Source,
+    direct: &Direct,
+    revision: u64,
+    generation: u64,
+    failed_before: bool,
+) -> Outcome {
+    let cameras = &direct.cameras;
+    if cameras.refused.lock().unwrap().contains(&direct.channel) {
+        return play(shared, source, revision, generation);
+    }
+    if !cameras.opened.lock().unwrap().contains(&direct.channel) {
+        let outcome = play(shared, source, revision, generation);
+        let not_found = matches!(&outcome, Outcome::Lost { reason, .. } if reason == NOT_ON_RTSP);
+        if !not_found || !failed_before {
+            return outcome;
+        }
+    }
+    cameras.opened.lock().unwrap().insert(direct.channel);
+    let camera = Source {
+        url: direct.url.clone(),
+        direct: None,
+        ..source.clone()
+    };
+    match play(shared, &camera, revision, generation) {
+        // Not a refusal of the recorder, whose other channels go on.
+        Outcome::Refused => {
+            cameras.refused.lock().unwrap().insert(direct.channel);
+            lost("the camera refused the password of the recorder")
+        }
+        outcome => outcome,
+    }
 }
 
 fn play(shared: &Arc<Shared>, source: &Source, revision: u64, generation: u64) -> Outcome {
@@ -450,7 +516,7 @@ fn watch(
                         if error.error().matches(gst::ResourceError::NotAuthorized) {
                             break Outcome::Refused;
                         }
-                        if source.stretch.is_some()
+                        if (source.stretch.is_some() || source.direct.is_some())
                             && !received_video.load(Ordering::Relaxed)
                             && error.error().matches(gst::ResourceError::NotFound)
                         {

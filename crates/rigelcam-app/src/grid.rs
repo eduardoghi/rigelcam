@@ -202,7 +202,7 @@ use rigelcam_core::recorders::{
 use serde_json::json;
 
 use crate::camera_stream::{
-    missing_elements, missing_h265_elements, CameraStream, Source, Stretch,
+    missing_elements, missing_h265_elements, CameraStream, Direct, DirectCameras, Source, Stretch,
 };
 use crate::export::{self, Job};
 use crate::i18n::{self, message};
@@ -292,6 +292,7 @@ struct Connection {
     gate: Arc<LoginGate>,
     /// Channels whose recordings answer 404 over RTSP, so they stop asking.
     without_rtsp: Arc<Mutex<HashSet<u32>>>,
+    direct_cameras: Arc<DirectCameras>,
 }
 
 impl Connection {
@@ -484,6 +485,7 @@ impl qobject::CameraGrid {
                         password,
                         gate: Arc::new(LoginGate::new(gate)),
                         without_rtsp: Arc::default(),
+                        direct_cameras: Arc::default(),
                     };
                     match connection.client().channels() {
                         Ok(channels) => {
@@ -849,6 +851,7 @@ impl qobject::CameraGrid {
                 start: seconds as u32,
                 without_rtsp: connection.without_rtsp.clone(),
             })),
+            direct: None,
         };
         let item = item as *mut c_void;
         let mut stream = rigel_item_stream(item) as *mut CameraStream;
@@ -1137,6 +1140,18 @@ impl qobject::CameraGrid {
                 } else {
                     Stream::Sub
                 };
+                let camera = self
+                    .channels
+                    .get(&(recorder as u64))
+                    .and_then(|channels| channels.iter().find(|c| c.number == channel as u32))
+                    .and_then(|channel| channel.camera.as_ref());
+                let direct = camera.map(|camera| {
+                    Arc::new(Direct {
+                        url: camera.live_url(kind),
+                        channel: channel as u32,
+                        cameras: connection.direct_cameras.clone(),
+                    })
+                });
                 Source {
                     url: connection.client().live_url(channel as u32, kind),
                     user: connection.user.clone(),
@@ -1146,6 +1161,7 @@ impl qobject::CameraGrid {
                     attempt: 0,
                     gate: connection.gate.clone(),
                     stretch: None,
+                    direct,
                 }
             });
         (*stream).set_source(source);
