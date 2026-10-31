@@ -5,7 +5,7 @@
   </picture>
 </p>
 
-<p align="center"><a href="README.md">English</a> · Português</p>
+<p align="center"><a href="README.md">English</a> · Português · <a href="README.es.md">Español</a></p>
 
 O Rigelcam é um app de desktop para ver câmeras ao vivo e navegar pelas gravações de NVRs Intelbras
 e Dahua, no Linux e no Windows.
@@ -14,36 +14,45 @@ Ele conversa com o gravador pelos protocolos que o próprio aparelho já oferece
 API HTTP da Dahua para o resto. Por isso não precisa do SDK do fabricante e roda nativo no Linux.
 
 > [!NOTE]
-> Fase inicial. Ainda não existe versão para usar. A parte de protocolo descrita abaixo já foi
-> confirmada em aparelhos reais, e o app em volta dela está sendo escrito.
+> Fase inicial, ainda sem versão empacotada. O app está em uso diário no Linux e precisa ser
+> compilado a partir do código. No Windows ele compila e mostra a grade ao vivo, mas gravações,
+> exportação e fotos ainda não foram testadas lá.
 
-## Recursos planejados
+## Recursos
 
 **Ao vivo**
 
 - Grade de câmeras de um ou mais NVRs, usando o substream para a grade cheia continuar leve
-- Clique duplo para abrir uma câmera sozinha no stream principal
+- Clique duplo para abrir uma câmera sozinha no stream principal, com zoom digital e gamma
+- Foto salva na resolução do vídeo
 - Nomes dos canais lidos do gravador
 
 **Gravações**
 
 - Linha do tempo por canal em qualquer dia, com os eventos de movimento separados da gravação contínua
-- Clique em qualquer ponto da linha do tempo para reproduzir a partir dali
-- Vários canais reproduzidos em sincronia
-- Avanço rápido, se o gravador aceitar (ainda em teste)
-- Exportação de trechos em MP4
+- Calendário com os dias que têm gravação
+- Clique em qualquer ponto da linha do tempo para reproduzir a partir dali, em até 8x
+- Até 4 canais reproduzidos em sincronia
+- Exportação de trechos em MP4, sem recompressão
+
+A interface está em inglês, português e espanhol, com tema escuro e claro.
 
 ## Como funciona
 
 | O quê | Como |
 | --- | --- |
 | Vídeo ao vivo | RTSP, `/cam/realmonitor?channel=N&subtype=0\|1` |
-| Lista de gravações | HTTP Digest, `mediaFileFind.cgi` |
-| Reprodução | RTSP, `/cam/playback?channel=N&starttime=...&endtime=...` |
+| Lista de gravações | Sessão da API web (`RPC2`), ou HTTP Digest com `mediaFileFind.cgi` |
+| Reprodução | RTSP, `/cam/playback?channel=N&starttime=...&endtime=...`, ou `loadfile.cgi` nos canais que recusam |
+| Exportação | HTTP Digest, `loadfile.cgi` |
 | Dados do aparelho e dos canais | HTTP Digest, `magicBox.cgi` e `configManager.cgi` |
 
 O vídeo é decodificado pelo GStreamer, com aceleração por hardware quando disponível (VA-API no
 Linux, Direct3D 11 no Windows). O núcleo é escrito em Rust e a interface em Qt 6 Quick.
+
+Alguns gravadores respondem 404 por RTSP para câmeras com firmware recente, que continuam gravando
+normalmente. Nesses canais, a gravação toca por HTTP e o vídeo ao vivo abre direto na câmera, no
+endereço informado pelo gravador e com o login dele.
 
 Testado até agora com os NVRs Intelbras NVD 1308 e NVD 7132. Outros gravadores com base Dahua devem
 funcionar do mesmo jeito, e relatos são bem-vindos.
@@ -55,6 +64,24 @@ rede dele, use uma VPN.
 
 As senhas dos gravadores ficam no cofre de senhas do sistema (Secret Service no Linux, Gerenciador
 de Credenciais no Windows) e nunca são gravadas em arquivos de configuração nem em logs.
+
+O tráfego de vídeo e HTTP não é criptografado, então mantenha os gravadores numa rede confiável. A
+biblioteca de RTSP responde a um servidor que peça autenticação Basic, que envia a senha de forma
+reversível. Os gravadores usam Digest, e o risco é um aparelho na rede se passar por um deles.
+
+## Compilando
+
+É preciso de Rust 1.96 ou mais novo, Qt 6 com Qt Quick e as ferramentas do Linguist, e GStreamer
+1.24 ou mais novo com os plugins base, good e bad.
+
+```sh
+cargo build --release -p rigelcam-app
+```
+
+O app fica em `target/release`. No Linux, a decodificação por hardware precisa de VA-API. No
+Windows, compile num ambiente do Visual Studio, com `QMAKE` apontando para o `qmake` de um Qt para
+MSVC, `PKG_CONFIG` para o `pkg-config` do GStreamer oficial para MSVC e as pastas `bin` dos dois no
+`PATH`.
 
 ## Contribuindo
 
@@ -68,6 +95,9 @@ git config core.hooksPath .githooks
 
 [MIT](LICENSE). A fonte Space Grotesk usada no logo está sob a
 [SIL Open Font License](assets/branding/SpaceGrotesk-OFL.txt).
+
+O app usa Qt e GStreamer, disponíveis sob a LGPL. Uma versão distribuída precisa cumprir essas
+licenças, e alguns plugins do GStreamer têm termos próprios.
 
 ## Aviso
 
