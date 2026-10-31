@@ -126,7 +126,8 @@ pub mod qobject {
         #[cxx_name = "searchRecordedDays"]
         fn search_recorded_days(self: Pin<&mut Self>, recorder: i32, channel: i32, month: &QString);
 
-        /// Plays a recording in an item from `seconds` after the midnight of `date`.
+        /// Plays a recording in an item from `seconds` after the midnight of `date`. Returns the
+        /// number of this attempt, which its signals carry, or 0 without a connection.
         #[qinvokable]
         unsafe fn play(
             self: Pin<&mut Self>,
@@ -136,7 +137,7 @@ pub mod qobject {
             date: &QString,
             seconds: i32,
             rate: i32,
-        );
+        ) -> i32;
 
         #[qinvokable]
         #[cxx_name = "pausePlayback"]
@@ -264,6 +265,7 @@ pub struct CameraGridRust {
     days_search: Arc<AtomicU64>,
     /// Latest search, so an answer to an older one is ignored.
     search: u64,
+    playbacks: i32,
     sidebar_collapsed: bool,
     theme: QString,
     language: QString,
@@ -547,12 +549,19 @@ impl qobject::CameraGrid {
     }
 
     fn search_recordings(mut self: Pin<&mut Self>, recorder: i32, channel: i32, date: &QString) {
+        let search = self.search + 1;
+        self.as_mut().rust_mut().search = search;
+        // The screen waits for this answer, even when there is nothing to search with.
+        let failure = move |error: String| {
+            json!({"search": search, "recorder": recorder, "channel": channel, "error": error})
+                .to_string()
+        };
         let Some(connection) = self.connections.get(&(recorder as u64)).cloned() else {
+            let text = failure(message("The recorder is not connected.", &[]));
+            self.set_recordings(QString::from(text.as_str()));
             return;
         };
         let date = date.to_string();
-        let search = self.search + 1;
-        self.as_mut().rust_mut().search = search;
         let thread = self.qt_thread();
         std::thread::spawn(move || {
             let client = connection.client();
@@ -575,10 +584,24 @@ impl qobject::CameraGrid {
                             .iter()
                             .map(|s| json!({"start": s.start, "end": s.end, "event": s.event}))
                             .collect();
-                        let text = json!({"date": day, "now": now, "spans": spans}).to_string();
+                        let text = json!({
+                            "search": search,
+                            "recorder": recorder,
+                            "channel": channel,
+                            "date": day,
+                            "now": now,
+                            "spans": spans,
+                        })
+                        .to_string();
                         grid.set_recordings(QString::from(text.as_str()));
                     }
-                    Err(error) => grid.set_notice(QString::from(recorder_message(&error).as_str())),
+                    Err(error) => {
+                        let text = failure(recorder_message(&error));
+                        grid.as_mut().set_recordings(QString::from(text.as_str()));
+                        if matches!(error, RecorderError::Unauthorized) {
+                            grid.recorder_refused(recorder);
+                        }
+                    }
                 }
             });
         });
@@ -641,16 +664,18 @@ impl qobject::CameraGrid {
     }
 
     unsafe fn play(
-        self: Pin<&mut Self>,
+        mut self: Pin<&mut Self>,
         item: *mut qobject::QQuickItem,
         recorder: i32,
         channel: i32,
         date: &QString,
         seconds: i32,
         rate: i32,
-    ) {
+    ) -> i32 {
+        let attempt = self.playbacks + 1;
+        self.as_mut().rust_mut().playbacks = attempt;
         let Some(connection) = self.connections.get(&(recorder as u64)) else {
-            return;
+            return 0;
         };
         let url =
             connection
@@ -662,6 +687,7 @@ impl qobject::CameraGrid {
             password: connection.password.clone(),
             recording: true,
             rate: rate as u32,
+            attempt,
         };
         let item = item as *mut c_void;
         let mut stream = rigel_item_stream(item) as *mut CameraStream;
@@ -671,6 +697,7 @@ impl qobject::CameraGrid {
         }
         (*stream).set_paused(false);
         (*stream).set_source(Some(source));
+        attempt
     }
 
     unsafe fn pause_playback(self: Pin<&mut Self>, item: *mut qobject::QQuickItem, paused: bool) {
@@ -955,6 +982,7 @@ impl qobject::CameraGrid {
                     password: connection.password.clone(),
                     recording: false,
                     rate: 1,
+                    attempt: 0,
                 }
             });
         (*stream).set_source(source);

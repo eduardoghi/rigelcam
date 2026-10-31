@@ -84,6 +84,15 @@ ApplicationWindow {
 
     component AppComboBox: ComboBox {
         id: box
+        Connections {
+            target: box.popup
+            function onAboutToShow() {
+                win.comboOpen = true
+            }
+            function onAboutToHide() {
+                win.comboOpen = false
+            }
+        }
         // The text of a row, as a function so a list of labels doesn't have to be rebuilt.
         property var labelOf: item => item[textRole]
         displayText: currentIndex >= 0 ? labelOf(model[currentIndex]) : ""
@@ -152,6 +161,8 @@ ApplicationWindow {
         grabPermissions: PointerHandler.CanTakeOverFromAnything
         onActiveChanged: active ? win.beginDrag(camera, centroid.scenePosition) : win.endDrag()
         onCentroidChanged: if (active) win.moveDrag(centroid.scenePosition)
+        // The row or tile may go away mid-drag, and then activeChanged never comes.
+        Component.onDestruction: if (active) win.dragged = null
     }
 
     component GammaControl: RowLayout {
@@ -294,7 +305,10 @@ ApplicationWindow {
     // "live" or "recordings", which stops the live cameras to free the network and the decoder.
     property string mode: "live"
     readonly property bool inRecordings: mode === "recordings"
+    // Off while a popup is open, which takes these keys for itself.
     readonly property bool playerKeys: inRecordings && playback.spans.length > 0 && !addDialog.visible && !removeDialog.visible
+        && !calendar.visible && !comboOpen
+    property bool comboOpen: false
     // The camera being watched in the recordings: { recorder, number, name }, or null.
     property var playbackCamera: null
     // The camera being dragged to a square.
@@ -371,6 +385,9 @@ ApplicationWindow {
             tileModel.append(camera)
         if (!keys.has(zoomed))
             zoomed = ""
+        // The recorder was removed, edited or refused the password, so this stream is out of date.
+        if (playbackCamera && !keys.has(cameraKey(playbackCamera.recorder, playbackCamera.number)))
+            playback.close()
         updateLiveCount()
     }
 
@@ -480,7 +497,7 @@ ApplicationWindow {
                 visible: win.recorderList.length > 0
                 display: AbstractButton.IconOnly
                 icon.source: "qrc:/rigelcam/icons/sidebar.svg"
-                text: grid.sidebarCollapsed ? "Mostrar câmeras" : "Esconder câmeras"
+                text: grid.sidebarCollapsed ? qsTr("Show cameras") : qsTr("Hide cameras")
                 implicitWidth: 34
                 leftPadding: 9
                 rightPadding: 9
@@ -1469,18 +1486,29 @@ ApplicationWindow {
         property int rate: 1
         property bool playing: false
         property bool failed: false
-        // Where a pipeline was opened, and where the bar is.
+        property bool loading: false
+        property string searchError: ""
+        // Whether a stream exists to pause, which it doesn't after the end, a failure or stop().
+        property bool streamOpen: false
+        // Where the stream was opened, and where the bar is.
         property int openedAt: 0
         property real position: 0
-        // Set by a seek until the new stream speaks, so the bar never goes back by itself.
-        property bool seeking: false
-        property real lastElapsed: 0
+        // The stream the screen is following. Reports from any other are stale, so the bar never
+        // goes back by itself.
+        property int attempt: 0
 
         readonly property var recordings: grid.recordings ? JSON.parse(grid.recordings) : null
 
         onRecordingsChanged: {
-            if (!recordings)
+            const camera = win.playbackCamera
+            if (!recordings || !win.inRecordings || !camera || recordings.recorder !== camera.recorder
+                    || recordings.channel !== camera.number)
                 return
+            loading = false
+            if (recordings.error) {
+                searchError = recordings.error
+                return
+            }
             date = recordings.date
             spans = recordings.spans
             const now = recordings.now.split(" ")
@@ -1496,14 +1524,33 @@ ApplicationWindow {
             seek(date === today ? Math.max(last.start, last.end - 60) : spans[0].start)
         }
 
-        function open(camera) {
+        // Nothing of the previous camera or day stays on screen while the answer doesn't come.
+        function search(camera, day) {
             stop()
-            grid.searchRecordings(camera.recorder, camera.number, date)
+            spans = []
+            position = 0
+            openedAt = 0
+            searchError = ""
+            loading = true
+            grid.searchRecordings(camera.recorder, camera.number, day)
+        }
+
+        function open(camera) {
+            search(camera, date)
+        }
+
+        function close() {
+            stop()
+            spans = []
+            position = 0
+            loading = false
+            searchError = ""
+            win.playbackCamera = null
         }
 
         function changeDay(day) {
             if (win.playbackCamera)
-                grid.searchRecordings(win.playbackCamera.recorder, win.playbackCamera.number, day)
+                search(win.playbackCamera, day)
         }
 
         function stepDay(days) {
@@ -1514,8 +1561,9 @@ ApplicationWindow {
 
         function stop() {
             playing = false
-            seeking = false
             failed = false
+            streamOpen = false
+            attempt = 0
             grid.show(video, 0, 0, false, false)
         }
 
@@ -1532,12 +1580,14 @@ ApplicationWindow {
             const target = recordedTime(seconds)
             if (target < 0 || !win.playbackCamera)
                 return
+            timeline.following = true
             position = target
             failed = false
             openedAt = Math.floor(target)
-            seeking = true
-            playing = true
-            grid.play(video, win.playbackCamera.recorder, win.playbackCamera.number, date, openedAt, rate)
+            attempt = grid.play(video, win.playbackCamera.recorder, win.playbackCamera.number, date, openedAt, rate)
+            streamOpen = attempt !== 0
+            playing = streamOpen
+            failed = !streamOpen
         }
 
         function setRate(next) {
@@ -1546,6 +1596,11 @@ ApplicationWindow {
         }
 
         function togglePlaying() {
+            if (!streamOpen) {
+                // After the last recording it starts the day over.
+                seek(recordedTime(position) < 0 ? spans[0].start : position)
+                return
+            }
             playing = !playing
             grid.pausePlayback(video, !playing)
         }
@@ -1572,7 +1627,12 @@ ApplicationWindow {
             return pad(seconds / 3600) + ":" + pad(seconds / 60 % 60) + ":" + pad(seconds % 60)
         }
 
-        onVisibleChanged: if (!visible) stop()
+        onVisibleChanged: {
+            if (!visible)
+                stop()
+            else if (win.playbackCamera && spans.length === 0)
+                open(win.playbackCamera)
+        }
 
         VideoItem {
             id: video
@@ -1582,22 +1642,29 @@ ApplicationWindow {
             anchors.top: parent.top
             anchors.bottom: controls.top
 
-            onPlaybackPosition: seconds => {
-                // Reports of the stream that a seek replaced still arrive for a moment. The new
-                // one counts from zero again.
-                if (playback.seeking) {
-                    if (seconds >= playback.lastElapsed && playback.lastElapsed > 0)
-                        return
-                    playback.seeking = false
-                }
-                playback.lastElapsed = seconds
-                playback.position = playback.timeAfter(seconds)
+            onPlaybackPosition: (seconds, attempt) => {
+                if (attempt === playback.attempt)
+                    playback.position = playback.timeAfter(seconds)
             }
-            onPlaybackEnded: playback.playing = false
-            onPlaybackFailed: {
+            onPlaybackEnded: attempt => {
+                if (attempt !== playback.attempt)
+                    return
+                playback.streamOpen = false
                 playback.playing = false
-                playback.seeking = false
+            }
+            onPlaybackFailed: attempt => {
+                if (attempt !== playback.attempt)
+                    return
+                playback.streamOpen = false
+                playback.playing = false
                 playback.failed = true
+            }
+            onAuthRefused: {
+                playback.streamOpen = false
+                playback.playing = false
+                playback.failed = true
+                if (win.playbackCamera)
+                    Qt.callLater(grid.recorderRefused, win.playbackCamera.recorder)
             }
         }
 
@@ -1613,6 +1680,8 @@ ApplicationWindow {
                 color: colors.panel
             }
             text: !win.playbackCamera ? qsTr("Double-click a camera to see its recordings.")
+                : playback.loading ? qsTr("Searching recordings…")
+                : playback.searchError ? win.msg(playback.searchError)
                 : playback.spans.length === 0 ? qsTr("No recordings on this day.")
                 : qsTr("Could not open this recording. Try another time on the bar.")
         }
@@ -1654,7 +1723,12 @@ ApplicationWindow {
                         dim: false
                         focus: true
                         padding: 10
-                        property date shown: playback.date ? new Date(playback.date + "T12:00:00") : new Date()
+                        // The month on the arrows, counted from the day being played.
+                        property int monthOffset: 0
+                        readonly property date shown: {
+                            const day = playback.date ? new Date(playback.date + "T12:00:00") : new Date()
+                            return new Date(day.getFullYear(), day.getMonth() + monthOffset, 1)
+                        }
                         // Days with recordings, by camera and month, since searching takes seconds.
                         property var knownDays: ({})
                         readonly property string monthText: Qt.formatDate(shown, "yyyy-MM")
@@ -1672,10 +1746,7 @@ ApplicationWindow {
                         }
                         // Before anyone opens it, so it opens with the days already marked.
                         onMonthKeyChanged: search()
-                        onAboutToShow: {
-                            if (playback.date)
-                                shown = new Date(playback.date + "T12:00:00")
-                        }
+                        onAboutToShow: monthOffset = 0
 
                         Connections {
                             target: grid
@@ -1699,7 +1770,7 @@ ApplicationWindow {
                                 AppButton {
                                     text: "‹"
                                     implicitWidth: 30
-                                    onClicked: calendar.shown = new Date(calendar.shown.getFullYear(), calendar.shown.getMonth() - 1, 1)
+                                    onClicked: calendar.monthOffset--
                                 }
                                 Label {
                                     Layout.fillWidth: true
@@ -1711,7 +1782,7 @@ ApplicationWindow {
                                 AppButton {
                                     text: "›"
                                     implicitWidth: 30
-                                    onClicked: calendar.shown = new Date(calendar.shown.getFullYear(), calendar.shown.getMonth() + 1, 1)
+                                    onClicked: calendar.monthOffset++
                                 }
                             }
                             MonthGrid {
@@ -1852,10 +1923,6 @@ ApplicationWindow {
 
                 Connections {
                     target: playback
-                    function onSeekingChanged() {
-                        if (playback.seeking)
-                            timeline.following = true
-                    }
                     function onPositionChanged() {
                         const span = timeline.viewEnd - timeline.viewStart
                         const outside = playback.position < timeline.viewStart || playback.position > timeline.viewEnd
@@ -1971,6 +2038,9 @@ ApplicationWindow {
                         const start = win.clamp(anchor - (anchor - timeline.viewStart) * next / span, 0, 86400 - next)
                         timeline.viewStart = start
                         timeline.viewEnd = start + next
+                        // Zoomed in on another time, the bar stays there.
+                        if (playback.position < start || playback.position > start + next)
+                            timeline.following = false
                     }
                 }
             }

@@ -43,9 +43,9 @@ extern "C" {
     fn rigel_item_set_frame(item: *mut c_void, frame: *const RigelFrame);
     fn rigel_item_set_status(item: *mut c_void, has_video: bool, signal_lost: bool);
     fn rigel_item_auth_refused(item: *mut c_void);
-    fn rigel_item_position(item: *mut c_void, seconds: f64);
-    fn rigel_item_ended(item: *mut c_void);
-    fn rigel_item_failed(item: *mut c_void);
+    fn rigel_item_position(item: *mut c_void, seconds: f64, attempt: i32);
+    fn rigel_item_ended(item: *mut c_void, attempt: i32);
+    fn rigel_item_failed(item: *mut c_void, attempt: i32);
 }
 
 extern "C" fn release_sample(owner: *mut c_void) {
@@ -62,6 +62,9 @@ pub struct Source {
     pub recording: bool,
     /// Speed of a recording, in times the normal one.
     pub rate: u32,
+    /// Number of this opening of a recording. It makes every one a new source, so asking again
+    /// for the same moment reopens a recording that failed or ended.
+    pub attempt: i32,
 }
 
 #[derive(Default)]
@@ -89,22 +92,22 @@ impl Shared {
         }
     }
 
-    fn report_position(&self, seconds: f64) {
+    fn report_position(&self, seconds: f64, attempt: i32) {
         let item = self.item.lock().unwrap();
         if *item != 0 {
-            unsafe { rigel_item_position(*item as *mut c_void, seconds) };
+            unsafe { rigel_item_position(*item as *mut c_void, seconds, attempt) };
         }
     }
 
-    fn report_ended(&self, cleanly: bool) {
+    fn report_ended(&self, cleanly: bool, attempt: i32) {
         let item = self.item.lock().unwrap();
         if *item != 0 {
             let item = *item as *mut c_void;
             unsafe {
                 if cleanly {
-                    rigel_item_ended(item);
+                    rigel_item_ended(item, attempt);
                 } else {
-                    rigel_item_failed(item);
+                    rigel_item_failed(item, attempt);
                 }
             }
         }
@@ -235,7 +238,7 @@ fn run(shared: Arc<Shared>) {
                 shared.set_status(false, true);
                 if source.recording {
                     eprintln!("{} ({reason})", source.url);
-                    shared.report_ended(received_video && reason == STREAM_ENDED);
+                    shared.report_ended(received_video && reason == STREAM_ENDED, source.attempt);
                     let guard = shared.control.lock().unwrap();
                     drop(
                         shared
@@ -399,6 +402,7 @@ fn build_pipeline(
     });
 
     let recording = source.recording;
+    let attempt = source.attempt;
     let weak_pipeline = pipeline.downgrade();
     src.connect_pad_added(move |_, pad| {
         let Some(pipeline) = weak_pipeline.upgrade() else {
@@ -475,7 +479,7 @@ fn build_pipeline(
                     if recording && last_report.elapsed() >= POSITION_INTERVAL {
                         if let Some(seconds) = stream_time_of(&sample) {
                             last_report = Instant::now();
-                            shared.report_position(seconds);
+                            shared.report_position(seconds, attempt);
                         }
                     }
                     // A frame the item can't take doesn't count, so the stream ends up as lost.

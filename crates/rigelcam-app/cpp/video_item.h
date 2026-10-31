@@ -32,9 +32,9 @@ void rigel_install_translation(const unsigned char *data, int size);
 void rigel_item_set_frame(void *item, const RigelFrame *frame);
 void rigel_item_set_status(void *item, bool has_video, bool signal_lost);
 void rigel_item_auth_refused(void *item);
-void rigel_item_position(void *item, double seconds);
-void rigel_item_ended(void *item);
-void rigel_item_failed(void *item);
+void rigel_item_position(void *item, double seconds, int attempt);
+void rigel_item_ended(void *item, int attempt);
+void rigel_item_failed(void *item, int attempt);
 void rigel_item_set_stream(void *item, void *stream, void (*destroy)(void *));
 void *rigel_item_stream(void *item);
 }
@@ -78,12 +78,13 @@ signals:
     void gammaChanged();
     /// The recorder refused the user or password, and this stream stopped trying.
     void authRefused();
-    /// Seconds of a recording played since the point it was opened at.
-    void playbackPosition(double seconds);
+    /// Seconds of a recording played since the point it was opened at. Each signal carries the
+    /// attempt that `play` returned, because a replaced stream still reports for a moment.
+    void playbackPosition(double seconds, int attempt);
     /// The recording reached the end of what the recorder has.
-    void playbackEnded();
+    void playbackEnded(int attempt);
     /// The recorder couldn't open a recording or stopped sending it.
-    void playbackFailed();
+    void playbackFailed(int attempt);
 
 protected:
     QSGNode *updatePaintNode(QSGNode *old, UpdatePaintNodeData *) override;

@@ -275,5 +275,21 @@
         <source>Could not open this recording. Try another time on the bar.</source>
         <translation>Não foi possível abrir esta gravação. Tente outro horário na barra.</translation>
     </message>
+    <message>
+        <source>Show cameras</source>
+        <translation>Mostrar câmeras</translation>
+    </message>
+    <message>
+        <source>Hide cameras</source>
+        <translation>Esconder câmeras</translation>
+    </message>
+    <message>
+        <source>Searching recordings…</source>
+        <translation>Buscando gravações…</translation>
+    </message>
+    <message>
+        <source>The recorder is not connected.</source>
+        <translation>O gravador não está conectado.</translation>
+    </message>
 </context>
 </TS>
