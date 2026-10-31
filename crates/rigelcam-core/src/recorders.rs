@@ -60,10 +60,22 @@ pub struct Recorder {
     pub rtsp_port: u16,
 }
 
+impl Recorder {
+    pub fn address(&self) -> Address {
+        Address {
+            host: self.host.clone(),
+            http_port: self.http_port,
+            rtsp_port: self.rtsp_port,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum AddressError {
     #[error("the address carries a user or password")]
     Credentials,
+    #[error("the client doesn't speak HTTPS")]
+    Https,
     #[error("the address isn't a valid host")]
     Invalid,
 }
@@ -86,10 +98,11 @@ impl Address {
         rtsp_port: Option<u16>,
     ) -> Result<Self, AddressError> {
         let text = text.trim();
-        let text = text
-            .strip_prefix("http://")
-            .or_else(|| text.strip_prefix("https://"))
-            .unwrap_or(text);
+        // Dropping the scheme would send what was meant for TLS over plain HTTP.
+        if text.starts_with("https://") {
+            return Err(AddressError::Https);
+        }
+        let text = text.strip_prefix("http://").unwrap_or(text);
         let authority = text.split('/').next().unwrap_or(text);
         if authority.contains('@') {
             return Err(AddressError::Credentials);
@@ -587,7 +600,7 @@ mod tests {
         assert_eq!(parsed("  192.0.2.1 ").host, "192.0.2.1");
         assert_eq!(parsed("nvr-1.local").host, "nvr-1.local");
         assert_eq!(parsed("http://192.0.2.1/").host, "192.0.2.1");
-        assert_eq!(parsed("https://192.0.2.1/login.html").host, "192.0.2.1");
+        assert_eq!(parsed("http://192.0.2.1/login.html").host, "192.0.2.1");
         assert_eq!(parsed("[2001:db8::1]").host, "[2001:db8::1]");
         assert_eq!(parsed("[2001:db8::1]:8080").http_port, 8080);
         assert_eq!(parsed("192.0.2.1:8080").http_port, 8080);
@@ -612,6 +625,7 @@ mod tests {
             refused("http://admin@192.0.2.1/"),
             AddressError::Credentials
         );
+        assert_eq!(refused("https://192.0.2.1/"), AddressError::Https);
         for text in [
             "",
             "http://",

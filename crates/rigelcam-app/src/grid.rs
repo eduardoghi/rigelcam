@@ -180,6 +180,7 @@ fn camera_id(recorder: i32, channel: i32) -> CameraId {
 fn address_message(error: AddressError) -> &'static str {
     match error {
         AddressError::Credentials => "Informe só o endereço, sem usuário ou senha.",
+        AddressError::Https => "O app ainda não conecta por HTTPS. Use o endereço sem https://.",
         AddressError::Invalid => "Endereço inválido. Use um IP ou nome de máquina.",
     }
 }
@@ -359,11 +360,7 @@ impl qobject::CameraGrid {
                 .map_err(|error| (error.to_string(), false))
                 .and_then(|password| {
                     let connection = Connection {
-                        address: Address {
-                            host: recorder.host,
-                            http_port: recorder.http_port,
-                            rtsp_port: recorder.rtsp_port,
-                        },
+                        address: recorder.address(),
                         user: recorder.user,
                         password,
                     };
@@ -585,6 +582,18 @@ impl qobject::CameraGrid {
         let name = name.to_string();
         let user = user.to_string();
         let password = password.to_string();
+        // The saved password is only for the address it was typed for, or changing the address
+        // would hand it to whatever answers there.
+        let same_address = |id| {
+            self.list
+                .as_ref()
+                .and_then(|list| list.recorders().iter().find(|r| r.id == id))
+                .is_some_and(|recorder| recorder.address() == address)
+        };
+        if id.is_some_and(|id| password.is_empty() && !same_address(id)) {
+            self.set_form_error(QString::from("Informe a senha para o novo endereço."));
+            return;
+        }
         self.as_mut().set_form_busy(true);
         let thread = self.qt_thread();
         std::thread::spawn(move || {
@@ -642,8 +651,9 @@ impl qobject::CameraGrid {
         state.connections.remove(&id);
         state.channels.remove(&id);
         state.failures.remove(&id);
-        state.attempts.remove(&id);
         state.retry_delays.remove(&id);
+        // Bumped and never reset, so a try still on its way can't pass for a later one.
+        *state.attempts.entry(id).or_default() += 1;
     }
 
     fn recorder_refused(mut self: Pin<&mut Self>, id: i32) {
