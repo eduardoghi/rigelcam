@@ -286,6 +286,25 @@ ApplicationWindow {
     property var cameraStatus: ({})
     // Key of the camera shown alone after a double click, or empty for the whole grid.
     signal photoRequested()
+    // Closing waits for the cancelled export, which removes its unfinished file.
+    property bool closeAfterExport: false
+    onClosing: close => {
+        if (grid.exporting === "")
+            return
+        closeAfterExport = true
+        grid.cancelExports()
+        close.accepted = false
+    }
+    Connections {
+        target: grid
+        function onExportingChanged() {
+            if (win.closeAfterExport && grid.exporting === "")
+                win.close()
+        }
+        function onExportFinished(folder, file, error) {
+            photoToast.showVideo(folder, file, error)
+        }
+    }
 
     property string zoomed: ""
     property string zoomedName: ""
@@ -336,6 +355,14 @@ ApplicationWindow {
         for (let i = 1; i < parts.length; i++)
             translated = translated.arg(parts[i])
         return translated
+    }
+
+    // The seconds after midnight of a time like 07:30:00, or -1 if it isn't one.
+    function secondsOf(text) {
+        const parts = /^(\d\d):(\d\d):(\d\d)$/.exec(text)
+        if (!parts || parts[1] > 23 || parts[2] > 59 || parts[3] > 59)
+            return -1
+        return parts[1] * 3600 + parts[2] * 60 + Number(parts[3])
     }
 
     function clamp(value, low, high) {
@@ -792,6 +819,90 @@ ApplicationWindow {
             function onFormBusyChanged() {
                 if (!grid.formBusy && grid.formError === "" && addDialog.opened) {
                     addDialog.close()
+                }
+            }
+        }
+    }
+
+    AppDialog {
+        id: exportDialog
+        readonly property var cameras: win.playbackCameras.filter(camera => camera)
+        readonly property int startTime: win.secondsOf(startField.text)
+        readonly property int endTime: win.secondsOf(endField.text)
+        readonly property bool valid: startTime >= 0 && endTime > startTime
+        title: qsTr("Export clip")
+        width: Math.min(400, parent.width - 32)
+        onOpened: startField.forceActiveFocus()
+
+        function openAt(seconds) {
+            const start = Math.floor(seconds)
+            startField.text = playback.clockText(start)
+            endField.text = playback.clockText(Math.min(start + 60, 86399))
+            open()
+        }
+
+        function submit() {
+            if (!valid)
+                return
+            for (const camera of cameras)
+                grid.exportClip(camera.recorder, camera.number, camera.name, playback.viewDate, startTime, endTime)
+            close()
+        }
+
+        ColumnLayout {
+            anchors.fill: parent
+            spacing: 6
+            Label {
+                Layout.fillWidth: true
+                wrapMode: Text.WordWrap
+                // The names come from the recorder, so they can't be read as markup.
+                textFormat: Text.PlainText
+                font.pixelSize: 14
+                color: colors.text
+                text: exportDialog.cameras.map(camera => camera.name).join(", ")
+            }
+            RowLayout {
+                spacing: 12
+                ColumnLayout {
+                    spacing: 4
+                    FormLabel { text: qsTr("Start") }
+                    FormField {
+                        id: startField
+                        inputMask: "99:99:99"
+                        inputMethodHints: Qt.ImhDigitsOnly
+                        onAccepted: exportDialog.submit()
+                    }
+                }
+                ColumnLayout {
+                    spacing: 4
+                    FormLabel { text: qsTr("End") }
+                    FormField {
+                        id: endField
+                        inputMask: "99:99:99"
+                        inputMethodHints: Qt.ImhDigitsOnly
+                        onAccepted: exportDialog.submit()
+                    }
+                }
+            }
+            Label {
+                Layout.fillWidth: true
+                Layout.topMargin: 6
+                wrapMode: Text.WordWrap
+                textFormat: Text.PlainText
+                font.pixelSize: 12
+                color: exportDialog.valid ? colors.muted : colors.danger
+                text: exportDialog.valid ? qsTr("One video per camera, in the Rigelcam folder of your videos.")
+                    : qsTr("The end has to be after the start.")
+            }
+            RowLayout {
+                Layout.alignment: Qt.AlignRight
+                Layout.topMargin: 12
+                spacing: 8
+                AppButton { text: qsTr("Cancel"); onClicked: exportDialog.close() }
+                PrimaryButton {
+                    enabled: exportDialog.valid
+                    text: qsTr("Export")
+                    onClicked: exportDialog.submit()
                 }
             }
         }
@@ -2246,6 +2357,22 @@ ApplicationWindow {
 
                 Item { Layout.fillWidth: true }
 
+                AppButton {
+                    id: exportButton
+                    enabled: playback.spans.length > 0
+                    display: AbstractButton.IconOnly
+                    icon.source: "qrc:/rigelcam/icons/download.svg"
+                    text: qsTr("Export clip")
+                    implicitWidth: 34
+                    leftPadding: 9
+                    rightPadding: 9
+                    onClicked: exportDialog.openAt(playback.position)
+                    AppToolTip {
+                        visible: exportButton.hovered
+                        text: exportButton.text
+                    }
+                }
+
                 GammaControl { Layout.rightMargin: 8 }
 
                 Repeater {
@@ -2480,14 +2607,26 @@ ApplicationWindow {
     // Here and not with the other notices, since the top bar is hidden while zoomed.
     Rectangle {
         id: photoToast
+        property string title: ""
         property string folder: ""
         property string fileName: ""
+        property bool failed: false
 
         function show(file) {
             const path = file.toString()
             const slash = path.lastIndexOf("/")
-            folder = path === "" ? "" : path.slice(0, slash)
-            fileName = path === "" ? "" : decodeURIComponent(path.slice(slash + 1))
+            failed = path === ""
+            title = failed ? qsTr("Could not save the photo.") : qsTr("Photo saved")
+            folder = failed ? "" : path.slice(0, slash)
+            fileName = failed ? "" : decodeURIComponent(path.slice(slash + 1))
+            hideToast.restart()
+        }
+
+        function showVideo(savedIn, file, error) {
+            failed = error !== ""
+            title = failed ? win.msg(error) : qsTr("Video saved")
+            folder = failed ? "" : encodeURI("file://" + savedIn)
+            fileName = file
             hideToast.restart()
         }
 
@@ -2512,10 +2651,11 @@ ApplicationWindow {
             spacing: 14
             Column {
                 Text {
-                    text: photoToast.folder ? qsTr("Photo saved") : qsTr("Could not save the photo.")
+                    text: photoToast.title
+                    textFormat: Text.PlainText
                     font.pixelSize: 13
                     font.weight: Font.Medium
-                    color: photoToast.folder ? colors.text : colors.danger
+                    color: photoToast.failed ? colors.danger : colors.text
                 }
                 Text {
                     visible: photoToast.folder !== ""
@@ -2531,6 +2671,57 @@ ApplicationWindow {
                 text: qsTr("Open folder")
                 edge: colors.line
                 onClicked: Qt.openUrlExternally(photoToast.folder)
+            }
+        }
+    }
+
+    Rectangle {
+        visible: grid.exporting !== ""
+        z: 10
+        anchors.horizontalCenter: parent.horizontalCenter
+        anchors.bottom: parent.bottom
+        anchors.bottomMargin: (win.inRecordings ? 124 : 20) + (photoToast.visible ? 62 : 0)
+        width: Math.min(420, parent.width - 32)
+        height: 62
+        radius: 9
+        color: colors.panel
+        border.color: colors.line
+        RowLayout {
+            anchors.fill: parent
+            anchors.leftMargin: 14
+            anchors.rightMargin: 10
+            spacing: 12
+            ColumnLayout {
+                Layout.fillWidth: true
+                spacing: 6
+                Text {
+                    Layout.fillWidth: true
+                    // The name comes from the recorder, so it can't be read as markup.
+                    textFormat: Text.PlainText
+                    elide: Text.ElideRight
+                    font.pixelSize: 13
+                    color: colors.text
+                    text: (grid.exportsWaiting > 0 ? qsTr("Exporting %1 (%2 more)").arg(grid.exporting).arg(grid.exportsWaiting)
+                        : qsTr("Exporting %1").arg(grid.exporting))
+                        + "  " + Math.round(grid.exportProgress * 100) + "%"
+                }
+                Rectangle {
+                    Layout.fillWidth: true
+                    implicitHeight: 4
+                    radius: 2
+                    color: colors.line
+                    Rectangle {
+                        width: parent.width * grid.exportProgress
+                        height: parent.height
+                        radius: 2
+                        color: colors.accent
+                    }
+                }
+            }
+            AppButton {
+                text: qsTr("Cancel")
+                edge: colors.line
+                onClicked: grid.cancelExports()
             }
         }
     }

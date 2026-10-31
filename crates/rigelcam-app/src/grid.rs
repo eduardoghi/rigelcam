@@ -30,6 +30,9 @@ pub mod qobject {
         #[qproperty(bool, video_unavailable, cxx_name = "videoUnavailable")]
         #[qproperty(QString, form_error, cxx_name = "formError")]
         #[qproperty(bool, form_busy, cxx_name = "formBusy")]
+        #[qproperty(QString, exporting)]
+        #[qproperty(f64, export_progress, cxx_name = "exportProgress")]
+        #[qproperty(i32, exports_waiting, cxx_name = "exportsWaiting")]
         type CameraGrid = super::CameraGridRust;
 
         /// Reads the saved recorders and connects to all of them.
@@ -126,6 +129,29 @@ pub mod qobject {
         #[cxx_name = "searchRecordedDays"]
         fn search_recorded_days(self: Pin<&mut Self>, recorder: i32, channel: i32, month: &QString);
 
+        /// Saves a stretch of a recording as a video, after the ones already waiting. The camera
+        /// exporting goes to the `exporting` property, and `exportFinished` tells how it ended.
+        #[qinvokable]
+        #[cxx_name = "exportClip"]
+        fn export_clip(
+            self: Pin<&mut Self>,
+            recorder: i32,
+            channel: i32,
+            name: &QString,
+            date: &QString,
+            start: i32,
+            end: i32,
+        );
+
+        #[qinvokable]
+        #[cxx_name = "cancelExports"]
+        fn cancel_exports(self: Pin<&mut Self>);
+
+        /// `folder` and `file` are empty when it failed, and a cancelled export doesn't report.
+        #[qsignal]
+        #[cxx_name = "exportFinished"]
+        fn export_finished(self: Pin<&mut Self>, folder: QString, file: QString, error: QString);
+
         /// Plays a recording in an item from `seconds` after the midnight of `date`. Returns the
         /// number of this attempt, which its signals carry, or 0 without a connection.
         #[qinvokable]
@@ -160,9 +186,9 @@ pub mod qobject {
 }
 
 use core::pin::Pin;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -176,6 +202,7 @@ use rigelcam_core::recorders::{
 use serde_json::json;
 
 use crate::camera_stream::{missing_elements, missing_h265_elements, CameraStream, Source};
+use crate::export::{self, Job};
 use crate::i18n::{self, message};
 
 extern "C" {
@@ -209,6 +236,19 @@ fn recorder_message(error: &RecorderError) -> String {
             let detail: String = error.to_string().chars().take(200).collect();
             message("The recorder sent an unexpected answer (%1).", &[&detail])
         }
+    }
+}
+
+fn export_message(error: &export::Error) -> String {
+    match error {
+        export::Error::Recorder(error) => recorder_message(error),
+        export::Error::Empty => message("There are no recordings in this stretch.", &[]),
+        export::Error::Stopped => message("The recorder stopped sending the video.", &[]),
+        export::Error::Cancelled => String::new(),
+        export::Error::Missing(element) => {
+            message("The GStreamer element %1 is missing.", &[element])
+        }
+        export::Error::Write(detail) => message("Could not save the video (%1).", &[detail]),
     }
 }
 
@@ -278,6 +318,11 @@ pub struct CameraGridRust {
     video_unavailable: bool,
     form_error: QString,
     form_busy: bool,
+    exporting: QString,
+    export_progress: f64,
+    exports_waiting: i32,
+    exports: VecDeque<Job>,
+    export_cancel: Arc<AtomicBool>,
     list: Option<RecorderList<SystemKeyring>>,
     connections: HashMap<u64, Connection>,
     channels: HashMap<u64, Vec<Channel>>,
@@ -613,6 +658,99 @@ impl qobject::CameraGrid {
                         }
                     }
                 }
+            });
+        });
+    }
+
+    fn export_clip(
+        mut self: Pin<&mut Self>,
+        recorder: i32,
+        channel: i32,
+        name: &QString,
+        date: &QString,
+        start: i32,
+        end: i32,
+    ) {
+        let job = Job {
+            recorder,
+            channel: channel as u32,
+            name: name.to_string(),
+            date: date.to_string(),
+            start: start as u32,
+            end: end as u32,
+        };
+        self.as_mut().rust_mut().exports.push_back(job);
+        self.start_next_export();
+    }
+
+    fn cancel_exports(mut self: Pin<&mut Self>) {
+        let mut state = self.as_mut().rust_mut();
+        state.exports.clear();
+        state.export_cancel.store(true, Ordering::Relaxed);
+        self.set_exports_waiting(0);
+    }
+
+    /// One at a time, since each download takes as much of the recorder as it can give.
+    fn start_next_export(mut self: Pin<&mut Self>) {
+        if !self.exporting.is_empty() {
+            let waiting = self.exports.len() as i32;
+            self.set_exports_waiting(waiting);
+            return;
+        }
+        let Some(job) = self.as_mut().rust_mut().exports.pop_front() else {
+            self.set_exports_waiting(0);
+            return;
+        };
+        let waiting = self.exports.len() as i32;
+        self.as_mut().set_exports_waiting(waiting);
+        let Some(connection) = self.connections.get(&(job.recorder as u64)).cloned() else {
+            let error = message("The recorder is not connected.", &[]);
+            let none = QString::default();
+            self.as_mut()
+                .export_finished(none.clone(), none, QString::from(error.as_str()));
+            self.start_next_export();
+            return;
+        };
+        self.as_mut().set_export_progress(0.0);
+        self.as_mut()
+            .set_exporting(QString::from(job.name.as_str()));
+        let cancel = self.export_cancel.clone();
+        let thread = self.qt_thread();
+        std::thread::spawn(move || {
+            let mut progress = |fraction: f64| {
+                let _ = thread.queue(move |grid: Pin<&mut qobject::CameraGrid>| {
+                    grid.set_export_progress(fraction);
+                });
+            };
+            let result = export::run(&connection.client(), &job, &cancel, &mut progress);
+            let recorder = job.recorder;
+            let _ = thread.queue(move |mut grid: Pin<&mut qobject::CameraGrid>| {
+                grid.as_mut().set_exporting(QString::default());
+                grid.as_mut()
+                    .rust_mut()
+                    .export_cancel
+                    .store(false, Ordering::Relaxed);
+                let none = QString::default;
+                match &result {
+                    Ok(path) => {
+                        let part = |text: Option<&std::ffi::OsStr>| {
+                            QString::from(text.unwrap_or_default().to_string_lossy().as_ref())
+                        };
+                        let folder = part(path.parent().map(|parent| parent.as_os_str()));
+                        grid.as_mut()
+                            .export_finished(folder, part(path.file_name()), none());
+                    }
+                    Err(export::Error::Cancelled) => {}
+                    Err(error) => {
+                        let text = export_message(error);
+                        grid.as_mut()
+                            .export_finished(none(), none(), QString::from(text.as_str()));
+                        if matches!(error, export::Error::Recorder(RecorderError::Unauthorized)) {
+                            grid.as_mut().recorder_refused(recorder);
+                        }
+                    }
+                }
+                grid.start_next_export();
             });
         });
     }

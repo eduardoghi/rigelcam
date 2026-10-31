@@ -1,12 +1,14 @@
 //! Client for the Dahua HTTP API, which answers plain `key=value` lines behind Digest auth.
 
+use std::io::Read;
 use std::time::{Duration, Instant};
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use digest_auth::{AuthContext, WwwAuthenticateHeader};
-use ureq::http::StatusCode;
+use ureq::http::{Response, StatusCode};
+use ureq::Body;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -21,6 +23,9 @@ pub enum Error {
     #[error("unexpected answer from the recorder ({0})")]
     Unexpected(String),
 }
+
+/// For requests with no limit on their total time, which still have to start answering.
+const CONNECTION_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Files asked for at a time, which is about two days of a channel recording all the time.
 const SEARCH_PAGE: usize = 100;
@@ -292,6 +297,30 @@ impl Client {
         )
     }
 
+    /// Opens a stretch of a recording as a `.dav` stream, between two times in seconds after the
+    /// midnight of `date`. The recorder sends it much faster than real time. Nothing limits how
+    /// long the reading takes, so whoever reads has to notice when it stops.
+    pub fn download(
+        &self,
+        channel: u32,
+        date: &str,
+        start: u32,
+        end: u32,
+    ) -> Result<Box<dyn Read + Send>, Error> {
+        let clock = |seconds: u32| {
+            let (hours, minutes, seconds) = (seconds / 3600, seconds / 60 % 60, seconds % 60);
+            format!("{hours:02}:{minutes:02}:{seconds:02}")
+        };
+        let path = format!(
+            "/cgi-bin/loadfile.cgi?action=startLoad&channel={channel}\
+             &startTime={date}%20{}&endTime={date}%20{}&subtype=0",
+            clock(start),
+            clock(end)
+        );
+        let response = self.send(&path, true)?;
+        Ok(Box::new(response.into_body().into_reader()))
+    }
+
     /// RTSP address of the live stream. It has no credentials, so it is safe to log.
     pub fn live_url(&self, channel: u32, stream: Stream) -> String {
         let subtype = match stream {
@@ -305,6 +334,10 @@ impl Client {
     }
 
     fn get(&self, path: &str) -> Result<String, Error> {
+        Ok(self.send(path, false)?.body_mut().read_to_string()?)
+    }
+
+    fn send(&self, path: &str, long_body: bool) -> Result<Response<Body>, Error> {
         // Recorders lock a user after a few wrong passwords, and a search makes many requests.
         if self.refused.load(Ordering::Relaxed) {
             return Err(Error::Unauthorized);
@@ -315,11 +348,23 @@ impl Client {
         let answer = prompt
             .as_mut()
             .and_then(|prompt| self.answer(prompt, path).ok());
-        let mut request = self.agent.get(&url);
+        let request = || {
+            let request = self.agent.get(&url);
+            if !long_body {
+                return request;
+            }
+            request
+                .config()
+                .timeout_global(None)
+                .timeout_connect(Some(CONNECTION_TIMEOUT))
+                .timeout_recv_response(Some(CONNECTION_TIMEOUT))
+                .build()
+        };
+        let mut pending = request();
         if let Some(answer) = answer {
-            request = request.header("Authorization", answer);
+            pending = pending.header("Authorization", answer);
         }
-        let mut response = request.call()?;
+        let mut response = pending.call()?;
         if response.status() == StatusCode::UNAUTHORIZED {
             let challenge = response
                 .headers()
@@ -331,11 +376,7 @@ impl Client {
                 digest_auth::parse(&challenge).map_err(|e| Error::Challenge(e.to_string()))?;
             let answer = self.answer(&mut fresh, path)?;
             prompt = Some(fresh);
-            response = self
-                .agent
-                .get(&url)
-                .header("Authorization", answer)
-                .call()?;
+            response = request().header("Authorization", answer).call()?;
         }
         match response.status() {
             StatusCode::OK | StatusCode::BAD_REQUEST => {
@@ -349,7 +390,7 @@ impl Client {
             _ => {}
         }
         match response.status() {
-            StatusCode::OK => Ok(response.body_mut().read_to_string()?),
+            StatusCode::OK => Ok(response),
             other => Err(Error::Status(other.as_u16())),
         }
     }
@@ -588,6 +629,23 @@ mod tests {
             }
         });
         (port, requests)
+    }
+
+    #[test]
+    fn a_download_returns_the_body_of_one_request() {
+        let client = Client::new("127.0.0.1", "admin", "secret");
+        let (port, requests) = fake_recorder(
+            b"HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 5\r\n\r\nvideo",
+        );
+        let client = Client {
+            http_port: port,
+            ..client
+        };
+        let mut body = client.download(3, "2026-10-31", 3661, 3725).unwrap();
+        let mut video = String::new();
+        body.read_to_string(&mut video).unwrap();
+        assert_eq!(video, "video");
+        assert_eq!(requests.load(Ordering::Relaxed), 1);
     }
 
     #[test]

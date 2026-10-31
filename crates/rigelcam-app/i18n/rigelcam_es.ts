@@ -319,5 +319,57 @@
         <source>Open folder</source>
         <translation>Abrir carpeta</translation>
     </message>
+    <message>
+        <source>Export clip</source>
+        <translation>Exportar fragmento</translation>
+    </message>
+    <message>
+        <source>Export</source>
+        <translation>Exportar</translation>
+    </message>
+    <message>
+        <source>Start</source>
+        <translation>Inicio</translation>
+    </message>
+    <message>
+        <source>End</source>
+        <translation>Fin</translation>
+    </message>
+    <message>
+        <source>One video per camera, in the Rigelcam folder of your videos.</source>
+        <translation>Un video por cámara, en la carpeta Rigelcam de sus videos.</translation>
+    </message>
+    <message>
+        <source>The end has to be after the start.</source>
+        <translation>El fin debe ser posterior al inicio.</translation>
+    </message>
+    <message>
+        <source>Video saved</source>
+        <translation>Video guardado</translation>
+    </message>
+    <message>
+        <source>Exporting %1</source>
+        <translation>Exportando %1</translation>
+    </message>
+    <message>
+        <source>Exporting %1 (%2 more)</source>
+        <translation>Exportando %1 (%2 más)</translation>
+    </message>
+    <message>
+        <source>There are no recordings in this stretch.</source>
+        <translation>No hay grabaciones en este fragmento.</translation>
+    </message>
+    <message>
+        <source>The recorder stopped sending the video.</source>
+        <translation>El grabador dejó de enviar el video.</translation>
+    </message>
+    <message>
+        <source>The GStreamer element %1 is missing.</source>
+        <translation>Falta el elemento %1 de GStreamer.</translation>
+    </message>
+    <message>
+        <source>Could not save the video (%1).</source>
+        <translation>No se pudo guardar el video (%1).</translation>
+    </message>
 </context>
 </TS>

@@ -138,7 +138,7 @@ impl Shared {
     }
 }
 
-fn missing_from<'a>(elements: &[&'a str]) -> Vec<&'a str> {
+pub(crate) fn missing_from<'a>(elements: &[&'a str]) -> Vec<&'a str> {
     elements
         .iter()
         .copied()
