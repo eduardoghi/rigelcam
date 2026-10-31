@@ -186,10 +186,10 @@ pub mod qobject {
 }
 
 use core::pin::Pin;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use cxx_qt::{CxxQtThread, CxxQtType, Threading};
@@ -201,7 +201,9 @@ use rigelcam_core::recorders::{
 };
 use serde_json::json;
 
-use crate::camera_stream::{missing_elements, missing_h265_elements, CameraStream, Source};
+use crate::camera_stream::{
+    missing_elements, missing_h265_elements, CameraStream, Source, Stretch,
+};
 use crate::export::{self, Job};
 use crate::i18n::{self, message};
 
@@ -288,6 +290,8 @@ struct Connection {
     user: String,
     password: String,
     gate: Arc<LoginGate>,
+    /// Channels whose recordings answer 404 over RTSP, so they stop asking.
+    without_rtsp: Arc<Mutex<HashSet<u32>>>,
 }
 
 impl Connection {
@@ -479,6 +483,7 @@ impl qobject::CameraGrid {
                         user: recorder.user,
                         password,
                         gate: Arc::new(LoginGate::new(gate)),
+                        without_rtsp: Arc::default(),
                     };
                     match connection.client().channels() {
                         Ok(channels) => {
@@ -722,7 +727,8 @@ impl qobject::CameraGrid {
                     grid.set_export_progress(fraction);
                 });
             };
-            let result = export::run(&connection.client(), &job, &cancel, &mut progress);
+            let client = Arc::new(connection.client());
+            let result = export::run(client, &job, &cancel, &mut progress);
             let recorder = job.recorder;
             let _ = thread.queue(move |mut grid: Pin<&mut qobject::CameraGrid>| {
                 grid.as_mut().set_exporting(QString::default());
@@ -825,10 +831,9 @@ impl qobject::CameraGrid {
         let Some(connection) = self.connections.get(&(recorder as u64)) else {
             return 0;
         };
-        let url =
-            connection
-                .client()
-                .playback_url(channel as u32, &date.to_string(), seconds as u32);
+        let client = connection.client();
+        let date = date.to_string();
+        let url = client.playback_url(channel as u32, &date, seconds as u32);
         let source = Source {
             url,
             user: connection.user.clone(),
@@ -837,6 +842,13 @@ impl qobject::CameraGrid {
             rate: rate as u32,
             attempt,
             gate: connection.gate.clone(),
+            stretch: Some(Arc::new(Stretch {
+                client: Arc::new(client),
+                channel: channel as u32,
+                date,
+                start: seconds as u32,
+                without_rtsp: connection.without_rtsp.clone(),
+            })),
         };
         let item = item as *mut c_void;
         let mut stream = rigel_item_stream(item) as *mut CameraStream;
@@ -1133,6 +1145,7 @@ impl qobject::CameraGrid {
                     rate: 1,
                     attempt: 0,
                     gate: connection.gate.clone(),
+                    stretch: None,
                 }
             });
         (*stream).set_source(source);

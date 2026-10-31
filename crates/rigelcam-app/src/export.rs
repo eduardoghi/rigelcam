@@ -1,9 +1,11 @@
-//! Saves a stretch of a recording as an MP4, with the video as the camera encoded it.
+//! Reads a stretch of a recording from the recorder and saves it as an MP4, with the video as the
+//! camera encoded it.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{sync_channel, RecvTimeoutError};
+use std::sync::mpsc::{sync_channel, Receiver, RecvTimeoutError};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gstreamer as gst;
@@ -19,7 +21,13 @@ const ELEMENTS: [&str; 5] = ["appsrc", "h264parse", "h265parse", "mp4mux", "file
 /// Added to each side, since a video can only start at a key frame and the recorder stops up to 2
 /// seconds short of the end. A longer video is better than one missing what was asked for.
 const MARGIN_SECONDS: u32 = 2;
-const LAST_SECOND_OF_DAY: u32 = 86_399;
+pub const LAST_SECOND_OF_DAY: u32 = 86_399;
+/// Longest stretch asked for at once. Above something between 2 and 3 hours recorders answer as if
+/// there were no recordings, and each request is one login in their log.
+const WINDOW_SECONDS: u32 = 3_600;
+/// A response stops up to 2 seconds short of its end and starts at no particular frame, so the next
+/// one starts before that. The reader drops what repeats.
+const WINDOW_OVERLAP_SECONDS: u32 = 15;
 const CHECK_INTERVAL: Duration = Duration::from_millis(200);
 /// A recorder that stops sending leaves the connection open, so reading would never return.
 const STALL_LIMIT: Duration = Duration::from_secs(30);
@@ -51,6 +59,72 @@ pub enum Error {
     Write(String),
     #[error(transparent)]
     Recorder(#[from] RecorderError),
+}
+
+/// Reads a stretch from the recorder on its own thread, in as many requests as it takes, since a
+/// read can't be interrupted and the recorder can stop answering. The channel closes at the end.
+/// Recorders answer a stretch with no recordings as a bad request, and `through_gaps` goes on to
+/// the next window after one.
+pub fn download(
+    client: Arc<Client>,
+    channel: u32,
+    date: String,
+    start: u32,
+    end: u32,
+    through_gaps: bool,
+) -> Receiver<Result<Vec<u8>, Error>> {
+    let (sender, pieces) = sync_channel(PIECES_IN_FLIGHT);
+    std::thread::spawn(move || {
+        let mut from = start;
+        loop {
+            let to = end.min(from + WINDOW_SECONDS);
+            match client.download(channel, &date, from, to) {
+                Ok(mut body) => loop {
+                    let mut piece = vec![0; READ_SIZE];
+                    match body.read(&mut piece) {
+                        Ok(0) => break,
+                        Ok(size) => {
+                            piece.truncate(size);
+                            // Fails when nobody is reading anymore, which also closes the request.
+                            if sender.send(Ok(piece)).is_err() {
+                                return;
+                            }
+                        }
+                        Err(_) => {
+                            let _ = sender.send(Err(Error::Stopped));
+                            return;
+                        }
+                    }
+                },
+                Err(RecorderError::Status(400)) if through_gaps => {}
+                Err(RecorderError::Status(400)) => return,
+                Err(error) => {
+                    let _ = sender.send(Err(error.into()));
+                    return;
+                }
+            }
+            if to >= end {
+                return;
+            }
+            from = to - WINDOW_OVERLAP_SECONDS;
+        }
+    });
+    pieces
+}
+
+/// A frame as GStreamer takes it, at `milliseconds` of the stream.
+pub fn buffer_of(frame: Frame, milliseconds: u64) -> gst::Buffer {
+    let time = gst::ClockTime::from_mseconds(milliseconds);
+    let mut buffer = gst::Buffer::from_mut_slice(frame.data);
+    {
+        let buffer = buffer.get_mut().expect("just created");
+        buffer.set_pts(time);
+        buffer.set_dts(time);
+        if !frame.key {
+            buffer.set_flags(gst::BufferFlags::DELTA_UNIT);
+        }
+    }
+    buffer
 }
 
 /// Writes the MP4 while the frames arrive, without decoding them.
@@ -94,18 +168,9 @@ impl Muxer {
     }
 
     fn push(&self, frame: Frame) -> Result<(), Error> {
-        let time = gst::ClockTime::from_mseconds(frame.elapsed_ms);
-        let mut buffer = gst::Buffer::from_mut_slice(frame.data);
-        {
-            let buffer = buffer.get_mut().expect("just created");
-            buffer.set_pts(time);
-            buffer.set_dts(time);
-            if !frame.key {
-                buffer.set_flags(gst::BufferFlags::DELTA_UNIT);
-            }
-        }
+        let milliseconds = frame.elapsed_ms;
         self.source
-            .push_buffer(buffer)
+            .push_buffer(buffer_of(frame, milliseconds))
             .map_err(|_| self.failure())?;
         Ok(())
     }
@@ -151,7 +216,7 @@ impl Drop for Partial<'_> {
 }
 
 fn write(
-    client: &Client,
+    client: Arc<Client>,
     job: &Job,
     path: &Path,
     cancel: &AtomicBool,
@@ -159,27 +224,7 @@ fn write(
 ) -> Result<(), Error> {
     let start = job.start.saturating_sub(MARGIN_SECONDS);
     let end = (job.end + MARGIN_SECONDS).min(LAST_SECOND_OF_DAY);
-    // The recorder answers a stretch with no recordings as a bad request, as its searches do.
-    let mut body = client
-        .download(job.channel, &job.date, start, end)
-        .map_err(|error| match error {
-            RecorderError::Status(400) => Error::Empty,
-            other => other.into(),
-        })?;
-
-    let (sender, pieces) = sync_channel(PIECES_IN_FLIGHT);
-    std::thread::spawn(move || loop {
-        let mut piece = vec![0; READ_SIZE];
-        let read = body.read(&mut piece);
-        if let Ok(size) = read {
-            piece.truncate(size);
-        }
-        let done = !matches!(read, Ok(size) if size > 0);
-        // Fails when the export gave up on this download, which also closes it.
-        if sender.send(read.map(|_| piece)).is_err() || done {
-            return;
-        }
-    });
+    let pieces = download(client, job.channel, job.date.clone(), start, end, true);
 
     let expected_ms = f64::from(end - start) * 1000.0;
     let mut reader = Reader::new();
@@ -192,7 +237,7 @@ fn write(
             return Err(Error::Cancelled);
         }
         let piece = match pieces.recv_timeout(CHECK_INTERVAL) {
-            Ok(piece) => piece.map_err(|_| Error::Stopped)?,
+            Ok(piece) => piece?,
             Err(RecvTimeoutError::Disconnected) => break,
             Err(RecvTimeoutError::Timeout) => {
                 waiting += CHECK_INTERVAL;
@@ -203,9 +248,6 @@ fn write(
             }
         };
         waiting = Duration::ZERO;
-        if piece.is_empty() {
-            break;
-        }
         for frame in reader.push(&piece) {
             last_time = frame.elapsed_ms;
             feed(&mut muxer, frame, path)?;
@@ -232,7 +274,7 @@ fn feed(muxer: &mut Option<Muxer>, frame: Frame, path: &Path) -> Result<(), Erro
 /// Saves a stretch and returns its path. Only a finished video gets the final name, so a file
 /// without the `.part` suffix always plays.
 pub fn run(
-    client: &Client,
+    client: Arc<Client>,
     job: &Job,
     cancel: &AtomicBool,
     progress: &mut dyn FnMut(f64),

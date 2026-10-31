@@ -145,15 +145,17 @@ impl Reader {
         data: Vec<u8>,
         frames: &mut Vec<Frame>,
     ) {
-        // Dates pack the year down to the second in this order, so they compare as numbers.
-        if self.trusted && date < self.newest_date {
-            return;
-        }
         let step = self
             .previous
             .as_ref()
             .filter(|previous| position.number == previous.number.wrapping_add(1))
             .map(|previous| u64::from(position.milliseconds.wrapping_sub(previous.milliseconds)));
+        // Dates pack the year down to the second in this order, so they compare as numbers. The
+        // same second out of sequence is the overlap between two requests.
+        let repeated = date == self.newest_date && step.is_none();
+        if self.trusted && (date < self.newest_date || repeated) {
+            return;
+        }
         if step.is_none() {
             self.decodable = false;
             if !self.trusted {
@@ -311,6 +313,29 @@ mod tests {
             frames[FRAMES_TO_TRUST + 1].elapsed_ms - after.elapsed_ms,
             50
         );
+    }
+
+    #[test]
+    fn a_second_request_that_overlaps_the_first_continues_it() {
+        let numbered =
+            |i: u32, kind: u8| frame(kind, 100 + i, NOON, (i * 50) as u16, &i.to_le_bytes());
+        let count = FRAMES_TO_TRUST as u32 + 10;
+        let mut bytes = numbered(0, KEY_FRAME);
+        for i in 1..count {
+            bytes.extend(numbered(i, DELTA_FRAME));
+        }
+        // The first request ended in the middle of a frame, and the second starts some frames back.
+        bytes.truncate(bytes.len() - 5);
+        bytes.extend(numbered(count - 10, KEY_FRAME));
+        for i in count - 9..count + 20 {
+            bytes.extend(numbered(i, DELTA_FRAME));
+        }
+        let frames = read_all(&bytes);
+        assert_eq!(frames.len(), count as usize + 20);
+        for (index, frame) in frames.iter().enumerate() {
+            assert_eq!(frame.data, (index as u32).to_le_bytes());
+            assert_eq!(frame.elapsed_ms, index as u64 * 50);
+        }
     }
 
     #[test]

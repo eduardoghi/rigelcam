@@ -1,17 +1,23 @@
-//! RTSP pipeline of a camera, which hands DMABuf frames to a video item and reconnects by itself.
+//! Pipeline of a camera, which hands DMABuf frames to a video item and reconnects by itself. Video
+//! comes over RTSP, and recordings the recorder doesn't serve that way come from its HTTP API.
 
+use std::collections::HashSet;
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-use rigelcam_core::dahua::LoginGate;
+use rigelcam_core::dahua::{Client, Error as RecorderError, LoginGate};
+use rigelcam_core::dav::{Codec, Frame, Reader};
 
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_allocators::DmaBufMemory;
-use gstreamer_app::{AppSink, AppSinkCallbacks};
+use gstreamer_app::{AppSink, AppSinkCallbacks, AppSrc};
 use gstreamer_video::{VideoColorMatrix, VideoColorRange, VideoColorimetry, VideoMeta};
+
+use crate::export::{self, LAST_SECOND_OF_DAY};
 
 /// Without these no camera opens, whatever the recorder sends.
 const REQUIRED_ELEMENTS: [&str; 4] = ["rtspsrc", "rtph264depay", "h264parse", "vah264dec"];
@@ -21,6 +27,11 @@ const DRM_FORMAT_NV12: u32 = 0x3231_564e;
 const STALL_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_RETRY_DELAY: Duration = Duration::from_secs(30);
 const STREAM_ENDED: &str = "the stream ended";
+const NOT_ON_RTSP: &str = "the recorder has no such stream";
+/// From this speed only key frames are decoded, which is also what recorders send over RTSP.
+const KEY_FRAMES_ONLY_RATE: u32 = 8;
+/// How often a thread waiting for video checks whether it should still wait.
+const CHECK_INTERVAL: Duration = Duration::from_millis(200);
 /// OPTIONS, DESCRIBE and the repeat of whichever of them got the challenge.
 const MAX_REQUESTS_BEFORE_LOGIN: u32 = 3;
 /// How often a recording tells where it is, which is enough for a moving bar.
@@ -56,6 +67,17 @@ extern "C" fn release_sample(owner: *mut c_void) {
     drop(unsafe { Box::from_raw(owner as *mut gst::Sample) });
 }
 
+/// A recording as a stretch of the HTTP API, for channels that answer 404 to it over RTSP while
+/// the camera works and records.
+pub struct Stretch {
+    pub client: Arc<Client>,
+    pub channel: u32,
+    pub date: String,
+    /// Seconds after the midnight of `date`.
+    pub start: u32,
+    pub without_rtsp: Arc<Mutex<HashSet<u32>>>,
+}
+
 #[derive(Clone)]
 pub struct Source {
     pub url: String,
@@ -70,6 +92,8 @@ pub struct Source {
     /// for the same moment reopens a recording that failed or ended.
     pub attempt: i32,
     pub gate: Arc<LoginGate>,
+    /// Only on a recording.
+    pub stretch: Option<Arc<Stretch>>,
 }
 
 // The gate belongs to the recorder, and it comes along with these from the same connection.
@@ -233,7 +257,7 @@ fn run(shared: Arc<Shared>) {
         };
         generation += 1;
         let result = if source.gate.allows() {
-            play(&shared, &source, revision, generation)
+            open(&shared, &source, revision, generation)
         } else {
             Outcome::Refused
         };
@@ -305,31 +329,83 @@ enum Outcome {
     },
 }
 
-fn play(shared: &Arc<Shared>, source: &Source, revision: u64, generation: u64) -> Outcome {
-    let last_frame = Arc::new(Mutex::new(Instant::now()));
-    let received_video = Arc::new(AtomicBool::new(false));
-    let waiting_keyframe = Arc::new(AtomicBool::new(true));
-    let Some(pipeline) = build_pipeline(
-        shared.clone(),
-        source,
-        generation,
-        last_frame.clone(),
-        received_video.clone(),
-        waiting_keyframe.clone(),
-    ) else {
-        return Outcome::Lost {
-            received_video: false,
-            reason: "could not build the pipeline".to_owned(),
-        };
+/// What the threads of a stream know about its video.
+#[derive(Clone)]
+struct Progress {
+    last_frame: Arc<Mutex<Instant>>,
+    received_video: Arc<AtomicBool>,
+    waiting_keyframe: Arc<AtomicBool>,
+}
+
+impl Progress {
+    fn new() -> Self {
+        Self {
+            last_frame: Arc::new(Mutex::new(Instant::now())),
+            received_video: Arc::new(AtomicBool::new(false)),
+            waiting_keyframe: Arc::new(AtomicBool::new(true)),
+        }
+    }
+}
+
+fn lost(reason: &str) -> Outcome {
+    Outcome::Lost {
+        received_video: false,
+        reason: reason.to_owned(),
+    }
+}
+
+fn open(shared: &Arc<Shared>, source: &Source, revision: u64, generation: u64) -> Outcome {
+    let Some(stretch) = &source.stretch else {
+        return play(shared, source, revision, generation);
     };
+    if !stretch
+        .without_rtsp
+        .lock()
+        .unwrap()
+        .contains(&stretch.channel)
+    {
+        let outcome = play(shared, source, revision, generation);
+        if !matches!(&outcome, Outcome::Lost { reason, .. } if reason == NOT_ON_RTSP) {
+            return outcome;
+        }
+    }
+    play_stretch(shared, source, stretch, revision, generation)
+}
+
+fn play(shared: &Arc<Shared>, source: &Source, revision: u64, generation: u64) -> Outcome {
+    let progress = Progress::new();
+    let Some(pipeline) = build_pipeline(shared.clone(), source, generation, progress.clone())
+    else {
+        return lost("could not build the pipeline");
+    };
+    watch(
+        shared,
+        source,
+        &pipeline,
+        revision,
+        &progress,
+        source.rate <= 1,
+    )
+}
+
+/// Runs a pipeline until it ends, fails or stops being wanted.
+fn watch(
+    shared: &Arc<Shared>,
+    source: &Source,
+    pipeline: &gst::Pipeline,
+    revision: u64,
+    progress: &Progress,
+    mut speed_applied: bool,
+) -> Outcome {
+    let Progress {
+        last_frame,
+        received_video,
+        waiting_keyframe,
+    } = progress;
     let bus = pipeline.bus().unwrap();
     let mut paused = false;
-    let mut speed_applied = source.rate <= 1;
     let outcome = if pipeline.set_state(gst::State::Playing).is_err() {
-        Outcome::Lost {
-            received_video: false,
-            reason: "could not start the pipeline".to_owned(),
-        }
+        lost("could not start the pipeline")
     } else {
         loop {
             {
@@ -374,6 +450,12 @@ fn play(shared: &Arc<Shared>, source: &Source, revision: u64, generation: u64) -
                         if error.error().matches(gst::ResourceError::NotAuthorized) {
                             break Outcome::Refused;
                         }
+                        if source.stretch.is_some()
+                            && !received_video.load(Ordering::Relaxed)
+                            && error.error().matches(gst::ResourceError::NotFound)
+                        {
+                            break lost(NOT_ON_RTSP);
+                        }
                         break Outcome::Lost {
                             received_video: received_video.load(Ordering::Relaxed),
                             reason: error.error().to_string(),
@@ -400,13 +482,230 @@ fn play(shared: &Arc<Shared>, source: &Source, revision: u64, generation: u64) -
     outcome
 }
 
+/// Plays a recording from the HTTP API. The recorder sends it about 10 times faster than real time
+/// and this pipeline shows it on time, so reading waits for the video to need more, also when
+/// paused. Each frame counts by the elapsed time of the reader, which skips the gaps as RTSP does.
+fn play_stretch(
+    shared: &Arc<Shared>,
+    source: &Source,
+    stretch: &Stretch,
+    revision: u64,
+    generation: u64,
+) -> Outcome {
+    let pieces = export::download(
+        stretch.client.clone(),
+        stretch.channel,
+        stretch.date.clone(),
+        stretch.start,
+        LAST_SECOND_OF_DAY,
+        false,
+    );
+    let mut reader = Reader::new();
+    let started = Instant::now();
+    // The first key frame tells the format of the video, which decides the pipeline.
+    let first = loop {
+        {
+            let control = shared.control.lock().unwrap();
+            if control.stop || control.revision != revision {
+                return Outcome::Changed;
+            }
+        }
+        match pieces.recv_timeout(CHECK_INTERVAL) {
+            Ok(Ok(piece)) => {
+                let frames = reader.push(&piece);
+                if !frames.is_empty() {
+                    break frames;
+                }
+            }
+            Ok(Err(export::Error::Recorder(RecorderError::Unauthorized))) => {
+                return Outcome::Refused;
+            }
+            Ok(Err(error)) => return lost(&error.to_string()),
+            Err(RecvTimeoutError::Disconnected) => {
+                let frames = reader.finish();
+                if frames.is_empty() {
+                    return lost("no recordings at this time");
+                }
+                break frames;
+            }
+            Err(RecvTimeoutError::Timeout) => {
+                if started.elapsed() > STALL_TIMEOUT {
+                    return lost("the recorder did not send the video");
+                }
+            }
+        }
+    };
+    let progress = Progress::new();
+    let codec = first[0].codec();
+    let Some((pipeline, video)) =
+        build_stretch_pipeline(shared.clone(), source, generation, progress.clone(), codec)
+    else {
+        return lost("could not build the pipeline");
+    };
+    let stop = Arc::new(AtomicBool::new(false));
+    let feeder_stop = stop.clone();
+    let feeder_pipeline = pipeline.clone();
+    let rate = source.rate.max(1);
+    std::thread::spawn(move || {
+        feed(
+            video,
+            feeder_pipeline,
+            reader,
+            first,
+            pieces,
+            rate,
+            feeder_stop,
+        );
+    });
+    let outcome = watch(shared, source, &pipeline, revision, &progress, true);
+    stop.store(true, Ordering::Relaxed);
+    if progress.received_video.load(Ordering::Relaxed) {
+        stretch.without_rtsp.lock().unwrap().insert(stretch.channel);
+    }
+    outcome
+}
+
+/// Passes frames to the pipeline until the stretch ends. It blocks while the pipeline has enough,
+/// which is what holds the reading back.
+fn feed(
+    video: AppSrc,
+    pipeline: gst::Pipeline,
+    mut reader: Reader,
+    first: Vec<Frame>,
+    pieces: Receiver<Result<Vec<u8>, export::Error>>,
+    rate: u32,
+    stop: Arc<AtomicBool>,
+) {
+    let push = |frames: Vec<Frame>| {
+        for frame in frames {
+            if frame.key || rate < KEY_FRAMES_ONLY_RATE {
+                let milliseconds = frame.elapsed_ms / u64::from(rate);
+                let buffer = export::buffer_of(frame, milliseconds);
+                // Fails once the pipeline stops, which also ends a push that was blocked.
+                if video.push_buffer(buffer).is_err() {
+                    return false;
+                }
+            }
+        }
+        true
+    };
+    if !push(first) {
+        return;
+    }
+    while !stop.load(Ordering::Relaxed) {
+        match pieces.recv_timeout(CHECK_INTERVAL) {
+            Ok(Ok(piece)) => {
+                if !push(reader.push(&piece)) {
+                    return;
+                }
+            }
+            Ok(Err(error)) => {
+                fail(&pipeline, &error.to_string());
+                return;
+            }
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => {
+                if push(reader.finish()) {
+                    let _ = video.end_of_stream();
+                }
+                return;
+            }
+        }
+    }
+}
+
+fn decoder_elements(codec: Codec) -> (&'static str, &'static str) {
+    match codec {
+        Codec::H264 => ("h264parse", "vah264dec"),
+        Codec::H265 => ("h265parse", "vah265dec"),
+    }
+}
+
+fn build_stretch_pipeline(
+    shared: Arc<Shared>,
+    source: &Source,
+    generation: u64,
+    progress: Progress,
+    codec: Codec,
+) -> Option<(gst::Pipeline, AppSrc)> {
+    let (parse, decoder) = decoder_elements(codec);
+    let caps = match codec {
+        Codec::H264 => "video/x-h264",
+        Codec::H265 => "video/x-h265",
+    };
+    let description = format!(
+        "appsrc name=video format=time block=true max-bytes=8388608 ! {parse} ! {decoder} \
+         ! video/x-raw(memory:DMABuf),format=DMA_DRM ! appsink name=sink sync=true max-buffers=1"
+    );
+    let pipeline = gst::parse::launch(&description)
+        .ok()?
+        .downcast::<gst::Pipeline>()
+        .ok()?;
+    let video = pipeline.by_name("video")?.downcast::<AppSrc>().ok()?;
+    video.set_caps(Some(
+        &gst::Caps::builder(caps)
+            .field("stream-format", "byte-stream")
+            .field("alignment", "au")
+            .build(),
+    ));
+    let sink = pipeline.by_name("sink")?.downcast::<AppSink>().ok()?;
+    let time_scale = f64::from(source.rate.max(1));
+    attach_sink(&sink, shared, source, generation, progress, time_scale);
+    Some((pipeline, video))
+}
+
+/// Takes the decoded frames to the item. `time_scale` turns the time of the stream into time of
+/// the recording, for a stream with its timestamps sped up.
+fn attach_sink(
+    sink: &AppSink,
+    shared: Arc<Shared>,
+    source: &Source,
+    generation: u64,
+    progress: Progress,
+    time_scale: f64,
+) {
+    let recording = source.recording;
+    let attempt = source.attempt;
+    // The decoder refuses DMABuf unless downstream declares VideoMeta, which appsink doesn't.
+    sink.static_pad("sink")
+        .unwrap()
+        .add_probe(gst::PadProbeType::QUERY_DOWNSTREAM, |_, info| {
+            if let Some(query) = info.query_mut() {
+                if let gst::QueryViewMut::Allocation(allocation) = query.view_mut() {
+                    allocation.add_allocation_meta::<VideoMeta>(None);
+                }
+            }
+            gst::PadProbeReturn::Ok
+        });
+    let mut last_report = Instant::now();
+    sink.set_callbacks(
+        AppSinkCallbacks::builder()
+            .new_sample(move |sink| {
+                let sample = sink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
+                if recording && last_report.elapsed() >= POSITION_INTERVAL {
+                    if let Some(seconds) = stream_time_of(&sample) {
+                        last_report = Instant::now();
+                        shared.report_position(seconds * time_scale, attempt);
+                    }
+                }
+                // A frame the item can't take doesn't count, so the stream ends up as lost.
+                if push_sample(&shared, sample, generation).is_some() {
+                    *progress.last_frame.lock().unwrap() = Instant::now();
+                    if !progress.received_video.swap(true, Ordering::Relaxed) {
+                        shared.set_status(true, false);
+                    }
+                }
+                Ok(gst::FlowSuccess::Ok)
+            })
+            .build(),
+    );
+}
+
 fn build_pipeline(
     shared: Arc<Shared>,
     source: &Source,
     generation: u64,
-    last_frame: Arc<Mutex<Instant>>,
-    received_video: Arc<AtomicBool>,
-    waiting_keyframe: Arc<AtomicBool>,
+    progress: Progress,
 ) -> Option<gst::Pipeline> {
     let pipeline = gst::Pipeline::new();
     let src = gst::ElementFactory::make("rtspsrc")
@@ -443,8 +742,7 @@ fn build_pipeline(
         Some((media.as_deref() == Some("video")).to_value())
     });
 
-    let recording = source.recording;
-    let attempt = source.attempt;
+    let source = source.clone();
     let weak_pipeline = pipeline.downgrade();
     src.connect_pad_added(move |_, pad| {
         let Some(pipeline) = weak_pipeline.upgrade() else {
@@ -457,9 +755,9 @@ fn build_pipeline(
             return;
         };
         let encoding = structure.get::<String>("encoding-name").unwrap_or_default();
-        let (depay, parse, decoder) = match encoding.as_str() {
-            "H264" => ("rtph264depay", "h264parse", "vah264dec"),
-            "H265" => ("rtph265depay", "h265parse", "vah265dec"),
+        let (depay, (parse, decoder)) = match encoding.as_str() {
+            "H264" => ("rtph264depay", decoder_elements(Codec::H264)),
+            "H265" => ("rtph265depay", decoder_elements(Codec::H265)),
             other => {
                 fail(&pipeline, &format!("unsupported encoding ({other})"));
                 return;
@@ -478,21 +776,9 @@ fn build_pipeline(
             .unwrap()
             .downcast::<AppSink>()
             .unwrap();
-        // The decoder refuses DMABuf unless downstream declares VideoMeta, which appsink doesn't.
-        sink.static_pad("sink").unwrap().add_probe(
-            gst::PadProbeType::QUERY_DOWNSTREAM,
-            |_, info| {
-                if let Some(query) = info.query_mut() {
-                    if let gst::QueryViewMut::Allocation(allocation) = query.view_mut() {
-                        allocation.add_allocation_meta::<VideoMeta>(None);
-                    }
-                }
-                gst::PadProbeReturn::Ok
-            },
-        );
         // A frame that depends on a keyframe the decoder doesn't have comes out green, which is
         // what the stream starts with when it opens or changes speed between two keyframes.
-        let waiting = waiting_keyframe.clone();
+        let waiting = progress.waiting_keyframe.clone();
         let parser = branch.by_name("parser").unwrap();
         parser
             .static_pad("src")
@@ -510,30 +796,13 @@ fn build_pipeline(
                 waiting.store(false, Ordering::Relaxed);
                 gst::PadProbeReturn::Ok
             });
-        let last_frame = last_frame.clone();
-        let received_video = received_video.clone();
-        let shared = shared.clone();
-        let mut last_report = Instant::now();
-        sink.set_callbacks(
-            AppSinkCallbacks::builder()
-                .new_sample(move |sink| {
-                    let sample = sink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
-                    if recording && last_report.elapsed() >= POSITION_INTERVAL {
-                        if let Some(seconds) = stream_time_of(&sample) {
-                            last_report = Instant::now();
-                            shared.report_position(seconds, attempt);
-                        }
-                    }
-                    // A frame the item can't take doesn't count, so the stream ends up as lost.
-                    if push_sample(&shared, sample, generation).is_some() {
-                        *last_frame.lock().unwrap() = Instant::now();
-                        if !received_video.swap(true, Ordering::Relaxed) {
-                            shared.set_status(true, false);
-                        }
-                    }
-                    Ok(gst::FlowSuccess::Ok)
-                })
-                .build(),
+        attach_sink(
+            &sink,
+            shared.clone(),
+            &source,
+            generation,
+            progress.clone(),
+            1.0,
         );
         // A panic here would abort the app, since this runs inside a C callback.
         let started = pipeline.add(&branch).is_ok()
