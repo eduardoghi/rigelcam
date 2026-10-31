@@ -346,8 +346,16 @@ void Retranslator::run() {
     if (QQmlEngine *engine = qmlEngine(this)) engine->retranslate();
 }
 
-extern "C" bool rigel_system_is_portuguese() {
-    return QLocale::system().language() == QLocale::Portuguese;
+// 1 for Portuguese, 2 for Spanish and 0 for anything else, which gets English.
+extern "C" int rigel_system_language() {
+    switch (QLocale::system().language()) {
+    case QLocale::Portuguese:
+        return 1;
+    case QLocale::Spanish:
+        return 2;
+    default:
+        return 0;
+    }
 }
 
 // The source texts are English, so English needs no translator and gets an empty one here.

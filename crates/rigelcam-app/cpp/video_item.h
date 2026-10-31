@@ -27,7 +27,7 @@ struct RigelFrame {
 void rigel_use_gles();
 void rigel_register_types();
 void rigel_set_app_identity();
-bool rigel_system_is_portuguese();
+int rigel_system_language();
 void rigel_install_translation(const unsigned char *data, int size);
 void rigel_item_set_frame(void *item, const RigelFrame *frame);
 void rigel_item_set_status(void *item, bool has_video, bool signal_lost);

@@ -489,7 +489,7 @@ ApplicationWindow {
 
             AppComboBox {
                 Layout.preferredWidth: 136
-                model: [{ code: "pt_BR", label: "Português" }, { code: "en", label: "English" }]
+                model: [{ code: "pt_BR", label: "Português" }, { code: "en", label: "English" }, { code: "es", label: "Español" }]
                 textRole: "label"
                 valueRole: "code"
                 currentIndex: model.findIndex(l => l.code === grid.language)
