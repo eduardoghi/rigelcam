@@ -20,6 +20,7 @@ pub mod qobject {
         #[qproperty(QString, layout)]
         #[qproperty(bool, sidebar_collapsed, cxx_name = "sidebarCollapsed")]
         #[qproperty(QString, theme)]
+        #[qproperty(QString, language)]
         #[qproperty(QString, error)]
         #[qproperty(bool, list_corrupted, cxx_name = "listCorrupted")]
         #[qproperty(QString, notice)]
@@ -32,6 +33,10 @@ pub mod qobject {
         /// Reads the saved recorders and connects to all of them.
         #[qinvokable]
         fn load(self: Pin<&mut Self>);
+
+        #[qinvokable]
+        #[cxx_name = "saveLanguage"]
+        fn save_language(self: Pin<&mut Self>, language: &QString);
 
         #[qinvokable]
         #[cxx_name = "saveTheme"]
@@ -138,6 +143,7 @@ use rigelcam_core::recorders::{
 use serde_json::json;
 
 use crate::camera_stream::{missing_elements, missing_h265_elements, CameraStream, Source};
+use crate::i18n::{self, message};
 
 extern "C" {
     fn rigel_item_set_stream(
@@ -152,17 +158,23 @@ extern "C" fn destroy_stream(stream: *mut c_void) {
     drop(unsafe { Box::from_raw(stream as *mut CameraStream) });
 }
 
+const REFUSED_MESSAGE: &str = "The recorder refused the user or password.";
+
 fn recorder_message(error: &RecorderError) -> String {
     match error {
-        RecorderError::Http(_) => {
-            "Não foi possível conectar ao gravador. Confira o endereço e a rede.".to_owned()
-        }
-        RecorderError::Unauthorized => "O gravador recusou o usuário ou a senha.".to_owned(),
-        RecorderError::Status(code) => format!("O gravador respondeu com o erro HTTP {code}."),
+        RecorderError::Http(_) => message(
+            "Could not connect to the recorder. Check the address and the network.",
+            &[],
+        ),
+        RecorderError::Unauthorized => message(REFUSED_MESSAGE, &[]),
+        RecorderError::Status(code) => message(
+            "The recorder answered with HTTP error %1.",
+            &[&code.to_string()],
+        ),
         RecorderError::Challenge(_) | RecorderError::Unexpected(_) => {
             // The whole body of an answer can be in the error.
             let detail: String = error.to_string().chars().take(200).collect();
-            format!("O gravador enviou uma resposta inesperada ({detail}).")
+            message("The recorder sent an unexpected answer (%1).", &[&detail])
         }
     }
 }
@@ -179,9 +191,11 @@ fn camera_id(recorder: i32, channel: i32) -> CameraId {
 
 fn address_message(error: AddressError) -> &'static str {
     match error {
-        AddressError::Credentials => "Informe só o endereço, sem usuário ou senha.",
-        AddressError::Https => "O app ainda não conecta por HTTPS. Use o endereço sem https://.",
-        AddressError::Invalid => "Endereço inválido. Use um IP ou nome de máquina.",
+        AddressError::Credentials => "Enter only the address, without user or password.",
+        AddressError::Https => {
+            "The app can't connect over HTTPS yet. Use the address without https://."
+        }
+        AddressError::Invalid => "Invalid address. Use an IP or a host name.",
     }
 }
 
@@ -208,6 +222,7 @@ pub struct CameraGridRust {
     layout: QString,
     sidebar_collapsed: bool,
     theme: QString,
+    language: QString,
     error: QString,
     list_corrupted: bool,
     notice: QString,
@@ -226,13 +241,18 @@ pub struct CameraGridRust {
 
 impl qobject::CameraGrid {
     fn load(mut self: Pin<&mut Self>) {
+        // The translator is already in place, from before QML started.
+        let saved = RecorderList::open_default().ok();
+        let language = saved.as_ref().and_then(|list| list.language());
+        let code = i18n::resolve(language.unwrap_or_default());
+        self.as_mut().set_language(QString::from(code));
         self.as_mut().check_components();
         match RecorderList::open_default() {
             Ok(list) => self.adopt_list(list),
             Err(RecordersError::Format(_)) => {
                 self.as_mut().set_list_corrupted(true);
                 self.set_error(QString::from(
-                    "A lista de gravadores está corrompida. O arquivo não foi alterado.",
+                    "The recorder list is corrupted. The file was not changed.",
                 ));
             }
             Err(error) => self.set_error(QString::from(error.to_string().as_str())),
@@ -272,15 +292,15 @@ impl qobject::CameraGrid {
         let missing = missing_elements();
         let h265 = missing_h265_elements();
         let message = if !missing.is_empty() {
-            format!(
-                "Faltam componentes do GStreamer para exibir vídeo ({}). \
-                 Instale os plugins do GStreamer e o suporte a VA-API.",
-                missing.join(", ")
+            message(
+                "GStreamer components are missing to show video (%1). \
+                 Install the GStreamer plugins and VA-API support.",
+                &[&missing.join(", ")],
             )
         } else if !h265.is_empty() {
-            format!(
-                "Câmeras H.265 não vão abrir porque faltam componentes do GStreamer ({}).",
-                h265.join(", ")
+            message(
+                "H.265 cameras won't open because GStreamer components are missing (%1).",
+                &[&h265.join(", ")],
             )
         } else {
             return;
@@ -472,7 +492,10 @@ impl qobject::CameraGrid {
             .save_layout(Layout::fitting(&recorder_cameras(id, &numbers)));
         let capacity = Layout::capacity();
         let notice = if cameras > capacity {
-            format!("Mostrando {capacity} de {cameras} câmeras deste gravador.")
+            message(
+                "Showing %1 of %2 cameras from this recorder.",
+                &[&capacity.to_string(), &cameras.to_string()],
+            )
         } else {
             String::new()
         };
@@ -486,7 +509,7 @@ impl qobject::CameraGrid {
         });
         if !added {
             self.set_notice(QString::from(
-                "A grade está cheia. Tire uma câmera para colocar outra.",
+                "The grid is full. Remove a camera to add another.",
             ));
         }
     }
@@ -501,6 +524,22 @@ impl qobject::CameraGrid {
 
     fn set_grid_columns(self: Pin<&mut Self>, columns: i32) {
         self.change_layout(|layout| layout.resize(columns as u32));
+    }
+
+    fn save_language(mut self: Pin<&mut Self>, language: &QString) {
+        let code = i18n::resolve(&language.to_string());
+        i18n::install(code);
+        let result = self
+            .as_mut()
+            .rust_mut()
+            .list
+            .as_mut()
+            .map(|list| list.set_language(code));
+        if let Some(Err(error)) = result {
+            self.as_mut()
+                .set_error(QString::from(error.to_string().as_str()));
+        }
+        self.set_language(QString::from(code));
     }
 
     fn save_theme(mut self: Pin<&mut Self>, theme: &QString) {
@@ -591,7 +630,7 @@ impl qobject::CameraGrid {
                 .is_some_and(|recorder| recorder.address() == address)
         };
         if id.is_some_and(|id| password.is_empty() && !same_address(id)) {
-            self.set_form_error(QString::from("Informe a senha para o novo endereço."));
+            self.set_form_error(QString::from("Enter the password for the new address."));
             return;
         }
         self.as_mut().set_form_busy(true);
@@ -662,7 +701,7 @@ impl qobject::CameraGrid {
         if !self.connections.contains_key(&id) {
             return;
         }
-        let message = "O gravador recusou o usuário ou a senha.".to_owned();
+        let message = message(REFUSED_MESSAGE, &[]);
         self.as_mut().forget_recorder(id);
         self.as_mut().rust_mut().failures.insert(id, message);
         self.publish_tree();
@@ -689,7 +728,7 @@ impl qobject::CameraGrid {
         let notice = if password_removed {
             ""
         } else {
-            "Gravador removido, mas a senha ficou no cofre do sistema."
+            "Recorder removed, but its password stayed in the system keyring."
         };
         self.as_mut().set_notice(QString::from(notice));
         self.as_mut().forget_recorder(id);

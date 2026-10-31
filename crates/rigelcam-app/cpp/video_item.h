@@ -27,12 +27,22 @@ struct RigelFrame {
 void rigel_use_gles();
 void rigel_register_types();
 void rigel_set_app_identity();
+bool rigel_system_is_portuguese();
+void rigel_install_translation(const unsigned char *data, int size);
 void rigel_item_set_frame(void *item, const RigelFrame *frame);
 void rigel_item_set_status(void *item, bool has_video, bool signal_lost);
 void rigel_item_auth_refused(void *item);
 void rigel_item_set_stream(void *item, void *stream, void (*destroy)(void *));
 void *rigel_item_stream(void *item);
 }
+
+/// Lets QML ask for its texts again after the language changes.
+class Retranslator : public QObject {
+    Q_OBJECT
+public:
+    using QObject::QObject;
+    Q_INVOKABLE void run();
+};
 
 struct VideoResources;
 

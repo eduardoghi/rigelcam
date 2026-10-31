@@ -1,5 +1,8 @@
 #include <QGuiApplication>
 #include <QIcon>
+#include <QLocale>
+#include <QTranslator>
+#include <QtQml/QQmlEngine>
 #include "video_item.h"
 
 #include <EGL/egl.h>
@@ -336,6 +339,33 @@ extern "C" void rigel_use_gles() {
 
 extern "C" void rigel_register_types() {
     qmlRegisterType<VideoItem>("rigelcam.video", 1, 0, "VideoItem");
+    qmlRegisterType<Retranslator>("rigelcam.video", 1, 0, "Retranslator");
+}
+
+void Retranslator::run() {
+    if (QQmlEngine *engine = qmlEngine(this)) engine->retranslate();
+}
+
+extern "C" bool rigel_system_is_portuguese() {
+    return QLocale::system().language() == QLocale::Portuguese;
+}
+
+// The source texts are English, so English needs no translator and gets an empty one here.
+extern "C" void rigel_install_translation(const unsigned char *data, int size) {
+    static QTranslator *current = nullptr;
+    if (current) {
+        QCoreApplication::removeTranslator(current);
+        delete current;
+        current = nullptr;
+    }
+    if (size == 0) return;
+    auto *translator = new QTranslator(QCoreApplication::instance());
+    if (translator->load(data, size)) {
+        QCoreApplication::installTranslator(translator);
+        current = translator;
+    } else {
+        delete translator;
+    }
 }
 
 extern "C" void rigel_set_app_identity() {

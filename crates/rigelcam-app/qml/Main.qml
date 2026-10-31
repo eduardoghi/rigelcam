@@ -84,6 +84,9 @@ ApplicationWindow {
 
     component AppComboBox: ComboBox {
         id: box
+        // The text of a row, as a function so a list of labels doesn't have to be rebuilt.
+        property var labelOf: item => item[textRole]
+        displayText: currentIndex >= 0 ? labelOf(model[currentIndex]) : ""
         implicitHeight: 34
         font.pixelSize: 13
         font.weight: Font.Medium
@@ -124,7 +127,7 @@ ApplicationWindow {
                 color: boxRow.highlighted ? colors.raised : "transparent"
             }
             contentItem: Text {
-                text: boxRow.modelData[box.textRole]
+                text: box.labelOf(boxRow.modelData)
                 textFormat: Text.PlainText
                 font.pixelSize: 13
                 color: colors.text
@@ -201,7 +204,10 @@ ApplicationWindow {
         id: grid
         Component.onCompleted: load()
         onTreeChanged: win.syncTiles()
+        onLanguageChanged: retranslator.run()
     }
+
+    Retranslator { id: retranslator }
 
     readonly property var recorderList: grid.tree ? JSON.parse(grid.tree) : []
     readonly property var gridLayout: grid.layout ? JSON.parse(grid.layout) : ({ columns: 1, cameras: [] })
@@ -233,6 +239,18 @@ ApplicationWindow {
     property var dragged: null
     // Recorders with their cameras folded in the sidebar, for this session.
     property var foldedRecorders: []
+
+    // Messages from Rust carry their arguments after the text. Reading the language makes bindings
+    // to this function follow a change of it.
+    function msg(text) {
+        if (!text || !grid.language)
+            return text
+        const parts = text.split("\u001f")
+        let translated = qsTranslate("Main", parts[0])
+        for (let i = 1; i < parts.length; i++)
+            translated = translated.arg(parts[i])
+        return translated
+    }
 
     function clamp(value, low, high) {
         return Math.min(Math.max(value, low), high)
@@ -400,7 +418,7 @@ ApplicationWindow {
                 visible: win.recorderList.length > 0
                 font.pixelSize: 13
                 color: colors.muted
-                text: win.liveCount + " de " + win.includedCount + " ao vivo"
+                text: qsTr("%1 of %2 live").arg(win.liveCount).arg(win.includedCount)
             }
 
             // With cameras on screen the centered message below is covered.
@@ -412,7 +430,7 @@ ApplicationWindow {
                 elide: Text.ElideRight
                 font.pixelSize: 13
                 color: grid.error !== "" || grid.videoUnavailable ? colors.danger : colors.waiting
-                text: grid.error || grid.missing || grid.notice
+                text: win.msg(grid.error || grid.missing || grid.notice)
             }
 
             Item {
@@ -423,21 +441,28 @@ ApplicationWindow {
             AppComboBox {
                 Layout.preferredWidth: 150
                 visible: win.recorderList.length > 0
-                model: [1, 2, 3, 4, 5, 6].map(columns => ({
-                    columns: columns,
-                    label: columns === 1 ? "1 quadrado" : columns * columns + " quadrados"
-                }))
-                textRole: "label"
+                // Fixed, because a new list would reset the current row when the language changes.
+                model: [1, 2, 3, 4, 5, 6].map(columns => ({ columns: columns }))
+                labelOf: item => item.columns === 1 ? qsTr("1 square") : qsTr("%1 squares").arg(item.columns * item.columns)
                 valueRole: "columns"
                 currentIndex: win.cols - 1
                 onActivated: grid.setGridColumns(currentValue)
+            }
+
+            AppComboBox {
+                Layout.preferredWidth: 136
+                model: [{ code: "pt_BR", label: "Português" }, { code: "en", label: "English" }]
+                textRole: "label"
+                valueRole: "code"
+                currentIndex: model.findIndex(l => l.code === grid.language)
+                onActivated: grid.saveLanguage(currentValue)
             }
 
             AppButton {
                 id: themeButton
                 display: AbstractButton.IconOnly
                 icon.source: colors.dark ? "qrc:/rigelcam/icons/sun.svg" : "qrc:/rigelcam/icons/moon.svg"
-                text: colors.dark ? "Tema claro" : "Tema escuro"
+                text: colors.dark ? qsTr("Light theme") : qsTr("Dark theme")
                 implicitWidth: 34
                 leftPadding: 9
                 rightPadding: 9
@@ -452,7 +477,7 @@ ApplicationWindow {
                 id: fullScreenButton
                 display: AbstractButton.IconOnly
                 icon.source: "qrc:/rigelcam/icons/fullscreen.svg"
-                text: "Tela cheia (F11)"
+                text: qsTr("Full screen (F11)")
                 implicitWidth: 34
                 leftPadding: 9
                 rightPadding: 9
@@ -470,7 +495,7 @@ ApplicationWindow {
         // The recorder being edited, or null when adding one.
         property var editing: null
         property bool advanced: false
-        title: editing ? "Editar gravador" : "Adicionar gravador"
+        title: editing ? qsTr("Edit recorder") : qsTr("Add recorder")
         width: Math.min(440, parent.width - 32)
         closePolicy: grid.formBusy ? Popup.NoAutoClose : Popup.CloseOnEscape
         onOpened: { hostField.forceActiveFocus(); grid.formError = "" }
@@ -503,7 +528,7 @@ ApplicationWindow {
         ColumnLayout {
             anchors.fill: parent
             spacing: 4
-            FormLabel { text: "Endereço" }
+            FormLabel { text: qsTr("Address") }
             FormField {
                 id: hostField
                 placeholderText: "192.168.0.10"
@@ -515,15 +540,15 @@ ApplicationWindow {
                         httpField.text = port[1]
                 }
             }
-            FormLabel { text: "Nome (opcional)" }
-            FormField { id: nameField; placeholderText: "Usa o modelo do gravador"; onAccepted: addDialog.submit() }
-            FormLabel { text: "Usuário" }
+            FormLabel { text: qsTr("Name (optional)") }
+            FormField { id: nameField; placeholderText: qsTr("Uses the recorder's model"); onAccepted: addDialog.submit() }
+            FormLabel { text: qsTr("User") }
             FormField { id: userField; onAccepted: addDialog.submit() }
-            FormLabel { text: "Senha" }
+            FormLabel { text: qsTr("Password") }
             FormField {
                 id: passwordField
                 echoMode: TextInput.Password
-                placeholderText: addDialog.editing ? "Em branco para manter a atual" : ""
+                placeholderText: addDialog.editing ? qsTr("Blank to keep the current one") : ""
                 onAccepted: addDialog.submit()
             }
             AppButton {
@@ -533,7 +558,7 @@ ApplicationWindow {
                 icon.source: "qrc:/rigelcam/icons/chevron.svg"
                 icon.width: 14
                 icon.height: 14
-                text: "Avançado"
+                text: qsTr("Advanced")
                 onClicked: addDialog.advanced = !addDialog.advanced
             }
             RowLayout {
@@ -541,7 +566,7 @@ ApplicationWindow {
                 spacing: 8
                 ColumnLayout {
                     spacing: 4
-                    FormLabel { text: "Porta HTTP"; Layout.topMargin: 0 }
+                    FormLabel { text: qsTr("HTTP port"); Layout.topMargin: 0 }
                     FormField {
                         id: httpField
                         validator: IntValidator { bottom: 1; top: 65535 }
@@ -550,7 +575,7 @@ ApplicationWindow {
                 }
                 ColumnLayout {
                     spacing: 4
-                    FormLabel { text: "Porta RTSP"; Layout.topMargin: 0 }
+                    FormLabel { text: qsTr("RTSP port"); Layout.topMargin: 0 }
                     FormField {
                         id: rtspField
                         validator: IntValidator { bottom: 1; top: 65535 }
@@ -564,7 +589,7 @@ ApplicationWindow {
                 wrapMode: Text.WordWrap
                 font.pixelSize: 12
                 color: colors.muted
-                text: "Prefira um usuário só de visualização em vez do admin. O vídeo trafega sem criptografia na rede."
+                text: qsTr("Prefer a view-only user over admin. Video travels unencrypted on the network.")
             }
             Label {
                 Layout.fillWidth: true
@@ -574,15 +599,15 @@ ApplicationWindow {
                 textFormat: Text.PlainText
                 font.pixelSize: 13
                 color: colors.danger
-                text: grid.formError
+                text: win.msg(grid.formError)
             }
             RowLayout {
                 Layout.alignment: Qt.AlignRight
                 Layout.topMargin: 14
                 spacing: 8
-                AppButton { text: "Cancelar"; enabled: !grid.formBusy; onClicked: addDialog.close() }
+                AppButton { text: qsTr("Cancel"); enabled: !grid.formBusy; onClicked: addDialog.close() }
                 PrimaryButton {
-                    text: grid.formBusy ? "Testando…" : "Testar e salvar"
+                    text: grid.formBusy ? qsTr("Testing…") : qsTr("Test and save")
                     enabled: !grid.formBusy && addDialog.complete
                     onClicked: addDialog.submit()
                 }
@@ -603,7 +628,7 @@ ApplicationWindow {
     AppDialog {
         id: removeDialog
         property var recorder: null
-        title: "Excluir gravador"
+        title: qsTr("Delete recorder")
         width: Math.min(400, parent.width - 32)
         ColumnLayout {
             anchors.fill: parent
@@ -614,14 +639,14 @@ ApplicationWindow {
                 textFormat: Text.PlainText
                 font.pixelSize: 14
                 color: colors.muted
-                text: "Quer mesmo excluir " + (removeDialog.recorder ? removeDialog.recorder.name : "") + "? A senha salva será apagada, e as gravações no aparelho não mudam."
+                text: qsTr("Really delete %1? The saved password will be erased, and the recordings on the device stay as they are.").arg(removeDialog.recorder ? removeDialog.recorder.name : "")
             }
             RowLayout {
                 Layout.alignment: Qt.AlignRight
                 spacing: 8
-                AppButton { text: "Cancelar"; onClicked: removeDialog.close() }
+                AppButton { text: qsTr("Cancel"); onClicked: removeDialog.close() }
                 AppButton {
-                    text: "Excluir"
+                    text: qsTr("Delete")
                     fill: colors.danger
                     hoverFill: "#F2666A"
                     contentColor: "#FFFFFF"
@@ -652,13 +677,13 @@ ApplicationWindow {
             font.pixelSize: 18
             font.weight: Font.DemiBold
             color: colors.text
-            text: "Nenhum gravador cadastrado"
+            text: qsTr("No recorders yet")
         }
         PrimaryButton {
             anchors.horizontalCenter: parent.horizontalCenter
             visible: grid.error === ""
             icon.source: "qrc:/rigelcam/icons/plus.svg"
-            text: "Adicionar gravador"
+            text: qsTr("Add recorder")
             onClicked: addDialog.openFor(null)
         }
         Label {
@@ -667,13 +692,13 @@ ApplicationWindow {
             textFormat: Text.PlainText
             font.pixelSize: 14
             color: colors.danger
-            text: grid.error
+            text: win.msg(grid.error)
         }
         // Only on a click, since the file may still be recoverable.
         AppButton {
             anchors.horizontalCenter: parent.horizontalCenter
             visible: grid.listCorrupted
-            text: "Começar do zero"
+            text: qsTr("Start over")
             edge: colors.line
             onClicked: grid.startOver()
         }
@@ -683,7 +708,7 @@ ApplicationWindow {
             textFormat: Text.PlainText
             font.pixelSize: 13
             color: grid.videoUnavailable ? colors.danger : colors.waiting
-            text: grid.missing
+            text: win.msg(grid.missing)
         }
         Label {
             anchors.horizontalCenter: parent.horizontalCenter
@@ -691,7 +716,7 @@ ApplicationWindow {
             textFormat: Text.PlainText
             font.pixelSize: 13
             color: colors.waiting
-            text: grid.notice
+            text: win.msg(grid.notice)
         }
     }
 
@@ -726,13 +751,13 @@ ApplicationWindow {
                     font.pixelSize: 13
                     font.weight: Font.DemiBold
                     color: colors.text
-                    text: "Gravadores"
+                    text: qsTr("Recorders")
                 }
                 AppButton {
                     id: addButton
                     display: AbstractButton.IconOnly
                     icon.source: "qrc:/rigelcam/icons/plus.svg"
-                    text: "Adicionar gravador"
+                    text: qsTr("Add recorder")
                     implicitWidth: 30
                     implicitHeight: 30
                     leftPadding: 7
@@ -749,7 +774,7 @@ ApplicationWindow {
                 id: cameraSearch
                 implicitHeight: 34
                 font.pixelSize: 13
-                placeholderText: "Buscar câmera"
+                placeholderText: qsTr("Search camera")
             }
 
             Flickable {
@@ -811,7 +836,7 @@ ApplicationWindow {
                                         icon.source: "qrc:/rigelcam/icons/edit.svg"
                                         icon.width: 14
                                         icon.height: 14
-                                        text: "Editar gravador"
+                                        text: qsTr("Edit recorder")
                                         implicitWidth: 26
                                         implicitHeight: 26
                                         leftPadding: 6
@@ -829,7 +854,7 @@ ApplicationWindow {
                                         icon.source: "qrc:/rigelcam/icons/trash.svg"
                                         icon.width: 14
                                         icon.height: 14
-                                        text: "Remover gravador"
+                                        text: qsTr("Remove recorder")
                                         implicitWidth: 26
                                         implicitHeight: 26
                                         leftPadding: 6
@@ -867,7 +892,7 @@ ApplicationWindow {
                                 bottomPadding: 6
                                 font.pixelSize: 12
                                 color: colors.muted
-                                text: "Conectando…"
+                                text: qsTr("Connecting…")
                             }
 
                             Column {
@@ -882,10 +907,10 @@ ApplicationWindow {
                                     textFormat: Text.PlainText
                                     font.pixelSize: 12
                                     color: colors.danger
-                                    text: recorderGroup.modelData.failure || ""
+                                    text: win.msg(recorderGroup.modelData.failure || "")
                                 }
                                 AppButton {
-                                    text: "Tentar de novo"
+                                    text: qsTr("Try again")
                                     implicitHeight: 28
                                     leftPadding: 8
                                     rightPadding: 8
@@ -939,10 +964,10 @@ ApplicationWindow {
 
                                     AppToolTip {
                                         visible: rowHover.hovered
-                                        text: cameraRow.status === "live" ? "Ao vivo"
-                                            : cameraRow.status === "lost" ? "Sem sinal"
-                                            : cameraRow.status === "connecting" ? "Conectando…"
-                                            : "Fora da grade"
+                                        text: cameraRow.status === "live" ? qsTr("Live")
+                                            : cameraRow.status === "lost" ? qsTr("No signal")
+                                            : cameraRow.status === "connecting" ? qsTr("Connecting…")
+                                            : qsTr("Outside the grid")
                                     }
 
                                     HoverHandler { id: rowHover }
@@ -1036,7 +1061,7 @@ ApplicationWindow {
                         }
                         Text {
                             anchors.horizontalCenter: parent.horizontalCenter
-                            text: tile.signalLost ? "Sem sinal" : "Conectando…"
+                            text: tile.signalLost ? qsTr("No signal") : qsTr("Connecting…")
                             font.pixelSize: 12
                             color: colors.faint
                         }
@@ -1102,7 +1127,7 @@ ApplicationWindow {
                     icon.source: "qrc:/rigelcam/icons/close.svg"
                     icon.width: 14
                     icon.height: 14
-                    text: "Tirar da grade"
+                    text: qsTr("Remove from the grid")
                     implicitWidth: 26
                     implicitHeight: 26
                     leftPadding: 6
@@ -1187,7 +1212,7 @@ ApplicationWindow {
                         icon.source: "qrc:/rigelcam/icons/close.svg"
                         icon.width: 14
                         icon.height: 14
-                        text: "Tirar da grade"
+                        text: qsTr("Remove from the grid")
                         implicitWidth: 26
                         implicitHeight: 26
                         leftPadding: 6
@@ -1206,7 +1231,7 @@ ApplicationWindow {
                     Text {
                         anchors.centerIn: parent
                         // A camera of a recorder that is offline or hasn't answered keeps its square.
-                        text: square.key === null ? "Arraste uma câmera" : "Aguardando o gravador"
+                        text: square.key === null ? qsTr("Drag a camera here") : qsTr("Waiting for the recorder")
                         font.pixelSize: 12
                         color: colors.faint
                     }
@@ -1252,7 +1277,7 @@ ApplicationWindow {
             spacing: 10
             AppButton {
                 icon.source: "qrc:/rigelcam/icons/back.svg"
-                text: "Voltar"
+                text: qsTr("Back")
                 onClicked: win.zoomed = ""
             }
             Text {
@@ -1268,7 +1293,7 @@ ApplicationWindow {
                 enabled: win.zoomScale > 1
                 display: AbstractButton.IconOnly
                 icon.source: "qrc:/rigelcam/icons/minus.svg"
-                text: "Diminuir o zoom"
+                text: qsTr("Zoom out")
                 implicitWidth: 34
                 leftPadding: 9
                 rightPadding: 9
@@ -1290,7 +1315,7 @@ ApplicationWindow {
                 enabled: win.zoomScale < 8
                 display: AbstractButton.IconOnly
                 icon.source: "qrc:/rigelcam/icons/plus.svg"
-                text: "Aumentar o zoom"
+                text: qsTr("Zoom in")
                 implicitWidth: 34
                 leftPadding: 9
                 rightPadding: 9
@@ -1323,7 +1348,7 @@ ApplicationWindow {
             anchors.centerIn: parent
             font.pixelSize: 13
             color: colors.text
-            text: "F11 ou Esc para sair da tela cheia"
+            text: qsTr("F11 or Esc to leave full screen")
         }
     }
 

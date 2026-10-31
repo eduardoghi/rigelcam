@@ -1,5 +1,8 @@
 mod camera_stream;
 mod grid;
+mod i18n;
+
+use rigelcam_core::recorders::RecorderList;
 
 use cxx_qt_lib::{QGuiApplication, QQmlApplicationEngine, QUrl};
 
@@ -28,6 +31,10 @@ fn main() {
         rigel_register_types();
         rigel_set_app_identity();
     }
+    // Before QML loads, so the first screen already comes in the saved language.
+    let saved = RecorderList::open_default().ok();
+    let language = saved.as_ref().and_then(|list| list.language());
+    i18n::install(i18n::resolve(language.unwrap_or_default()));
     let mut engine = QQmlApplicationEngine::new();
     if let Some(engine) = engine.as_mut() {
         engine.load(&QUrl::from("qrc:/qt/qml/rigelcam/qml/Main.qml"));

@@ -188,6 +188,9 @@ struct Saved {
     layout: Option<Layout>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     sidebar_collapsed: bool,
+    /// "pt_BR" or "en", or nothing to follow the system.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    language: Option<String>,
     /// "light" or "dark", or nothing to follow the system.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     theme: Option<String>,
@@ -342,6 +345,15 @@ impl<S: Secrets> RecorderList<S> {
 
     pub fn set_layout(&mut self, layout: Layout) -> Result<(), Error> {
         self.saved.layout = Some(layout);
+        self.write()
+    }
+
+    pub fn language(&self) -> Option<&str> {
+        self.saved.language.as_deref()
+    }
+
+    pub fn set_language(&mut self, language: &str) -> Result<(), Error> {
+        self.saved.language = Some(language.to_owned());
         self.write()
     }
 
@@ -505,8 +517,10 @@ mod tests {
         list.set_layout(layout.clone()).unwrap();
         list.set_sidebar_collapsed(true).unwrap();
         list.set_theme("light").unwrap();
+        list.set_language("en").unwrap();
         let reopened = RecorderList::open(path, secrets).unwrap();
         assert_eq!(reopened.theme(), Some("light"));
+        assert_eq!(reopened.language(), Some("en"));
         assert_eq!(reopened.recorders().len(), 2);
         assert_eq!(reopened.layout(), Some(&layout));
         assert!(reopened.sidebar_collapsed());
