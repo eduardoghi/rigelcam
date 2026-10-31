@@ -1,6 +1,6 @@
 //! The saved recorders. Addresses go in a JSON file, passwords in the system keyring.
 
-use std::fs;
+use std::fs::{self, File, TryLockError};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -151,6 +151,11 @@ pub trait Secrets {
 pub struct SystemKeyring;
 
 fn entry(recorder_id: u64) -> Result<keyring::Entry, Error> {
+    // The library tries the keyring once per run, and after a failure it only answers that there
+    // is no store, which hides why.
+    if let Err(error) = keyring::Entry::store_status() {
+        return Err(Error::Keyring(error.to_string()));
+    }
     keyring::Entry::new(KEYRING_SERVICE, &format!("recorder-{recorder_id}"))
         .map_err(|e| Error::Keyring(e.to_string()))
 }
@@ -209,9 +214,38 @@ impl RecorderList<SystemKeyring> {
     }
 
     /// Starts an empty list after setting the file of the user aside.
-    pub fn start_over_default() -> Result<Self, Error> {
+    pub fn start_over_default() -> Result<(Self, PathBuf), Error> {
         Self::start_over(default_path()?, SystemKeyring)
     }
+}
+
+/// Keeps other runs of the app away from the list while it lives. Two of them would each save
+/// their own copy over the other, and give the same id to different recorders.
+pub struct InstanceLock {
+    _file: File,
+}
+
+/// Takes the lock of this user, or returns None when another run of the app holds it.
+pub fn lock_instance() -> Result<Option<InstanceLock>, Error> {
+    let path = default_path()?.with_file_name("instance.lock");
+    if let Some(folder) = path.parent() {
+        fs::create_dir_all(folder)?;
+    }
+    let file = File::options()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path)?;
+    match file.try_lock() {
+        Ok(()) => Ok(Some(InstanceLock { _file: file })),
+        Err(TryLockError::WouldBlock) => Ok(None),
+        Err(TryLockError::Error(error)) => Err(error.into()),
+    }
+}
+
+/// The file of the saved list, to show when something is wrong with it.
+pub fn list_path() -> Result<PathBuf, Error> {
+    default_path()
 }
 
 fn default_path() -> Result<PathBuf, Error> {
@@ -223,16 +257,18 @@ fn default_path() -> Result<PathBuf, Error> {
 
 impl<S: Secrets> RecorderList<S> {
     /// Keeps a damaged file next to the list under a new name, so it can still be fixed by hand,
-    /// and opens an empty list. The name has the time so that an older copy isn't overwritten.
-    pub fn start_over(path: PathBuf, secrets: S) -> Result<Self, Error> {
+    /// and opens an empty list, also returning where the copy went. The name has the time so that
+    /// an older copy isn't overwritten. New ids start from the time too, since the passwords of
+    /// the damaged list stay in the keyring and it may come back.
+    pub fn start_over(path: PathBuf, secrets: S) -> Result<(Self, PathBuf), Error> {
         let seconds = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |elapsed| elapsed.as_secs());
-        fs::rename(
-            &path,
-            path.with_extension(format!("json.corrupted-{seconds}")),
-        )?;
-        Self::open(path, secrets)
+        let copy = path.with_extension(format!("json.corrupted-{seconds}"));
+        fs::rename(&path, &copy)?;
+        let mut list = Self::open(path, secrets)?;
+        list.saved.next_id = seconds;
+        Ok((list, copy))
     }
 
     pub fn open(path: PathBuf, secrets: S) -> Result<Self, Error> {
@@ -671,7 +707,10 @@ mod tests {
         let path = temp_path("start-over");
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, "not json").unwrap();
-        let list = RecorderList::start_over(path.clone(), MemorySecrets::default()).unwrap();
+        let (list, copy) =
+            RecorderList::start_over(path.clone(), MemorySecrets::default()).unwrap();
+        assert!(copy.exists());
+        assert!(list.saved.next_id > 1);
         assert!(list.recorders().is_empty());
         assert!(!path.exists());
         let kept: Vec<_> = fs::read_dir(path.parent().unwrap())

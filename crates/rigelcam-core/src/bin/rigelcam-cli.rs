@@ -6,6 +6,11 @@ use std::process::ExitCode;
 
 use rigelcam_core::dahua::{Client, Stream};
 
+/// Text from the recorder, which can't be allowed to send commands to the terminal.
+fn printable(text: &str) -> String {
+    text.chars().filter(|c| !c.is_control()).collect()
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let [host, user] = args.as_slice() else {
@@ -18,7 +23,7 @@ fn main() -> ExitCode {
     };
     let client = Client::new(host, user, &password);
     let result = client.device_type().and_then(|model| {
-        println!("model: {model}");
+        println!("model: {}", printable(&model));
         client.channels()
     });
     match result {
@@ -27,7 +32,7 @@ fn main() -> ExitCode {
                 println!(
                     "{:>3}  {:<24} {}",
                     channel.number,
-                    channel.name,
+                    printable(&channel.name),
                     client.live_url(channel.number, Stream::Sub)
                 );
             }

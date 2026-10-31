@@ -34,6 +34,11 @@ const DEFAULT_RTSP_PORT: u16 = 554;
 /// For requests with no limit on their total time, which still have to start answering.
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// More than any recorder holds, so that one that keeps answering full pages can't hold a search.
+const MAX_SEARCH_PAGES: usize = 1_000;
+const MAX_CHANNELS: usize = 512;
+const MAX_NAME_CHARS: usize = 120;
+
 /// Files asked for at a time, which is about two days of a channel recording all the time.
 const SEARCH_PAGE: usize = 100;
 
@@ -201,6 +206,7 @@ impl Client {
     pub fn channels(&self) -> Result<Vec<Channel>, Error> {
         let body = self.get("/cgi-bin/configManager.cgi?action=getConfig&name=ChannelTitle")?;
         let mut channels = parse_channel_titles(&body);
+        channels.truncate(MAX_CHANNELS);
         // Some models answer an error with status 200, and that can't look like an empty recorder.
         if channels.is_empty() {
             return Err(Error::Unexpected("the channel list is empty".to_owned()));
@@ -235,7 +241,7 @@ impl Client {
             return Ok(Vec::new());
         }
         let mut spans = Vec::new();
-        loop {
+        for _ in 0..MAX_SEARCH_PAGES {
             let files = finder.next(SEARCH_PAGE)?;
             let found = files.len();
             spans.extend(files.iter().filter_map(|file| file.span_on(date)));
@@ -243,6 +249,7 @@ impl Client {
                 return Ok(merge_spans(spans));
             }
         }
+        Err(Error::Unexpected("too many recordings".to_owned()))
     }
 
     /// Tells which of the given days, as `YYYY-MM-DD`, have recordings of a channel, one at a time
@@ -357,11 +364,19 @@ impl Client {
         }
         let mut response = pending.call()?;
         if response.status() == StatusCode::UNAUTHORIZED {
+            // A recorder can offer other schemes first, and only Digest is answered.
             let challenge = response
                 .headers()
-                .get("www-authenticate")
-                .and_then(|value| value.to_str().ok())
-                .ok_or_else(|| Error::Challenge("no WWW-Authenticate header".to_owned()))?
+                .get_all("www-authenticate")
+                .iter()
+                .filter_map(|value| value.to_str().ok())
+                .find(|value| {
+                    value
+                        .trim_start()
+                        .to_ascii_lowercase()
+                        .starts_with("digest")
+                })
+                .ok_or_else(|| Error::Challenge("no Digest challenge".to_owned()))?
                 .to_owned();
             let mut fresh =
                 digest_auth::parse(&challenge).map_err(|e| Error::Challenge(e.to_string()))?;
@@ -611,8 +626,10 @@ struct RecordedFile {
 
 fn seconds_of(time: &str) -> Option<u32> {
     let (_, clock) = time.split_once(' ')?;
-    let mut parts = clock.split(':').map(|part| part.parse::<u32>().ok());
-    Some(parts.next()?? * 3600 + parts.next()?? * 60 + parts.next()??)
+    let mut parts = clock.split(':').map(|part| part.parse::<u8>().ok());
+    let (hours, minutes, seconds) = (parts.next()??, parts.next()??, parts.next()??);
+    (hours <= 24 && minutes < 60 && seconds < 60)
+        .then(|| u32::from(hours) * 3600 + u32::from(minutes) * 60 + u32::from(seconds))
 }
 
 impl RecordedFile {
@@ -694,10 +711,11 @@ fn parse_channel_titles(body: &str) -> Vec<Channel> {
             let index = key
                 .strip_prefix("table.ChannelTitle[")?
                 .strip_suffix("].Name")?;
+            let name: String = name.chars().take(MAX_NAME_CHARS).collect();
             Some(Channel {
                 camera: None,
                 number: index.parse::<u32>().ok()? + 1,
-                name: name.to_owned(),
+                name,
             })
         })
         .collect();

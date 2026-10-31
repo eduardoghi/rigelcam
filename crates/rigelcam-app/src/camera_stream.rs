@@ -44,6 +44,8 @@ const H265_ELEMENTS: [&str; 3] = ["rtph265depay", "h265parse", H265_DECODER];
 const DRM_FORMAT_NV12: u32 = 0x3231_564e;
 /// A stream that stops sending frames without an error counts as lost after this long.
 const STALL_TIMEOUT: Duration = Duration::from_secs(15);
+/// The first frame also waits for the RTSP handshake and for a key frame.
+const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_RETRY_DELAY: Duration = Duration::from_secs(30);
 const STREAM_ENDED: &str = "the stream ended";
 const NOT_ON_RTSP: &str = "the recorder has no such stream";
@@ -104,6 +106,9 @@ pub struct Stretch {
 #[derive(Default)]
 pub struct DirectCameras {
     opened: Mutex<HashSet<u32>>,
+    /// Channels the recorder sent video for, whose 404 only means their camera dropped for a moment.
+    /// Those cameras usually have a password of their own, so going to them would be a wrong login.
+    served: Mutex<HashSet<u32>>,
     /// Cameras with a password other than the one of the recorder. Each try is a wrong password,
     /// and those can lock the user on the camera.
     refused: Mutex<HashSet<u32>>,
@@ -218,6 +223,18 @@ pub fn missing_elements() -> Vec<&'static str> {
 /// GStreamer elements this system lacks to show H.265 cameras, which H.264 cameras don't need.
 pub fn missing_h265_elements() -> Vec<&'static str> {
     missing_from(&H265_ELEMENTS)
+}
+
+/// The GStreamer version of this system, if it is too old for the decoded caps on Linux.
+#[cfg(unix)]
+pub fn old_gstreamer() -> Option<String> {
+    let (major, minor, micro, _) = gst::version();
+    ((major, minor) < (1, 24)).then(|| format!("{major}.{minor}.{micro}"))
+}
+
+#[cfg(windows)]
+pub fn old_gstreamer() -> Option<String> {
+    None
 }
 
 /// Owned by the video item, which drops it before going away.
@@ -439,7 +456,8 @@ fn open_live(
     if !cameras.opened.lock().unwrap().contains(&direct.channel) {
         let outcome = play(shared, source, revision, generation);
         let not_found = matches!(&outcome, Outcome::Lost { reason, .. } if reason == NOT_ON_RTSP);
-        if !not_found || !failed_before {
+        let served = cameras.served.lock().unwrap().contains(&direct.channel);
+        if !not_found || !failed_before || served {
             return outcome;
         }
     }
@@ -557,15 +575,29 @@ fn watch(
                     _ => {}
                 }
             }
-            if last_frame.lock().unwrap().elapsed() > STALL_TIMEOUT {
+            let on_video = received_video.load(Ordering::Relaxed);
+            let limit = if on_video {
+                STALL_TIMEOUT
+            } else {
+                FIRST_FRAME_TIMEOUT
+            };
+            if last_frame.lock().unwrap().elapsed() > limit {
                 break Outcome::Lost {
-                    received_video: received_video.load(Ordering::Relaxed),
-                    reason: format!("no frames for {} s", STALL_TIMEOUT.as_secs()),
+                    received_video: on_video,
+                    reason: format!("no frames for {} s", limit.as_secs()),
                 };
             }
         }
     };
     let _ = pipeline.set_state(gst::State::Null);
+    // Only the recorder sets this, since the stream that opens a camera has no `direct`.
+    if let Some(direct) = source
+        .direct
+        .as_ref()
+        .filter(|_| received_video.load(Ordering::Relaxed))
+    {
+        direct.cameras.served.lock().unwrap().insert(direct.channel);
+    }
     outcome
 }
 

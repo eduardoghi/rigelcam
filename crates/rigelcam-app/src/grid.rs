@@ -30,6 +30,7 @@ pub mod qobject {
         #[qproperty(bool, video_unavailable, cxx_name = "videoUnavailable")]
         #[qproperty(QString, form_error, cxx_name = "formError")]
         #[qproperty(bool, form_busy, cxx_name = "formBusy")]
+        #[qproperty(bool, ready)]
         #[qproperty(QString, exporting)]
         #[qproperty(f64, export_progress, cxx_name = "exportProgress")]
         #[qproperty(i32, exports_waiting, cxx_name = "exportsWaiting")]
@@ -197,12 +198,14 @@ use cxx_qt_lib::QString;
 use rigelcam_core::dahua::{Channel, Client, Error as RecorderError, LoginGate, Stream};
 use rigelcam_core::layout::{CameraId, Layout};
 use rigelcam_core::recorders::{
-    Address, AddressError, Error as RecordersError, RecorderList, Secrets, SystemKeyring,
+    list_path, lock_instance, Address, AddressError, Error as RecordersError, InstanceLock,
+    RecorderList, Secrets, SystemKeyring,
 };
 use serde_json::json;
 
 use crate::camera_stream::{
-    missing_elements, missing_h265_elements, CameraStream, Direct, DirectCameras, Source, Stretch,
+    missing_elements, missing_h265_elements, old_gstreamer, CameraStream, Direct, DirectCameras,
+    Source, Stretch,
 };
 use crate::export::{self, Job};
 use crate::i18n::{self, message};
@@ -323,6 +326,9 @@ pub struct CameraGridRust {
     video_unavailable: bool,
     form_error: QString,
     form_busy: bool,
+    ready: bool,
+    /// Held for as long as the app runs.
+    instance: Option<InstanceLock>,
     exporting: QString,
     export_progress: f64,
     exports_waiting: i32,
@@ -345,19 +351,33 @@ impl qobject::CameraGrid {
         let code = i18n::resolve(language.unwrap_or_default());
         self.as_mut().set_language(QString::from(code));
         self.as_mut().check_components();
+        match lock_instance() {
+            Ok(Some(lock)) => self.as_mut().rust_mut().instance = Some(lock),
+            Ok(None) => {
+                let text = message("Rigelcam is already open.", &[]);
+                self.set_error(QString::from(text.as_str()));
+                return;
+            }
+            // A system that can't lock the file still gets to use the app.
+            Err(_) => {}
+        }
         match RecorderList::open_default() {
             Ok(list) => self.adopt_list(list),
             Err(RecordersError::Format(_)) => {
                 self.as_mut().set_list_corrupted(true);
-                self.set_error(QString::from(
-                    "The recorder list is corrupted. The file was not changed.",
-                ));
+                let path = list_path().map_or(String::new(), |path| path.display().to_string());
+                let text = message(
+                    "The recorder list is corrupted. The file was not changed (%1).",
+                    &[&path],
+                );
+                self.set_error(QString::from(text.as_str()));
             }
             Err(error) => self.set_error(QString::from(error.to_string().as_str())),
         }
     }
 
     fn adopt_list(mut self: Pin<&mut Self>, list: RecorderList<SystemKeyring>) {
+        self.as_mut().set_ready(true);
         let ids: Vec<u64> = list.recorders().iter().map(|r| r.id).collect();
         let layout = list.layout().cloned();
         let collapsed = list.sidebar_collapsed();
@@ -376,10 +396,13 @@ impl qobject::CameraGrid {
 
     fn start_over(mut self: Pin<&mut Self>) {
         match RecorderList::start_over_default() {
-            Ok(list) => {
+            Ok((list, copy)) => {
                 self.as_mut().set_list_corrupted(false);
                 self.as_mut().set_error(QString::default());
-                self.adopt_list(list);
+                self.as_mut().adopt_list(list);
+                let path = copy.display().to_string();
+                let text = message("The damaged list was kept at %1.", &[&path]);
+                self.set_notice(QString::from(text.as_str()));
             }
             Err(error) => self.set_error(QString::from(error.to_string().as_str())),
         }
@@ -389,7 +412,13 @@ impl qobject::CameraGrid {
     fn check_components(mut self: Pin<&mut Self>) {
         let missing = missing_elements();
         let h265 = missing_h265_elements();
-        let message = if !missing.is_empty() {
+        let old = old_gstreamer();
+        let message = if let Some(version) = &old {
+            message(
+                "GStreamer 1.24 or newer is needed to show video, and this system has %1.",
+                &[version],
+            )
+        } else if !missing.is_empty() {
             message(
                 "GStreamer components are missing to show video (%1). \
                  Install the GStreamer plugins and VA-API support.",
@@ -403,7 +432,8 @@ impl qobject::CameraGrid {
         } else {
             return;
         };
-        self.as_mut().set_video_unavailable(!missing.is_empty());
+        self.as_mut()
+            .set_video_unavailable(!missing.is_empty() || old.is_some());
         self.set_missing(QString::from(message.as_str()));
     }
 
@@ -493,7 +523,13 @@ impl qobject::CameraGrid {
                             Ok((connection, channels))
                         }
                         Err(error) => {
-                            let retry = matches!(error, RecorderError::Http(_));
+                            // A recorder that is starting answers errors for a while.
+                            let retry = matches!(
+                                error,
+                                RecorderError::Http(_)
+                                    | RecorderError::Status(500..=599)
+                                    | RecorderError::Unexpected(_)
+                            );
                             Err((recorder_message(&error), retry))
                         }
                     }
@@ -828,6 +864,9 @@ impl qobject::CameraGrid {
         seconds: i32,
         rate: i32,
     ) -> i32 {
+        if self.video_unavailable {
+            return 0;
+        }
         let attempt = self.playbacks + 1;
         self.as_mut().rust_mut().playbacks = attempt;
         let Some(connection) = self.connections.get(&(recorder as u64)) else {
@@ -1133,7 +1172,7 @@ impl qobject::CameraGrid {
         let source = self
             .connections
             .get(&(recorder as u64))
-            .filter(|_| visible)
+            .filter(|_| visible && !self.video_unavailable)
             .map(|connection| {
                 let kind = if main_stream {
                     Stream::Main

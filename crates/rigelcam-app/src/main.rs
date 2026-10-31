@@ -11,6 +11,7 @@ extern "C" {
     fn rigel_prepare_graphics();
     fn rigel_register_types();
     fn rigel_set_app_identity();
+    fn rigel_has_window() -> bool;
 }
 
 fn main() {
@@ -27,9 +28,8 @@ fn main() {
     if std::env::var_os("QT_XCB_GL_INTEGRATION").is_none() {
         std::env::set_var("QT_XCB_GL_INTEGRATION", "xcb_egl");
     }
-    if std::env::var_os("QT_QUICK_CONTROLS_STYLE").is_none() {
-        std::env::set_var("QT_QUICK_CONTROLS_STYLE", "Basic");
-    }
+    // Always, since the interface customizes controls that other styles don't let it change.
+    std::env::set_var("QT_QUICK_CONTROLS_STYLE", "Basic");
 
     // Linux needs OpenGL ES for external textures, and Windows a device shared with the decoders.
     unsafe { rigel_prepare_graphics() };
@@ -46,6 +46,11 @@ fn main() {
     let mut engine = QQmlApplicationEngine::new();
     if let Some(engine) = engine.as_mut() {
         engine.load(&QUrl::from("qrc:/qt/qml/rigelcam/qml/Main.qml"));
+    }
+    // Without this the process would stay alive with no window to close.
+    if !unsafe { rigel_has_window() } {
+        eprintln!("the interface could not be loaded");
+        std::process::exit(1);
     }
     if let Some(app) = app.as_mut() {
         app.exec();

@@ -220,10 +220,6 @@
         <translation>Grabador eliminado, pero la contraseña quedó en el almacén del sistema.</translation>
     </message>
     <message>
-        <source>The recorder list is corrupted. The file was not changed.</source>
-        <translation>La lista de grabadores está dañada. El archivo no se modificó.</translation>
-    </message>
-    <message>
         <source>Recordings</source>
         <translation>Grabaciones</translation>
     </message>
@@ -370,6 +366,22 @@
     <message>
         <source>Could not save the video (%1).</source>
         <translation>No se pudo guardar el video (%1).</translation>
+    </message>
+    <message>
+        <source>Rigelcam is already open.</source>
+        <translation>Rigelcam ya está abierto.</translation>
+    </message>
+    <message>
+        <source>The recorder list is corrupted. The file was not changed (%1).</source>
+        <translation>La lista de grabadores está dañada. El archivo no se modificó (%1).</translation>
+    </message>
+    <message>
+        <source>The damaged list was kept at %1.</source>
+        <translation>La lista dañada se guardó en %1.</translation>
+    </message>
+    <message>
+        <source>GStreamer 1.24 or newer is needed to show video, and this system has %1.</source>
+        <translation>Se necesita GStreamer 1.24 o superior para mostrar video, y este sistema tiene %1.</translation>
     </message>
 </context>
 </TS>

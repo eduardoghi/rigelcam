@@ -1,0 +1,3 @@
+# Hooks run under bash, also in Git for Windows, where CRLF would break them.
+.githooks/* text eol=lf
+*.sh text eol=lf

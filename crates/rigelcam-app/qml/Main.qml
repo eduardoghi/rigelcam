@@ -178,6 +178,7 @@ ApplicationWindow {
         Slider {
             id: gammaSlider
             Layout.preferredWidth: 110
+            onActiveFocusChanged: win.gammaFocused = activeFocus
             from: 0.5
             to: 3
             stepSize: 0.05
@@ -316,6 +317,8 @@ ApplicationWindow {
     // Where F11 goes back to, since the window may have been maximized or not.
     property int windowedVisibility: Window.Maximized
     onFullScreenChanged: if (fullScreen) fullScreenHint.restart()
+    // The button that leaves the recordings only exists with a recorder.
+    onRecorderListChanged: if (recorderList.length === 0) setMode("live")
     // Digital zoom of the camera shown alone, with the top left of the visible part in fractions.
     property real zoomScale: 1
     property real zoomX: 0
@@ -331,8 +334,9 @@ ApplicationWindow {
     readonly property bool inRecordings: mode === "recordings"
     // Off while a popup is open, which takes these keys for itself.
     readonly property bool playerKeys: inRecordings && playback.spans.length > 0 && !addDialog.visible && !removeDialog.visible
-        && !calendar.visible && !comboOpen
+        && !calendar.visible && !comboOpen && !gammaFocused
     property bool comboOpen: false
+    property bool gammaFocused: false
     // The player controls don't fit beside the sidebar, so it opens over the video on request.
     readonly property bool narrowPlayer: inRecordings && width < playerRow.implicitWidth + 300
     property bool sidebarFloating: false
@@ -529,7 +533,7 @@ ApplicationWindow {
     Shortcut {
         sequence: "Left"
         enabled: win.playerKeys
-        onActivated: playback.seek(playback.position - 10)
+        onActivated: playback.skipBack()
     }
 
     Shortcut {
@@ -968,7 +972,7 @@ ApplicationWindow {
         }
         PrimaryButton {
             anchors.horizontalCenter: parent.horizontalCenter
-            visible: grid.error === ""
+            visible: grid.ready
             icon.source: "qrc:/rigelcam/icons/plus.svg"
             text: qsTr("Add recorder")
             onClicked: addDialog.openFor(null)
@@ -1846,6 +1850,17 @@ ApplicationWindow {
             return -1
         }
 
+        // seek moves forward over a gap, which would land on the start of this same recording.
+        function skipBack() {
+            const wanted = position - 10
+            let target = -1
+            for (const span of spans) {
+                if (span.start <= wanted)
+                    target = Math.max(target, Math.min(wanted, span.end - 1))
+            }
+            seek(target < 0 ? 0 : target)
+        }
+
         function seek(seconds) {
             const target = recordedTime(seconds)
             if (target < 0 || !win.playbackCamera)
@@ -1872,7 +1887,7 @@ ApplicationWindow {
         function togglePlaying() {
             if (!leadCell()) {
                 // After the last recording it starts the day over.
-                seek(recordedTime(position) < 0 ? spans[0].start : position)
+                seek(position >= spans[spans.length - 1].end - 2 ? spans[0].start : position)
                 return
             }
             playing = !playing
@@ -2253,7 +2268,9 @@ ApplicationWindow {
                                 const known = calendar.knownDays
                                 known[found.key] = found.days
                                 calendar.knownDays = Object.assign({}, known)
-                                if (found.done)
+                                // The current month still gets new days.
+                                const current = found.key.endsWith(Qt.formatDate(new Date(), "yyyy-MM"))
+                                if (found.done && !current)
                                     calendar.finished[found.key] = true
                             }
                         }
@@ -2329,7 +2346,7 @@ ApplicationWindow {
                     implicitWidth: 40
                     leftPadding: 4
                     rightPadding: 4
-                    onClicked: playback.seek(playback.position - 10)
+                    onClicked: playback.skipBack()
                     AppToolTip { visible: parent.hovered; text: qsTr("Back 10 s") }
                 }
                 AppButton {
@@ -2567,7 +2584,7 @@ ApplicationWindow {
     }
 
     Rectangle {
-        visible: fullScreenHint.running
+        visible: fullScreenHint.running && win.fullScreen
         z: 10
         anchors.horizontalCenter: parent.horizontalCenter
         y: 14

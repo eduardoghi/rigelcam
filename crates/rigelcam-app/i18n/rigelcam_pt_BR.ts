@@ -220,10 +220,6 @@
         <translation>Gravador removido, mas a senha ficou no cofre do sistema.</translation>
     </message>
     <message>
-        <source>The recorder list is corrupted. The file was not changed.</source>
-        <translation>A lista de gravadores está corrompida. O arquivo não foi alterado.</translation>
-    </message>
-    <message>
         <source>Recordings</source>
         <translation>Gravações</translation>
     </message>
@@ -370,6 +366,22 @@
     <message>
         <source>Could not save the video (%1).</source>
         <translation>Não foi possível salvar o vídeo (%1).</translation>
+    </message>
+    <message>
+        <source>Rigelcam is already open.</source>
+        <translation>O Rigelcam já está aberto.</translation>
+    </message>
+    <message>
+        <source>The recorder list is corrupted. The file was not changed (%1).</source>
+        <translation>A lista de gravadores está corrompida. O arquivo não foi alterado (%1).</translation>
+    </message>
+    <message>
+        <source>The damaged list was kept at %1.</source>
+        <translation>A lista danificada foi guardada em %1.</translation>
+    </message>
+    <message>
+        <source>GStreamer 1.24 or newer is needed to show video, and this system has %1.</source>
+        <translation>É preciso do GStreamer 1.24 ou mais novo para mostrar vídeo, e este sistema tem o %1.</translation>
     </message>
 </context>
 </TS>
