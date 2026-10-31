@@ -13,6 +13,10 @@ extern "C" {
 }
 
 fn main() {
+    // Recorders sit on the local network, and rtspsrc would otherwise use the proxy of the system.
+    if std::env::var_os("GIO_USE_PROXY_RESOLVER").is_none() {
+        std::env::set_var("GIO_USE_PROXY_RESOLVER", "dummy");
+    }
     gstreamer::init().expect("could not start GStreamer");
     std::env::set_var("QSG_RHI_BACKEND", "opengl");
     // Under X11 Qt defaults to GLX, and the video item imports frames through EGL.

@@ -367,7 +367,11 @@ ApplicationWindow {
     // A model changed item by item, so a recorder answering doesn't restart the others' cameras.
     function syncTiles() {
         const cameras = new Map()
-        for (const recorder of JSON.parse(grid.tree || "[]")) {
+        const recorders = JSON.parse(grid.tree || "[]")
+        // The button to leave the recordings goes away with the last recorder.
+        if (recorders.length === 0)
+            setMode("live")
+        for (const recorder of recorders) {
             for (const camera of recorder.cameras) {
                 const key = cameraKey(recorder.id, camera.number)
                 cameras.set(key, { key: key, recorder: recorder.id, number: camera.number, label: camera.name })
@@ -396,8 +400,9 @@ ApplicationWindow {
     function setMode(next) {
         if (next === mode)
             return
-        zoomed = ""
+        // In this order, or the cameras hidden by the zoom would reopen for an instant.
         mode = next
+        zoomed = ""
     }
 
     function openPlayback(camera) {
@@ -1152,7 +1157,7 @@ ApplicationWindow {
 
                 onStatusChanged: win.updateLiveCount()
                 // Later, because this closes the tile that is emitting the signal.
-                onAuthRefused: Qt.callLater(grid.recorderRefused, recorder)
+                onAuthRefused: Qt.callLater(grid.recorderRefused.bind(grid, recorder))
                 onIncludedChanged: win.updateLiveCount()
 
                 // Hidden cameras keep running for a while, since going back to the grid right after
@@ -1207,7 +1212,7 @@ ApplicationWindow {
                     visible: hasVideo && tile.isMain
                     view: tile.view
                     gamma: tile.gamma
-                    onAuthRefused: Qt.callLater(grid.recorderRefused, tile.recorder)
+                    onAuthRefused: Qt.callLater(grid.recorderRefused.bind(grid, tile.recorder))
                     Connections {
                         target: tile
                         function onIsMainChanged() {
@@ -1487,6 +1492,11 @@ ApplicationWindow {
         property bool playing: false
         property bool failed: false
         property bool loading: false
+        // A search that only brings the day up to date, while what is playing goes on.
+        property bool refreshing: false
+        // The day asked for, which `date` becomes when the answer comes.
+        property string requestedDate: ""
+        readonly property string viewDate: requestedDate || date
         property string searchError: ""
         // Whether a stream exists to pause, which it doesn't after the end, a failure or stop().
         property bool streamOpen: false
@@ -1504,9 +1514,13 @@ ApplicationWindow {
             if (!recordings || !win.inRecordings || !camera || recordings.recorder !== camera.recorder
                     || recordings.channel !== camera.number)
                 return
+            const refreshed = refreshing
+            refreshing = false
             loading = false
+            requestedDate = ""
             if (recordings.error) {
-                searchError = recordings.error
+                if (!refreshed)
+                    searchError = recordings.error
                 return
             }
             date = recordings.date
@@ -1515,6 +1529,8 @@ ApplicationWindow {
             today = now[0]
             const clock = now[1].split(":")
             nowSeconds = date === today ? parseInt(clock[0]) * 3600 + parseInt(clock[1]) * 60 + parseInt(clock[2]) : 86400
+            if (refreshed)
+                return
             if (spans.length === 0) {
                 stop()
                 return
@@ -1532,7 +1548,17 @@ ApplicationWindow {
             openedAt = 0
             searchError = ""
             loading = true
+            refreshing = false
+            requestedDate = day
             grid.searchRecordings(camera.recorder, camera.number, day)
+        }
+
+        // The recorder keeps recording, so the current day goes stale on screen.
+        function refresh() {
+            if (!win.playbackCamera || loading || !date)
+                return
+            refreshing = true
+            grid.searchRecordings(win.playbackCamera.recorder, win.playbackCamera.number, date)
         }
 
         function open(camera) {
@@ -1554,7 +1580,8 @@ ApplicationWindow {
         }
 
         function stepDay(days) {
-            const day = new Date(date + "T12:00:00")
+            // From the day asked for, so a second click doesn't wait for the first answer.
+            const day = new Date(viewDate + "T12:00:00")
             day.setDate(day.getDate() + days)
             changeDay(Qt.formatDate(day, "yyyy-MM-dd"))
         }
@@ -1632,6 +1659,15 @@ ApplicationWindow {
                 stop()
             else if (win.playbackCamera && spans.length === 0)
                 open(win.playbackCamera)
+            else
+                refresh()
+        }
+
+        Timer {
+            interval: 60000
+            repeat: true
+            running: playback.visible && playback.date !== "" && playback.date === playback.today
+            onTriggered: playback.refresh()
         }
 
         VideoItem {
@@ -1664,7 +1700,7 @@ ApplicationWindow {
                 playback.playing = false
                 playback.failed = true
                 if (win.playbackCamera)
-                    Qt.callLater(grid.recorderRefused, win.playbackCamera.recorder)
+                    Qt.callLater(grid.recorderRefused.bind(grid, win.playbackCamera.recorder))
             }
         }
 
@@ -1672,6 +1708,8 @@ ApplicationWindow {
             anchors.centerIn: video
             visible: !win.playbackCamera || playback.spans.length === 0 || playback.failed
             padding: 12
+            // Failures can carry text from the recorder.
+            textFormat: Text.PlainText
             font.pixelSize: 14
             color: playback.failed ? colors.danger : colors.muted
             background: Rectangle {
@@ -1703,7 +1741,7 @@ ApplicationWindow {
                 spacing: 6
 
                 AppButton {
-                    enabled: win.playbackCamera !== null
+                    enabled: win.playbackCamera !== null && playback.viewDate !== ""
                     text: "‹"
                     implicitWidth: 34
                     onClicked: playback.stepDay(-1)
@@ -1711,7 +1749,7 @@ ApplicationWindow {
                 }
                 AppButton {
                     enabled: win.playbackCamera !== null
-                    text: playback.date ? new Date(playback.date + "T12:00:00").toLocaleDateString(Qt.locale(grid.language), Locale.ShortFormat) : ""
+                    text: playback.viewDate ? new Date(playback.viewDate + "T12:00:00").toLocaleDateString(Qt.locale(grid.language), Locale.ShortFormat) : ""
                     edge: colors.line
                     onClicked: calendar.open()
                     AppToolTip { visible: parent.hovered; text: qsTr("Pick a day") }
@@ -1726,7 +1764,7 @@ ApplicationWindow {
                         // The month on the arrows, counted from the day being played.
                         property int monthOffset: 0
                         readonly property date shown: {
-                            const day = playback.date ? new Date(playback.date + "T12:00:00") : new Date()
+                            const day = playback.viewDate ? new Date(playback.viewDate + "T12:00:00") : new Date()
                             return new Date(day.getFullYear(), day.getMonth() + monthOffset, 1)
                         }
                         // Days with recordings, by camera and month, since searching takes seconds.
@@ -1816,7 +1854,7 @@ ApplicationWindow {
                     }
                 }
                 AppButton {
-                    enabled: win.playbackCamera !== null && playback.date < playback.today
+                    enabled: win.playbackCamera !== null && playback.viewDate !== "" && playback.viewDate < playback.today
                     text: "›"
                     implicitWidth: 34
                     onClicked: playback.stepDay(1)
