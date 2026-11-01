@@ -15,8 +15,8 @@ Dahua HTTP API for everything else, so it does not need the vendor SDK and runs 
 
 > [!NOTE]
 > Early stage, with no packaged release yet. The app is in daily use on Linux and has to be built
-> from source. On Windows it builds and shows the live grid, while recordings, export and photos
-> are still untested there.
+> from source. On Windows, live view, recordings, export and photos were tested on Intel graphics
+> only.
 
 ## Features
 
@@ -26,14 +26,15 @@ Dahua HTTP API for everything else, so it does not need the vendor SDK and runs 
 - Double click to open a single camera on the main stream, with digital zoom and gamma
 - Save a photo at the resolution of the video
 - Channel names read from the recorder
+- Cameras the user has no permission for are shown as such, without trying again
 
 **Recordings**
 
 - Timeline per channel for any day, with motion events marked apart from continuous recording
 - Calendar with the days that have recordings
 - Click anywhere on the timeline to play from that moment, at up to 8x
-- Up to 4 channels played back in sync
-- Export a clip to MP4, without re-encoding
+- Up to 4 channels played back in sync, each with its own digital zoom
+- Export a clip to MP4, without re-encoding, limited to the recordings the user can play
 
 The interface comes in English, Portuguese and Spanish, with dark and light themes.
 
@@ -90,6 +91,8 @@ Enable the commit message and formatting checks once per clone:
 ```sh
 git config core.hooksPath .githooks
 ```
+
+Report security problems as described in [SECURITY.md](SECURITY.md).
 
 ## License
 

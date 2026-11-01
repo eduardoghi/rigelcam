@@ -16,8 +16,8 @@ nativa en Linux.
 
 > [!NOTE]
 > Etapa inicial, todavía sin versión empaquetada. La aplicación se usa a diario en Linux y hay que
-> compilarla desde el código. En Windows compila y muestra la cuadrícula en vivo, pero las
-> grabaciones, la exportación y las fotos todavía no se han probado allí.
+> compilarla desde el código. En Windows, la vista en vivo, las grabaciones, la exportación y las
+> fotos se probaron solo con gráficos Intel.
 
 ## Funciones
 
@@ -28,6 +28,7 @@ nativa en Linux.
 - Doble clic para abrir una cámara en el flujo principal, con zoom digital y gamma
 - Foto guardada con la resolución del video
 - Nombres de canal leídos del grabador
+- Las cámaras sin permiso para el usuario aparecen así, sin nuevos intentos
 
 **Grabaciones**
 
@@ -35,8 +36,9 @@ nativa en Linux.
   grabación continua
 - Calendario con los días que tienen grabación
 - Clic en cualquier punto de la línea de tiempo para reproducir desde ese momento, hasta 8x
-- Hasta 4 canales reproducidos en sincronía
-- Exportar un fragmento a MP4, sin recomprimir
+- Hasta 4 canales reproducidos en sincronía, cada uno con su zoom digital
+- Exportar un fragmento a MP4, sin recomprimir, solo de las grabaciones que el usuario puede
+  reproducir
 
 La interfaz está en inglés, portugués y español, con tema oscuro y claro.
 
@@ -95,6 +97,8 @@ Active las comprobaciones de mensajes de commit y de formato una vez por clon:
 ```sh
 git config core.hooksPath .githooks
 ```
+
+Informe los problemas de seguridad como se describe en [SECURITY.md](SECURITY.md).
 
 ## Licencia
 

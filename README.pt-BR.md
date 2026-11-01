@@ -15,8 +15,8 @@ API HTTP da Dahua para o resto. Por isso não precisa do SDK do fabricante e rod
 
 > [!NOTE]
 > Fase inicial, ainda sem versão empacotada. O app está em uso diário no Linux e precisa ser
-> compilado a partir do código. No Windows ele compila e mostra a grade ao vivo, mas gravações,
-> exportação e fotos ainda não foram testadas lá.
+> compilado a partir do código. No Windows, ao vivo, gravações, exportação e fotos foram testados
+> só com vídeo Intel.
 
 ## Recursos
 
@@ -26,14 +26,15 @@ API HTTP da Dahua para o resto. Por isso não precisa do SDK do fabricante e rod
 - Clique duplo para abrir uma câmera sozinha no stream principal, com zoom digital e gamma
 - Foto salva na resolução do vídeo
 - Nomes dos canais lidos do gravador
+- Câmeras sem permissão para o usuário aparecem assim, sem novas tentativas
 
 **Gravações**
 
 - Linha do tempo por canal em qualquer dia, com os eventos de movimento separados da gravação contínua
 - Calendário com os dias que têm gravação
 - Clique em qualquer ponto da linha do tempo para reproduzir a partir dali, em até 8x
-- Até 4 canais reproduzidos em sincronia
-- Exportação de trechos em MP4, sem recompressão
+- Até 4 canais reproduzidos em sincronia, cada um com seu zoom digital
+- Exportação de trechos em MP4, sem recompressão, só das gravações que o usuário pode reproduzir
 
 A interface está em inglês, português e espanhol, com tema escuro e claro.
 
@@ -90,6 +91,8 @@ Ative a validação da mensagem de commit e da formatação uma vez por clone:
 ```sh
 git config core.hooksPath .githooks
 ```
+
+Relate problemas de segurança como descrito em [SECURITY.md](SECURITY.md).
 
 ## Licença
 
