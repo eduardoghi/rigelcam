@@ -302,7 +302,7 @@ struct Connection {
     /// video takes the same permission as watching it.
     denied_recordings: Arc<Mutex<HashSet<u32>>>,
     direct_cameras: Arc<DirectCameras>,
-    sessions_refused: Arc<AtomicBool>,
+    sessions_refused: Arc<Mutex<bool>>,
 }
 
 impl Connection {

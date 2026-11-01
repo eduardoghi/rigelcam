@@ -172,7 +172,8 @@ pub struct Client {
     refused: AtomicBool,
     /// The session login failed on this recorder, for this and for later clients. Each try would
     /// count as a wrong password, even where the CGI login works.
-    sessions_refused: Arc<AtomicBool>,
+    /// Its lock stays held during a login, so streams asking together spend one wrong password.
+    sessions_refused: Arc<Mutex<bool>>,
 }
 
 impl Client {
@@ -217,7 +218,7 @@ impl Client {
     }
 
     /// Shares with the other clients of a recorder whether its session login failed.
-    pub fn with_session_memory(mut self, memory: Arc<AtomicBool>) -> Self {
+    pub fn with_session_memory(mut self, memory: Arc<Mutex<bool>>) -> Self {
         self.sessions_refused = memory;
         self
     }
@@ -459,8 +460,8 @@ impl<'a> Session<'a> {
     /// Logs in, or returns None when the recorder doesn't offer this or refuses it, which the CGI
     /// path then answers for.
     fn open(client: &'a Client) -> Option<Self> {
-        if client.refused.load(Ordering::Relaxed) || client.sessions_refused.load(Ordering::Relaxed)
-        {
+        let mut sessions_refused = client.sessions_refused.lock().unwrap();
+        if client.refused.load(Ordering::Relaxed) || *sessions_refused {
             return None;
         }
         let login = |password: &str, session: &Value| {
@@ -487,7 +488,7 @@ impl<'a> Session<'a> {
         let session = challenge.get("session")?;
         let answer = login(&hash, session).ok()?;
         if answer.get("result")?.as_bool() != Some(true) {
-            client.sessions_refused.store(true, Ordering::Relaxed);
+            *sessions_refused = true;
             return None;
         }
         Some(Self {
@@ -1017,12 +1018,33 @@ mod tests {
     #[test]
     fn a_refused_session_login_is_not_tried_again_by_later_clients() {
         let (port, logins) = fake_session_recorder();
-        let memory = Arc::new(AtomicBool::new(false));
+        let memory: Arc<Mutex<bool>> = Arc::default();
         for _ in 0..3 {
             let client = Client::new("127.0.0.1", "admin", "secret")
                 .with_ports(port, 554)
                 .with_session_memory(memory.clone());
             assert!(Session::open(&client).is_none());
+        }
+        assert_eq!(logins.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn logins_starting_together_spend_one_wrong_password() {
+        let (port, logins) = fake_session_recorder();
+        let memory: Arc<Mutex<bool>> = Arc::default();
+        let attempts: Vec<_> = (0..4)
+            .map(|_| {
+                let memory = memory.clone();
+                std::thread::spawn(move || {
+                    let client = Client::new("127.0.0.1", "admin", "secret")
+                        .with_ports(port, 554)
+                        .with_session_memory(memory);
+                    assert!(Session::open(&client).is_none());
+                })
+            })
+            .collect();
+        for attempt in attempts {
+            attempt.join().unwrap();
         }
         assert_eq!(logins.load(Ordering::Relaxed), 1);
     }
