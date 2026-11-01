@@ -43,6 +43,7 @@ const H265_ELEMENTS: [&str; 3] = ["rtph265depay", "h265parse", H265_DECODER];
 #[cfg(unix)]
 const DRM_FORMAT_NV12: u32 = 0x3231_564e;
 /// A stream that stops sending frames without an error counts as lost after this long.
+const RTSP_FORBIDDEN: u32 = 403;
 const STALL_TIMEOUT: Duration = Duration::from_secs(15);
 /// The first frame also waits for the RTSP handshake and for a key frame.
 const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(30);
@@ -82,6 +83,7 @@ extern "C" {
     fn rigel_decoder_context() -> *mut gst::ffi::GstContext;
     fn rigel_item_set_status(item: *mut c_void, has_video: bool, signal_lost: bool);
     fn rigel_item_auth_refused(item: *mut c_void);
+    fn rigel_item_denied(item: *mut c_void);
     fn rigel_item_position(item: *mut c_void, seconds: f64, attempt: i32);
     fn rigel_item_ended(item: *mut c_void, attempt: i32);
     fn rigel_item_failed(item: *mut c_void, attempt: i32);
@@ -100,6 +102,8 @@ pub struct Stretch {
     /// Seconds after the midnight of `date`.
     pub start: u32,
     pub without_rtsp: Arc<Mutex<HashSet<u32>>>,
+    /// Channels whose recordings the recorder doesn't let this user play.
+    pub denied: Arc<Mutex<HashSet<u32>>>,
 }
 
 /// Channels of a recorder whose live video comes from the camera.
@@ -203,6 +207,13 @@ impl Shared {
         let item = self.item.lock().unwrap();
         if *item != 0 {
             unsafe { rigel_item_auth_refused(*item as *mut c_void) };
+        }
+    }
+
+    fn report_denied(&self) {
+        let item = self.item.lock().unwrap();
+        if *item != 0 {
+            unsafe { rigel_item_denied(*item as *mut c_void) };
         }
     }
 }
@@ -340,6 +351,26 @@ fn run(shared: Arc<Shared>) {
                         .unwrap(),
                 );
             }
+            // The user has no permission on this channel, which trying again doesn't change and
+            // only adds logins to the log of the recorder. Its other channels go on.
+            Outcome::Denied => {
+                eprintln!("the recorder denied {}", source.url);
+                if let Some(stretch) = &source.stretch {
+                    stretch.denied.lock().unwrap().insert(stretch.channel);
+                }
+                shared.set_status(false, true);
+                shared.report_denied();
+                if source.recording {
+                    shared.report_ended(false, source.attempt);
+                }
+                let guard = shared.control.lock().unwrap();
+                drop(
+                    shared
+                        .changed
+                        .wait_while(guard, |c| !c.stop && c.revision == revision)
+                        .unwrap(),
+                );
+            }
             Outcome::Lost {
                 received_video,
                 reason,
@@ -378,6 +409,8 @@ fn run(shared: Arc<Shared>) {
 }
 
 enum Outcome {
+    /// The recorder knows the user and refused this channel.
+    Denied,
     /// The source changed or the stream was asked to stop.
     Changed,
     Refused,
@@ -403,6 +436,12 @@ impl Progress {
             waiting_keyframe: Arc::new(AtomicBool::new(true)),
         }
     }
+}
+
+/// The status of the RTSP answer behind an error of `rtspsrc`. Everything but 401 and 404 comes
+/// as the same generic error, with the status only here.
+fn rtsp_status(error: &gst::message::Error) -> Option<u32> {
+    error.details()?.get("rtsp-status-code").ok()
 }
 
 fn lost(reason: &str) -> Outcome {
@@ -556,6 +595,9 @@ fn watch(
                     gst::MessageView::Error(error) => {
                         if error.error().matches(gst::ResourceError::NotAuthorized) {
                             break Outcome::Refused;
+                        }
+                        if rtsp_status(error) == Some(RTSP_FORBIDDEN) {
+                            break Outcome::Denied;
                         }
                         if (source.stretch.is_some() || source.direct.is_some())
                             && !received_video.load(Ordering::Relaxed)
@@ -1060,4 +1102,55 @@ fn push_sample(shared: &Shared, sample: gst::Sample, generation: u64) -> Option<
     frame.owner = Box::into_raw(Box::new(sample)) as *mut c_void;
     unsafe { rigel_item_set_frame(*item as *mut c_void, &frame) };
     Some(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+
+    /// A recorder that answers every RTSP request with `status`.
+    fn fake_recorder(status: &'static str) -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let mut buffer = [0; 2048];
+                while let Ok(size) = stream.read(&mut buffer) {
+                    if size == 0 {
+                        break;
+                    }
+                    let request = String::from_utf8_lossy(&buffer[..size]);
+                    let sequence = request
+                        .lines()
+                        .find(|line| line.to_lowercase().starts_with("cseq"))
+                        .unwrap_or("CSeq: 1")
+                        .to_owned();
+                    let answer = format!("RTSP/1.0 {status}\r\n{sequence}\r\n\r\n");
+                    let _ = stream.write_all(answer.as_bytes());
+                }
+            }
+        });
+        port
+    }
+
+    #[test]
+    fn tells_the_status_of_a_refused_stream() {
+        gst::init().unwrap();
+        let port = fake_recorder("403 Forbidden");
+        let pipeline = gst::parse::launch(&format!(
+            "rtspsrc location=rtsp://127.0.0.1:{port}/cam ! fakesink"
+        ))
+        .unwrap();
+        pipeline.set_state(gst::State::Playing).unwrap();
+        let bus = pipeline.bus().unwrap();
+        let message = bus
+            .timed_pop_filtered(gst::ClockTime::from_seconds(10), &[gst::MessageType::Error])
+            .expect("an error from rtspsrc");
+        let gst::MessageView::Error(error) = message.view() else {
+            unreachable!();
+        };
+        assert_eq!(rtsp_status(error), Some(RTSP_FORBIDDEN));
+        pipeline.set_state(gst::State::Null).unwrap();
+    }
 }

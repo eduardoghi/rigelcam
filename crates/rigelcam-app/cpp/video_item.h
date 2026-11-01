@@ -36,6 +36,7 @@ int rigel_system_language();
 void rigel_install_translation(const unsigned char *data, int size);
 void rigel_item_set_frame(void *item, const RigelFrame *frame);
 void rigel_item_set_status(void *item, bool has_video, bool signal_lost);
+void rigel_item_denied(void *item);
 void rigel_item_auth_refused(void *item);
 void rigel_item_position(void *item, double seconds, int attempt);
 void rigel_item_ended(void *item, int attempt);
@@ -70,6 +71,7 @@ class VideoItem : public QQuickItem {
     Q_OBJECT
     Q_PROPERTY(bool hasVideo READ hasVideo NOTIFY statusChanged)
     Q_PROPERTY(bool signalLost READ signalLost NOTIFY statusChanged)
+    Q_PROPERTY(bool denied READ denied NOTIFY statusChanged)
     /// Part of the picture to show, in fractions of its size, which is how digital zoom works.
     Q_PROPERTY(QRectF view READ view WRITE setView NOTIFY viewChanged)
     /// Lifts the midtones above 1 and lowers them below it, keeping black and white in place.
@@ -80,11 +82,14 @@ public:
     void setFrame(const RigelFrame &frame);
     bool hasVideo() const { return m_hasVideo; }
     bool signalLost() const { return m_signalLost; }
+    bool denied() const { return m_denied; }
     QRectF view() const { return m_view; }
     void setView(const QRectF &view);
     qreal gamma() const { return m_gamma; }
     void setGamma(qreal gamma);
     Q_INVOKABLE void setStatus(bool hasVideo, bool signalLost);
+    /// The user has no permission on this channel. It lasts until the next status.
+    Q_INVOKABLE void setDenied();
     void setStream(void *stream, void (*destroy)(void *));
     void *stream() const { return m_stream; }
     /// Saves what the item shows in the pictures folder, at the resolution of the video and with
@@ -121,6 +126,7 @@ private:
     bool m_hasPending = false;
     bool m_hasVideo = false;
     bool m_signalLost = false;
+    bool m_denied = false;
     QRectF m_view{0, 0, 1, 1};
     qreal m_gamma = 1;
     void *m_stream = nullptr;

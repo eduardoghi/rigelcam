@@ -283,7 +283,7 @@ ApplicationWindow {
     readonly property int cols: gridLayout.columns
     readonly property int includedCount: gridKeys.filter(k => k !== null).length
     property int liveCount: 0
-    // State of each camera in the grid, by key, as "live", "lost" or "connecting".
+    // State of each camera in the grid, by key, as "live", "denied", "lost" or "connecting".
     property var cameraStatus: ({})
     // Key of the camera shown alone after a double click, or empty for the whole grid.
     signal photoRequested()
@@ -488,7 +488,8 @@ ApplicationWindow {
                 continue
             if (tile.hasVideo)
                 live++
-            status[tile.key] = tile.hasVideo ? "live" : tile.signalLost ? "lost" : "connecting"
+            status[tile.key] = tile.hasVideo ? "live" : tile.denied ? "denied"
+                : tile.signalLost ? "lost" : "connecting"
         }
         liveCount = live
         cameraStatus = status
@@ -1245,7 +1246,7 @@ ApplicationWindow {
                                             radius: 4
                                             color: cameraRow.isPlayback ? colors.accent
                                                  : cameraRow.status === "live" ? colors.live
-                                                 : cameraRow.status === "lost" ? colors.danger
+                                                 : cameraRow.status === "lost" || cameraRow.status === "denied" ? colors.danger
                                                  : cameraRow.status === "connecting" ? colors.waiting
                                                  : "transparent"
                                             border.color: cameraRow.onGrid && !win.inRecordings ? color : cameraRow.isPlayback ? colors.accent : colors.muted
@@ -1263,6 +1264,7 @@ ApplicationWindow {
                                     AppToolTip {
                                         visible: rowHover.hovered && !win.inRecordings
                                         text: cameraRow.status === "live" ? qsTr("Live")
+                                            : cameraRow.status === "denied" ? qsTr("No permission")
                                             : cameraRow.status === "lost" ? qsTr("No signal")
                                             : cameraRow.status === "connecting" ? qsTr("Connecting…")
                                             : qsTr("Outside the grid")
@@ -1367,7 +1369,8 @@ ApplicationWindow {
                         }
                         Text {
                             anchors.horizontalCenter: parent.horizontalCenter
-                            text: tile.signalLost ? qsTr("No signal") : qsTr("Connecting…")
+                            text: tile.denied ? qsTr("No permission")
+                                : tile.signalLost ? qsTr("No signal") : qsTr("Connecting…")
                             font.pixelSize: 12
                             color: colors.faint
                         }
@@ -2138,6 +2141,7 @@ ApplicationWindow {
                         font.pixelSize: 14
                         color: cell.failed || cell.searchError !== "" ? colors.danger : colors.muted
                         text: cell.searchError !== "" ? win.msg(cell.searchError)
+                            : video.denied ? qsTr("You don't have permission to see the recordings of this camera.")
                             : cell.failed ? qsTr("Could not open this recording. Try another time on the bar.")
                             : qsTr("No recording at this time.")
                     }

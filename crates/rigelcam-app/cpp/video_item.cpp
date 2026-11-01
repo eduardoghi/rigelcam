@@ -144,10 +144,16 @@ void VideoItem::savePhoto(const QString &name) {
     update();
 }
 
+void VideoItem::setDenied() {
+    m_denied = true;
+    emit statusChanged();
+}
+
 void VideoItem::setStatus(bool hasVideo, bool signalLost) {
-    if (m_hasVideo == hasVideo && m_signalLost == signalLost) return;
+    if (m_hasVideo == hasVideo && m_signalLost == signalLost && !m_denied) return;
     m_hasVideo = hasVideo;
     m_signalLost = signalLost;
+    m_denied = false;
     emit statusChanged();
     // Neither video nor a reconnection means the stream was stopped.
     if (!hasVideo && !signalLost) releaseVideo();
@@ -269,6 +275,10 @@ extern "C" void rigel_item_failed(void *item, int attempt) {
 
 extern "C" void rigel_item_auth_refused(void *item) {
     QMetaObject::invokeMethod(static_cast<VideoItem *>(item), "authRefused", Qt::QueuedConnection);
+}
+
+extern "C" void rigel_item_denied(void *item) {
+    QMetaObject::invokeMethod(static_cast<VideoItem *>(item), "setDenied", Qt::QueuedConnection);
 }
 
 extern "C" void rigel_item_set_status(void *item, bool has_video, bool signal_lost) {

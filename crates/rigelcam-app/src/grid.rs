@@ -298,6 +298,9 @@ struct Connection {
     gate: Arc<LoginGate>,
     /// Channels whose recordings answer 404 over RTSP, so they stop asking.
     without_rtsp: Arc<Mutex<HashSet<u32>>>,
+    /// Channels whose last playback the recorder denied. Exporting goes by this, so saving a
+    /// video takes the same permission as watching it.
+    denied_recordings: Arc<Mutex<HashSet<u32>>>,
     direct_cameras: Arc<DirectCameras>,
     sessions_refused: Arc<AtomicBool>,
 }
@@ -543,6 +546,7 @@ impl qobject::CameraGrid {
                         password,
                         gate: Arc::new(LoginGate::new(gate)),
                         without_rtsp: Arc::default(),
+                        denied_recordings: Arc::default(),
                         direct_cameras: Arc::default(),
                         sessions_refused: Arc::default(),
                     };
@@ -778,8 +782,22 @@ impl qobject::CameraGrid {
         };
         let waiting = self.exports.len() as i32;
         self.as_mut().set_exports_waiting(waiting);
-        let Some(connection) = self.connections.get(&(job.recorder as u64)).cloned() else {
-            let error = message("The recorder is not connected.", &[]);
+        let connection = self.connections.get(&(job.recorder as u64)).cloned();
+        let refusal = match &connection {
+            None => Some("The recorder is not connected."),
+            Some(connection)
+                if connection
+                    .denied_recordings
+                    .lock()
+                    .unwrap()
+                    .contains(&job.channel) =>
+            {
+                Some("You don't have permission to see the recordings of this camera.")
+            }
+            Some(_) => None,
+        };
+        let (Some(connection), None) = (connection, refusal) else {
+            let error = message(refusal.unwrap_or_default(), &[]);
             let none = QString::default();
             self.as_mut()
                 .export_finished(none.clone(), none, QString::from(error.as_str()));
@@ -914,6 +932,9 @@ impl qobject::CameraGrid {
         let Some(connection) = self.connections.get(&(recorder as u64)) else {
             return 0;
         };
+        // Each opening asks again, since a permission can change on the recorder.
+        let denied = connection.denied_recordings.clone();
+        denied.lock().unwrap().remove(&(channel as u32));
         let client = connection.client();
         let date = date.to_string();
         let url = client.playback_url(channel as u32, &date, seconds as u32);
@@ -931,6 +952,7 @@ impl qobject::CameraGrid {
                 date,
                 start: seconds as u32,
                 without_rtsp: connection.without_rtsp.clone(),
+                denied,
             })),
             direct: None,
         };

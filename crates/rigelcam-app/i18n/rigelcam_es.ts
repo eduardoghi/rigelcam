@@ -108,6 +108,14 @@
         <translation>Fuera de la cuadrícula</translation>
     </message>
     <message>
+        <source>No permission</source>
+        <translation>Sin permiso</translation>
+    </message>
+    <message>
+        <source>You don&apos;t have permission to see the recordings of this camera.</source>
+        <translation>No tienes permiso para ver las grabaciones de esta cámara.</translation>
+    </message>
+    <message>
         <source>No signal</source>
         <translation>Sin señal</translation>
     </message>

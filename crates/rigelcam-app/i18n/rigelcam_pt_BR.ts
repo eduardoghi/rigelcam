@@ -108,6 +108,14 @@
         <translation>Fora da grade</translation>
     </message>
     <message>
+        <source>No permission</source>
+        <translation>Sem permissão</translation>
+    </message>
+    <message>
+        <source>You don&apos;t have permission to see the recordings of this camera.</source>
+        <translation>Você não tem permissão para ver as gravações desta câmera.</translation>
+    </message>
+    <message>
         <source>No signal</source>
         <translation>Sem sinal</translation>
     </message>
