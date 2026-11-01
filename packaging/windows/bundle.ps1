@@ -15,8 +15,7 @@ $plugins = 'app', 'coreelements', 'd3d11', 'isomp4', 'rtp', 'rtpmanager', 'rtsp'
 
 $bin = Join-Path $Output 'bin'
 $pluginFolder = Join-Path $Output 'lib\gstreamer-1.0'
-$helperFolder = Join-Path $Output 'libexec\gstreamer-1.0'
-foreach ($folder in $bin, $pluginFolder, $helperFolder) {
+foreach ($folder in $bin, $pluginFolder) {
     New-Item -ItemType Directory -Force $folder | Out-Null
 }
 
@@ -30,7 +29,6 @@ if ($LASTEXITCODE -ne 0) { throw 'windeployqt failed' }
 foreach ($plugin in $plugins) {
     Copy-Item (Join-Path $Gstreamer "lib\gstreamer-1.0\gst$plugin.dll") $pluginFolder
 }
-Copy-Item (Join-Path $Gstreamer 'libexec\gstreamer-1.0\gst-plugin-scanner.exe') $helperFolder
 
 # Copies what each file links to, and then what those link to.
 $system = [Environment]::SystemDirectory

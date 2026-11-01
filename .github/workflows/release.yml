@@ -17,6 +17,8 @@ env:
   GSTREAMER_SHA256: e4c41ee6ee9c6c32a45d198463ec08d79bac3bd5fa58adc93d13fe4a08abc9d9
   QT_VERSION: 6.10.3
   AQTINSTALL_VERSION: 3.3.0
+  INNO_VERSION: 7.1.0
+  INNO_SHA256: 0362a383ed217d4c4239b5933866dd96d3eb2102737da92f80f6057a4b40df2f
 
 jobs:
   checks:
@@ -75,8 +77,7 @@ jobs:
           $process = Start-Process ".\$installer" -Wait -PassThru -ArgumentList `
             '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/DIR=C:\gstreamer'
           if ($process.ExitCode -ne 0) { throw "the GStreamer installer failed ($($process.ExitCode))" }
-          foreach ($file in 'bin\pkg-config.exe', 'lib\pkgconfig\gstreamer-d3d11-1.0.pc',
-                            'libexec\gstreamer-1.0\gst-plugin-scanner.exe') {
+          foreach ($file in 'bin\pkg-config.exe', 'lib\pkgconfig\gstreamer-d3d11-1.0.pc') {
             if (-not (Test-Path "C:\gstreamer\$file")) { throw "GStreamer came without $file" }
           }
       - name: install Qt
@@ -85,6 +86,19 @@ jobs:
           python -m pip install "aqtinstall==$env:AQTINSTALL_VERSION"
           python -m aqt install-qt windows desktop $env:QT_VERSION win64_msvc2022_64 --outputdir C:\Qt
           if ($LASTEXITCODE -ne 0) { throw 'aqt failed' }
+      - name: install Inno Setup
+        shell: pwsh
+        run: |
+          $installer = "innosetup-$env:INNO_VERSION-x64.exe"
+          $tag = 'is-' + $env:INNO_VERSION.Replace('.', '_')
+          Invoke-WebRequest -OutFile $installer `
+            "https://github.com/jrsoftware/issrc/releases/download/$tag/$installer"
+          if ((Get-FileHash $installer -Algorithm SHA256).Hash -ne $env:INNO_SHA256) {
+            throw 'the Inno Setup installer does not match its hash'
+          }
+          $process = Start-Process ".\$installer" -Wait -PassThru -ArgumentList `
+            '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/DIR=C:\innosetup'
+          if ($process.ExitCode -ne 0) { throw "the Inno Setup installer failed ($($process.ExitCode))" }
       - name: build and bundle
         shell: pwsh
         env:
@@ -102,10 +116,14 @@ jobs:
           cmd /c "`"$vcvars`" && cargo build --release --locked -p rigelcam-app && $bundle"
           if ($LASTEXITCODE -ne 0) { throw 'the build failed' }
           Compress-Archive rigelcam "rigelcam-$env:VERSION-windows-x64.zip"
+          & C:\innosetup\ISCC.exe "/DVersion=$env:VERSION" packaging\windows\rigelcam.iss
+          if ($LASTEXITCODE -ne 0) { throw 'the installer failed' }
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: windows
-          path: rigelcam-*-windows-x64.zip
+          path: |
+            rigelcam-*-windows-x64.zip
+            rigelcam-*-windows-x64-setup.exe
           if-no-files-found: error
 
   # Apart from the build, so nothing that compiles third-party code can write to the release or sign
@@ -128,16 +146,16 @@ jobs:
           merge-multiple: true
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
-          subject-path: assets/*.zip
+          subject-path: assets/rigelcam-*
       - name: upload to a draft, which is published by hand
         env:
           GH_TOKEN: ${{ github.token }}
         working-directory: assets
         run: |
-          sha256sum -- *.zip > SHA256SUMS.txt
+          sha256sum -- rigelcam-* > SHA256SUMS.txt
           tag="v$VERSION"
           if ! gh release view "$tag" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
             gh release create "$tag" --repo "$GITHUB_REPOSITORY" --draft --target "$GITHUB_SHA" \
               --title "Rigelcam $VERSION" --notes "Write the release notes here before publishing."
           fi
-          gh release upload "$tag" --repo "$GITHUB_REPOSITORY" --clobber -- *.zip SHA256SUMS.txt
+          gh release upload "$tag" --repo "$GITHUB_REPOSITORY" --clobber -- rigelcam-* SHA256SUMS.txt

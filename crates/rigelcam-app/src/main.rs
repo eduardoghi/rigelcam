@@ -1,3 +1,6 @@
+// A console would open beside the window on Windows.
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 mod camera_stream;
 mod export;
 mod grid;
@@ -16,6 +19,9 @@ extern "C" {
 
 fn main() {
     // Recorders sit on the local network, and rtspsrc would otherwise use the proxy of the system.
+    // Scanning the plugins in a process of its own would flash a console on Windows.
+    #[cfg(windows)]
+    std::env::set_var("GST_REGISTRY_FORK", "no");
     if std::env::var_os("GIO_USE_PROXY_RESOLVER").is_none() {
         std::env::set_var("GIO_USE_PROXY_RESOLVER", "dummy");
     }
