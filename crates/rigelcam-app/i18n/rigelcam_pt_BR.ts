@@ -200,6 +200,10 @@
         <translation>Faltam componentes do GStreamer para exibir vídeo (%1). Instale os plugins do GStreamer e o suporte a VA-API.</translation>
     </message>
     <message>
+        <source>This graphics card could not be set up to show video.</source>
+        <translation>Não foi possível preparar esta placa de vídeo para mostrar imagem.</translation>
+    </message>
+    <message>
         <source>H.265 cameras won't open because GStreamer components are missing (%1).</source>
         <translation>Câmeras H.265 não vão abrir porque faltam componentes do GStreamer (%1).</translation>
     </message>

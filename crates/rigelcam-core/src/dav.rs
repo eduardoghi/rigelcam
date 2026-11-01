@@ -17,9 +17,10 @@ const KEY_FRAME: u8 = 0xfd;
 const DELTA_FRAME: u8 = 0xfc;
 /// Above any real frame, so a false mark in the middle of the data can't hold the reader back.
 const MAX_FRAME_SIZE: usize = 16 * 1024 * 1024;
-/// Frames in a row that make a stretch real. The leftovers before it are a fraction of a block,
-/// which measured 5 frames, and they can't be told apart until the numbering breaks.
-const FRAMES_TO_TRUST: usize = 64;
+/// Unbroken video that makes a stretch real. The leftovers before it are a fraction of a block,
+/// which measured 5 frames, and they can't be told apart until the numbering breaks. It counts
+/// time and not frames, or a camera at few frames per second would lose whole events.
+const TIME_TO_TRUST_MS: u64 = 2_000;
 /// Time a frame takes when the one before it can't say, such as after a gap.
 const DEFAULT_STEP_MS: u64 = 50;
 /// A longer step is a pause in the recording, which the video skips.
@@ -151,9 +152,9 @@ impl Reader {
             .filter(|previous| position.number == previous.number.wrapping_add(1))
             .map(|previous| u64::from(position.milliseconds.wrapping_sub(previous.milliseconds)));
         // Dates pack the year down to the second in this order, so they compare as numbers. The
-        // same second out of sequence is the overlap between two requests.
-        let repeated = date == self.newest_date && step.is_none();
-        if self.trusted && (date < self.newest_date || repeated) {
+        // same second out of sequence is the overlap between two requests. In sequence the date
+        // doesn't count, since the clock of a camera can go back in the middle of good video.
+        if self.trusted && step.is_none() && date <= self.newest_date {
             return;
         }
         if step.is_none() {
@@ -176,7 +177,7 @@ impl Reader {
         } else {
             self.elapsed_ms = 0;
         }
-        self.newest_date = self.newest_date.max(date);
+        self.newest_date = date;
         let frame = Frame {
             key,
             elapsed_ms: self.elapsed_ms,
@@ -187,7 +188,7 @@ impl Reader {
             return;
         }
         self.held.push(frame);
-        if self.held.len() >= FRAMES_TO_TRUST {
+        if self.elapsed_ms >= TIME_TO_TRUST_MS {
             self.trusted = true;
             frames.append(&mut self.held);
         }
@@ -198,6 +199,8 @@ impl Reader {
 mod tests {
     use super::*;
 
+    /// Enough frames in a row, at the 50 ms of `run`, to be trusted.
+    const TRUSTED_RUN: usize = 64;
     const NOON: u32 = 1 << 26 | 10 << 22 | 31 << 17 | 12 << 12;
 
     fn frame(kind: u8, number: u32, date: u32, milliseconds: u16, payload: &[u8]) -> Vec<u8> {
@@ -220,7 +223,7 @@ mod tests {
     /// A key frame and then enough frames in a row to be trusted.
     fn run(first: u32, date: u32, start_ms: u16) -> Vec<u8> {
         let mut bytes = Vec::new();
-        for i in 0..FRAMES_TO_TRUST as u32 {
+        for i in 0..TRUSTED_RUN as u32 {
             let kind = if i == 0 { KEY_FRAME } else { DELTA_FRAME };
             let ms = start_ms.wrapping_add((i * 50) as u16);
             bytes.extend(frame(kind, first + i, date, ms, &i.to_le_bytes()));
@@ -239,7 +242,7 @@ mod tests {
     fn finds_frames_in_pieces_of_any_size() {
         let bytes = run(100, NOON, 0);
         let whole = read_all(&bytes);
-        assert_eq!(whole.len(), FRAMES_TO_TRUST);
+        assert_eq!(whole.len(), TRUSTED_RUN);
 
         let mut reader = Reader::new();
         let mut frames = Vec::new();
@@ -254,7 +257,7 @@ mod tests {
     fn skips_what_comes_before_the_first_frame() {
         let mut bytes = b"DHII some header DHAV and a false mark".to_vec();
         bytes.extend(run(100, NOON, 0));
-        assert_eq!(read_all(&bytes).len(), FRAMES_TO_TRUST);
+        assert_eq!(read_all(&bytes).len(), TRUSTED_RUN);
     }
 
     #[test]
@@ -277,7 +280,7 @@ mod tests {
         let mut bytes = frame(DELTA_FRAME, 99, NOON, 0, &[0]);
         bytes.extend(run(100, NOON, 50));
         let frames = read_all(&bytes);
-        assert_eq!(frames.len(), FRAMES_TO_TRUST);
+        assert_eq!(frames.len(), TRUSTED_RUN);
         assert!(frames[0].key);
     }
 
@@ -287,14 +290,14 @@ mod tests {
         bytes.extend(frame(DELTA_FRAME, 5_001, NOON - 4_096, 50, &[9]));
         bytes.extend(run(100, NOON, 0));
         let frames = read_all(&bytes);
-        assert_eq!(frames.len(), FRAMES_TO_TRUST);
+        assert_eq!(frames.len(), TRUSTED_RUN);
         assert_eq!(frames[0].data, 0u32.to_le_bytes());
     }
 
     #[test]
     fn leftovers_in_a_gap_are_dropped_and_the_gap_is_skipped() {
         let mut bytes = run(100, NOON, 0);
-        let end = 100 + FRAMES_TO_TRUST as u32;
+        let end = 100 + TRUSTED_RUN as u32;
         // Older frames in the place of the gap, with a key frame among them.
         bytes.extend(frame(KEY_FRAME, 7_000, NOON - 4_096, 0, &[9]));
         bytes.extend(frame(DELTA_FRAME, 7_001, NOON - 4_096, 50, &[9]));
@@ -304,22 +307,19 @@ mod tests {
         bytes.extend(frame(DELTA_FRAME, end + 902, NOON + 60, 100, &[6]));
 
         let frames = read_all(&bytes);
-        assert_eq!(frames.len(), FRAMES_TO_TRUST + 2);
-        let last = &frames[FRAMES_TO_TRUST - 1];
-        let after = &frames[FRAMES_TO_TRUST];
+        assert_eq!(frames.len(), TRUSTED_RUN + 2);
+        let last = &frames[TRUSTED_RUN - 1];
+        let after = &frames[TRUSTED_RUN];
         assert_eq!(after.data, [7]);
         assert_eq!(after.elapsed_ms - last.elapsed_ms, 50);
-        assert_eq!(
-            frames[FRAMES_TO_TRUST + 1].elapsed_ms - after.elapsed_ms,
-            50
-        );
+        assert_eq!(frames[TRUSTED_RUN + 1].elapsed_ms - after.elapsed_ms, 50);
     }
 
     #[test]
     fn a_second_request_that_overlaps_the_first_continues_it() {
         let numbered =
             |i: u32, kind: u8| frame(kind, 100 + i, NOON, (i * 50) as u16, &i.to_le_bytes());
-        let count = FRAMES_TO_TRUST as u32 + 10;
+        let count = TRUSTED_RUN as u32 + 10;
         let mut bytes = numbered(0, KEY_FRAME);
         for i in 1..count {
             bytes.extend(numbered(i, DELTA_FRAME));
@@ -341,21 +341,49 @@ mod tests {
     #[test]
     fn a_pause_inside_a_run_of_frames_is_skipped() {
         let mut bytes = run(100, NOON, 0);
-        let end = 100 + FRAMES_TO_TRUST as u32;
+        let end = 100 + TRUSTED_RUN as u32;
         bytes.extend(frame(DELTA_FRAME, end, NOON + 30, 40_000, &[1]));
         let frames = read_all(&bytes);
-        let last = &frames[FRAMES_TO_TRUST - 1];
-        assert_eq!(frames[FRAMES_TO_TRUST].elapsed_ms - last.elapsed_ms, 50);
+        let last = &frames[TRUSTED_RUN - 1];
+        assert_eq!(frames[TRUSTED_RUN].elapsed_ms - last.elapsed_ms, 50);
     }
 
     #[test]
     fn a_repeated_time_still_moves_forward() {
         let mut bytes = run(100, NOON, 0);
-        let end = 100 + FRAMES_TO_TRUST as u32;
-        let last_ms = (FRAMES_TO_TRUST as u16 - 1) * 50;
+        let end = 100 + TRUSTED_RUN as u32;
+        let last_ms = (TRUSTED_RUN as u16 - 1) * 50;
         bytes.extend(frame(DELTA_FRAME, end, NOON, last_ms, &[1]));
         let frames = read_all(&bytes);
-        assert!(frames[FRAMES_TO_TRUST].elapsed_ms > frames[FRAMES_TO_TRUST - 1].elapsed_ms);
+        assert!(frames[TRUSTED_RUN].elapsed_ms > frames[TRUSTED_RUN - 1].elapsed_ms);
+    }
+
+    #[test]
+    fn the_clock_of_the_camera_going_back_keeps_the_video() {
+        let mut bytes = run(100, NOON, 0);
+        let end = 100 + TRUSTED_RUN as u32;
+        let last_ms = (TRUSTED_RUN as u16 - 1) * 50;
+        for i in 0..20 {
+            bytes.extend(frame(
+                DELTA_FRAME,
+                end + i,
+                NOON - 3,
+                last_ms + 50 * (i as u16 + 1),
+                &i.to_le_bytes(),
+            ));
+        }
+        assert_eq!(read_all(&bytes).len(), TRUSTED_RUN + 20);
+    }
+
+    #[test]
+    fn a_short_event_at_few_frames_per_second_survives_the_next_break() {
+        // 3 seconds at 8 frames per second.
+        let mut bytes = frame(KEY_FRAME, 1, NOON, 0, &[1]);
+        for i in 1..24u16 {
+            bytes.extend(frame(DELTA_FRAME, u32::from(i) + 1, NOON, i * 125, &[1]));
+        }
+        bytes.extend(run(500, NOON + 60, 0));
+        assert_eq!(read_all(&bytes).len(), 24 + TRUSTED_RUN);
     }
 
     #[test]

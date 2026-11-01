@@ -2,6 +2,7 @@
 
 #include "video_item.h"
 
+#include <QtCore/QElapsedTimer>
 #include <QtCore/QMutex>
 #include <QtCore/QRectF>
 #include <QtCore/QUrl>
@@ -24,6 +25,21 @@ struct ItemLink {
     void report(const QUrl &file);
     /// Frames arrive but can't be shown, which the item has to stop presenting as live.
     void reportNoPicture();
+    void reportPicture();
+};
+
+/// Keeps an item told whether its frames can be shown. A failure is repeated because it can
+/// outlast a reconnection, which reports video again as soon as frames arrive.
+class PictureReport {
+public:
+    /// Returns true on the first failure in a row, which is the one worth logging.
+    bool failed(ItemLink &link);
+    void shown(ItemLink &link);
+
+private:
+    static constexpr qint64 kRepeatMs = 1000;
+    QElapsedTimer m_reported;
+    bool m_failing = false;
 };
 
 /// Encodes a photo off the render thread and reports the file.

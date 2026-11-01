@@ -154,6 +154,7 @@ public:
             }
             return;
         }
+        m_picture.shown(*m_link);
 
         const float w = float(m_rect.width()), h = float(m_rect.height());
         const float u0 = float(m_view.left()), u1 = float(m_view.right());
@@ -282,11 +283,9 @@ private:
         EGLImageKHR image = createImage(eglGetCurrentDisplay(), EGL_NO_CONTEXT, EGL_LINUX_DMA_BUF_EXT, nullptr, a);
         if (image == EGL_NO_IMAGE_KHR) {
             // Every frame of the stream fails the same way, so only the first one reaches the log.
-            if (!m_importFailed) {
-                m_link->reportNoPicture();
+            if (m_picture.failed(*m_link)) {
                 fprintf(stderr, "eglCreateImage failed with 0x%x for fourcc 0x%x and modifier 0x%llx\n", eglGetError(), fr.fourcc,
                         static_cast<unsigned long long>(fr.modifier));
-                m_importFailed = true;
             }
             return 0;
         }
@@ -306,7 +305,7 @@ private:
     QRectF m_rect;
     QRectF m_view{0, 0, 1, 1};
     float m_gamma = 1;
-    bool m_importFailed = false;
+    PictureReport m_picture;
 };
 
 } // namespace
@@ -324,3 +323,5 @@ void prepareGraphics() {
 }
 
 void prepareWindow(QQuickWindow *) {}
+
+extern "C" bool rigel_graphics_ready() { return true; }

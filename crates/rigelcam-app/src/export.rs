@@ -18,6 +18,9 @@ use rigelcam_core::dav::{Codec, Frame, Reader};
 use crate::camera_stream::missing_from;
 
 const ELEMENTS: [&str; 5] = ["appsrc", "h264parse", "h265parse", "mp4mux", "filesink"];
+/// How much video can wait for the disk before reading from the recorder pauses.
+const MAX_QUEUED_BYTES: u64 = 32 * 1024 * 1024;
+const QUEUE_CHECK_INTERVAL: Duration = Duration::from_millis(20);
 /// Added to each side, since a video can only start at a key frame and the recorder stops up to 2
 /// seconds short of the end. A longer video is better than one missing what was asked for.
 const MARGIN_SECONDS: u32 = 2;
@@ -139,12 +142,14 @@ impl Muxer {
             Codec::H264 => ("h264parse", "video/x-h264"),
             Codec::H265 => ("h265parse", "video/x-h265"),
         };
-        let description = format!(
-            "appsrc name=source format=time block=true max-bytes=33554432 \
-             ! {parser} ! mp4mux ! filesink name=sink"
-        );
+        let description =
+            format!("appsrc name=source format=time ! {parser} ! mp4mux ! filesink name=sink");
+        Self::open(&description, caps, path)
+    }
+
+    fn open(description: &str, caps: &str, path: &Path) -> Result<Self, Error> {
         let failed = |error: gst::glib::Error| Error::Write(error.to_string());
-        let pipeline = gst::parse::launch(&description)
+        let pipeline = gst::parse::launch(description)
             .map_err(failed)?
             .downcast::<gst::Pipeline>()
             .map_err(|_| Error::Write("not a pipeline".to_owned()))?;
@@ -167,12 +172,31 @@ impl Muxer {
         Ok(muxer)
     }
 
-    fn push(&self, frame: Frame) -> Result<(), Error> {
+    fn push(&self, frame: Frame, cancel: &AtomicBool) -> Result<(), Error> {
+        self.wait_for_room(cancel)?;
         let milliseconds = frame.elapsed_ms;
         self.source
             .push_buffer(buffer_of(frame, milliseconds))
             .map_err(|_| self.failure())?;
         Ok(())
+    }
+
+    /// `block=true` on `appsrc` would wait in a place that only ends when the pipeline stops, so
+    /// a full disk would hold the export forever, deaf to a cancellation.
+    fn wait_for_room(&self, cancel: &AtomicBool) -> Result<(), Error> {
+        let bus = self.pipeline.bus().expect("pipelines have a bus");
+        loop {
+            if let Some(message) = bus.pop_filtered(&[gst::MessageType::Error]) {
+                return Err(write_error(&message));
+            }
+            if self.source.current_level_bytes() < MAX_QUEUED_BYTES {
+                return Ok(());
+            }
+            if cancel.load(Ordering::Relaxed) {
+                return Err(Error::Cancelled);
+            }
+            std::thread::sleep(QUEUE_CHECK_INTERVAL);
+        }
     }
 
     /// Writes the index of the MP4, without which the file can't be played.
@@ -183,20 +207,26 @@ impl Muxer {
             gst::ClockTime::from_seconds(60),
             &[gst::MessageType::Eos, gst::MessageType::Error],
         );
-        match message.as_ref().map(|message| message.view()) {
-            Some(gst::MessageView::Eos(_)) => Ok(()),
-            Some(gst::MessageView::Error(error)) => Err(Error::Write(error.error().to_string())),
-            _ => Err(Error::Write("timed out".to_owned())),
+        match &message {
+            Some(message) if matches!(message.view(), gst::MessageView::Eos(_)) => Ok(()),
+            Some(message) => Err(write_error(message)),
+            None => Err(Error::Write("timed out".to_owned())),
         }
     }
 
     fn failure(&self) -> Error {
         let bus = self.pipeline.bus().expect("pipelines have a bus");
-        let message = bus.pop_filtered(&[gst::MessageType::Error]);
-        match message.as_ref().map(|message| message.view()) {
-            Some(gst::MessageView::Error(error)) => Error::Write(error.error().to_string()),
-            _ => Error::Write("the video could not be written".to_owned()),
+        match bus.pop_filtered(&[gst::MessageType::Error]) {
+            Some(message) => write_error(&message),
+            None => Error::Write("the video could not be written".to_owned()),
         }
+    }
+}
+
+fn write_error(message: &gst::Message) -> Error {
+    match message.view() {
+        gst::MessageView::Error(error) => Error::Write(error.error().to_string()),
+        _ => Error::Write("the video could not be written".to_owned()),
     }
 }
 
@@ -250,7 +280,7 @@ fn write(
         waiting = Duration::ZERO;
         for frame in reader.push(&piece) {
             last_time = frame.elapsed_ms;
-            feed(&mut muxer, frame, path)?;
+            feed(&mut muxer, frame, path, cancel)?;
         }
         if reported.elapsed() >= PROGRESS_INTERVAL {
             reported = Instant::now();
@@ -258,17 +288,22 @@ fn write(
         }
     }
     for frame in reader.finish() {
-        feed(&mut muxer, frame, path)?;
+        feed(&mut muxer, frame, path, cancel)?;
     }
     muxer.ok_or(Error::Empty)?.finish()
 }
 
-fn feed(muxer: &mut Option<Muxer>, frame: Frame, path: &Path) -> Result<(), Error> {
+fn feed(
+    muxer: &mut Option<Muxer>,
+    frame: Frame,
+    path: &Path,
+    cancel: &AtomicBool,
+) -> Result<(), Error> {
     if muxer.is_none() {
         // The first frame out of the reader is always a key frame.
         *muxer = Some(Muxer::new(frame.codec(), path)?);
     }
-    muxer.as_ref().expect("just created").push(frame)
+    muxer.as_ref().expect("just created").push(frame, cancel)
 }
 
 /// Saves a stretch and returns its path. Only a finished video gets the final name, so a file
@@ -293,4 +328,54 @@ pub fn run(
     std::fs::rename(&partial, &path).map_err(|error| Error::Write(error.to_string()))?;
     drop(guard);
     Ok(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn frame() -> Frame {
+        Frame {
+            key: true,
+            elapsed_ms: 0,
+            data: vec![0; 1024 * 1024],
+        }
+    }
+
+    fn muxer(pipeline: &str, path: &str) -> Muxer {
+        gst::init().unwrap();
+        Muxer::open(pipeline, "video/x-h264", Path::new(path)).unwrap()
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_full_disk_stops_the_export_with_its_error() {
+        let muxer = muxer(
+            "appsrc name=source format=time ! filesink name=sink",
+            "/dev/full",
+        );
+        let cancel = AtomicBool::new(false);
+        let result = (0..1_000).try_for_each(|_| muxer.push(frame(), &cancel));
+        assert!(matches!(result, Err(Error::Write(_))), "{result:?}");
+    }
+
+    #[test]
+    fn a_cancellation_gets_out_of_a_full_queue() {
+        // Each buffer takes 1 second, so the queue fills and stays full.
+        let muxer = muxer(
+            "appsrc name=source format=time ! identity sleep-time=1000000 \
+             ! filesink name=sink",
+            std::env::temp_dir()
+                .join(format!("rigelcam-test-{}", std::process::id()))
+                .to_str()
+                .unwrap(),
+        );
+        let cancel = AtomicBool::new(true);
+        let result = (0..100).try_for_each(|_| muxer.push(frame(), &cancel));
+        assert!(matches!(result, Err(Error::Cancelled)), "{result:?}");
+        drop(muxer);
+        let _ = std::fs::remove_file(
+            std::env::temp_dir().join(format!("rigelcam-test-{}", std::process::id())),
+        );
+    }
 }

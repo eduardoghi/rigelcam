@@ -32,6 +32,7 @@ pub mod qobject {
         #[qproperty(bool, form_busy, cxx_name = "formBusy")]
         #[qproperty(bool, ready)]
         #[qproperty(QString, exporting)]
+        #[qproperty(bool, export_running, cxx_name = "exportRunning")]
         #[qproperty(f64, export_progress, cxx_name = "exportProgress")]
         #[qproperty(i32, exports_waiting, cxx_name = "exportsWaiting")]
         type CameraGrid = super::CameraGridRust;
@@ -195,6 +196,7 @@ use std::time::Duration;
 
 use cxx_qt::{CxxQtThread, CxxQtType, Threading};
 use cxx_qt_lib::QString;
+use rigelcam_core::clips;
 use rigelcam_core::dahua::{Channel, Client, Error as RecorderError, LoginGate, Stream};
 use rigelcam_core::layout::{CameraId, Layout};
 use rigelcam_core::recorders::{
@@ -217,6 +219,7 @@ extern "C" {
         destroy: extern "C" fn(*mut c_void),
     );
     fn rigel_item_stream(item: *mut c_void) -> *mut c_void;
+    fn rigel_graphics_ready() -> bool;
 }
 
 extern "C" fn destroy_stream(stream: *mut c_void) {
@@ -304,6 +307,22 @@ impl Connection {
         client_for(&self.address, &self.user, &self.password)
             .with_session_memory(self.sessions_refused.clone())
     }
+
+    /// A client for work that isn't a stream, which also has to stop logging in after a refusal.
+    /// It can wait for the recorder, so it stays off the interface thread.
+    fn allowed_client(&self) -> Result<Client, RecorderError> {
+        if self.gate.allows() {
+            Ok(self.client())
+        } else {
+            Err(RecorderError::Unauthorized)
+        }
+    }
+
+    fn refuse_after(&self, error: &RecorderError) {
+        if matches!(error, RecorderError::Unauthorized) {
+            self.gate.refuse();
+        }
+    }
 }
 
 #[derive(Default)]
@@ -332,6 +351,7 @@ pub struct CameraGridRust {
     /// Held for as long as the app runs.
     instance: Option<InstanceLock>,
     exporting: QString,
+    export_running: bool,
     export_progress: f64,
     exports_waiting: i32,
     exports: VecDeque<Job>,
@@ -354,7 +374,10 @@ impl qobject::CameraGrid {
         self.as_mut().set_language(QString::from(code));
         self.as_mut().check_components();
         match lock_instance() {
-            Ok(Some(lock)) => self.as_mut().rust_mut().instance = Some(lock),
+            Ok(Some(lock)) => {
+                self.as_mut().rust_mut().instance = Some(lock);
+                std::thread::spawn(|| clips::remove_unfinished(&clips::folder()));
+            }
             Ok(None) => {
                 let text = message("Rigelcam is already open.", &[]);
                 self.set_error(QString::from(text.as_str()));
@@ -415,7 +438,10 @@ impl qobject::CameraGrid {
         let missing = missing_elements();
         let h265 = missing_h265_elements();
         let old = old_gstreamer();
-        let message = if let Some(version) = &old {
+        let graphics_ready = unsafe { rigel_graphics_ready() };
+        let message = if !graphics_ready {
+            message("This graphics card could not be set up to show video.", &[])
+        } else if let Some(version) = &old {
             message(
                 "GStreamer 1.24 or newer is needed to show video, and this system has %1.",
                 &[version],
@@ -435,7 +461,7 @@ impl qobject::CameraGrid {
             return;
         };
         self.as_mut()
-            .set_video_unavailable(!missing.is_empty() || old.is_some());
+            .set_video_unavailable(!graphics_ready || !missing.is_empty() || old.is_some());
         self.set_missing(QString::from(message.as_str()));
     }
 
@@ -665,8 +691,8 @@ impl qobject::CameraGrid {
         let date = date.to_string();
         let thread = self.qt_thread();
         std::thread::spawn(move || {
-            let client = connection.client();
-            let result = client.clock().and_then(|now| {
+            let result = connection.allowed_client().and_then(|client| {
+                let now = client.clock()?;
                 let day = if date.is_empty() {
                     now.split(' ').next().unwrap_or_default().to_owned()
                 } else {
@@ -675,6 +701,9 @@ impl qobject::CameraGrid {
                 let spans = client.recordings(channel as u32, &day)?;
                 Ok((now, day, spans))
             });
+            if let Err(error) = &result {
+                connection.refuse_after(error);
+            }
             let _ = thread.queue(move |mut grid: Pin<&mut qobject::CameraGrid>| {
                 if grid.searches.get(&(recorder, channel)) != Some(&search) {
                     return;
@@ -738,7 +767,7 @@ impl qobject::CameraGrid {
 
     /// One at a time, since each download takes as much of the recorder as it can give.
     fn start_next_export(mut self: Pin<&mut Self>) {
-        if !self.exporting.is_empty() {
+        if self.export_running {
             let waiting = self.exports.len() as i32;
             self.set_exports_waiting(waiting);
             return;
@@ -760,6 +789,7 @@ impl qobject::CameraGrid {
         self.as_mut().set_export_progress(0.0);
         self.as_mut()
             .set_exporting(QString::from(job.name.as_str()));
+        self.as_mut().set_export_running(true);
         let cancel = self.export_cancel.clone();
         let thread = self.qt_thread();
         std::thread::spawn(move || {
@@ -768,11 +798,17 @@ impl qobject::CameraGrid {
                     grid.set_export_progress(fraction);
                 });
             };
-            let client = Arc::new(connection.client());
-            let result = export::run(client, &job, &cancel, &mut progress);
+            let result = connection
+                .allowed_client()
+                .map_err(export::Error::from)
+                .and_then(|client| export::run(Arc::new(client), &job, &cancel, &mut progress));
+            if let Err(export::Error::Recorder(error)) = &result {
+                connection.refuse_after(error);
+            }
             let recorder = job.recorder;
             let _ = thread.queue(move |mut grid: Pin<&mut qobject::CameraGrid>| {
                 grid.as_mut().set_exporting(QString::default());
+                grid.as_mut().set_export_running(false);
                 grid.as_mut()
                     .rust_mut()
                     .export_cancel
@@ -811,13 +847,17 @@ impl qobject::CameraGrid {
         let search = latest.fetch_add(1, Ordering::Relaxed) + 1;
         let thread = self.qt_thread();
         std::thread::spawn(move || {
-            let client = connection.client();
+            let refused = |error: RecorderError| {
+                connection.refuse_after(&error);
+                report_refused(&thread, recorder);
+            };
+            let client = match connection.allowed_client() {
+                Ok(client) => client,
+                Err(error) => return refused(error),
+            };
             let today = match client.clock() {
                 Ok(now) => now.split(' ').next().unwrap_or_default().to_owned(),
-                Err(RecorderError::Unauthorized) => {
-                    report_refused(&thread, recorder);
-                    return;
-                }
+                Err(error @ RecorderError::Unauthorized) => return refused(error),
                 Err(_) => String::new(),
             };
             // From the end, which is what someone looking for a recent event wants first.
@@ -845,9 +885,8 @@ impl qobject::CameraGrid {
                     true
                 },
             );
-            if let Err(RecorderError::Unauthorized) = result {
-                report_refused(&thread, recorder);
-                return;
+            if let Err(error @ RecorderError::Unauthorized) = result {
+                return refused(error);
             }
             if result.is_ok() && latest.load(Ordering::Relaxed) == search {
                 let text = json!({"key": key, "days": days, "done": true}).to_string();
@@ -1108,8 +1147,13 @@ impl qobject::CameraGrid {
 
     fn recorder_refused(mut self: Pin<&mut Self>, id: i32) {
         let id = id as u64;
-        // Every camera of the recorder reports it, and only the first one counts.
-        if !self.connections.contains_key(&id) {
+        // Every camera of the recorder reports it and only the first one counts. A report from
+        // before the password was fixed finds a new gate, which nobody refused.
+        let refused = self
+            .connections
+            .get(&id)
+            .is_some_and(|connection| connection.gate.is_refused());
+        if !refused {
             return;
         }
         let message = message(REFUSED_MESSAGE, &[]);

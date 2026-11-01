@@ -36,6 +36,8 @@ const CONNECTION_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// More than any recorder holds, so that one that keeps answering full pages can't hold a search.
 const MAX_SEARCH_PAGES: usize = 1_000;
+/// What a session answers to the search of a day with nothing recorded.
+const SEARCH_FOUND_NOTHING: i64 = 285_409_284;
 const MAX_CHANNELS: usize = 512;
 const MAX_NAME_CHARS: usize = 120;
 
@@ -107,6 +109,10 @@ impl LoginGate {
     /// Stops all further logins, after a stream was refused.
     pub fn refuse(&self) {
         self.state.lock().unwrap().refused = true;
+    }
+
+    pub fn is_refused(&self) -> bool {
+        self.state.lock().unwrap().refused
     }
 
     /// Whether a stream may log in now. The lock stays held during the check, so cameras opening
@@ -505,14 +511,38 @@ fn login_hash(user: &str, password: &str, realm: &str, random: &str) -> String {
     ))
 }
 
-fn files_of(answer: &Value) -> Vec<RecordedFile> {
+fn session_error(answer: &Value) -> Error {
+    Error::Unexpected(answer.get("error").unwrap_or(&Value::Null).to_string())
+}
+
+fn answered_true(answer: &Value) -> bool {
+    answer.get("result").and_then(Value::as_bool) == Some(true)
+}
+
+/// Tells a day with nothing recorded from a search that failed, which would be remembered as an
+/// empty day.
+fn search_found_files(answer: &Value) -> Result<bool, Error> {
+    if answered_true(answer) {
+        return Ok(true);
+    }
+    match answer.pointer("/error/code").and_then(Value::as_i64) {
+        Some(SEARCH_FOUND_NOTHING) => Ok(false),
+        _ => Err(session_error(answer)),
+    }
+}
+
+/// The end of a list answers true with no files, so false can't be taken for it.
+fn files_of(answer: &Value) -> Result<Vec<RecordedFile>, Error> {
+    if !answered_true(answer) {
+        return Err(session_error(answer));
+    }
     let time = |file: &Value, field: &str| {
         file.get(field)
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_owned()
     };
-    answer
+    Ok(answer
         .pointer("/params/infos")
         .and_then(Value::as_array)
         .map(|files| {
@@ -528,7 +558,7 @@ fn files_of(answer: &Value) -> Vec<RecordedFile> {
                 })
                 .collect()
         })
-        .unwrap_or_default()
+        .unwrap_or_default())
 }
 
 /// A search on the recorder, closed when dropped because recorders allow few at a time.
@@ -571,7 +601,7 @@ impl<'a> Finder<'a> {
                 });
                 let params = json!({ "condition": condition });
                 let answer = session.call("mediaFileFind.findFile", params, object)?;
-                Ok(answer.get("result").and_then(Value::as_bool) == Some(true))
+                search_found_files(&answer)
             }
             Self::Cgi { client, object } => {
                 let path = format!(
@@ -594,7 +624,7 @@ impl<'a> Finder<'a> {
             Self::Session { session, object } => {
                 let params = json!({ "count": count });
                 let answer = session.call("mediaFileFind.findNextFile", params, object)?;
-                Ok(files_of(&answer))
+                files_of(&answer)
             }
             Self::Cgi { client, object } => {
                 let body = client.get(&format!(
@@ -949,16 +979,34 @@ mod tests {
 
     #[test]
     fn reads_the_files_of_a_session() {
-        let answer = json!({"params": {"found": 2, "infos": [
+        let answer = json!({"result": true, "params": {"found": 2, "infos": [
             {"StartTime": "2026-10-30 10:00:00", "EndTime": "2026-10-30 10:30:00", "Flags": ["Timing"]},
             {"StartTime": "2026-10-30 10:30:00", "EndTime": "2026-10-30 11:00:00", "Flags": ["Event"]},
         ]}});
-        let files = files_of(&answer);
+        let files = files_of(&answer).unwrap();
         assert_eq!(files.len(), 2);
         assert_eq!(files[0].start, "2026-10-30 10:00:00");
         assert!(!files[0].event);
         assert!(files[1].event);
-        assert!(files_of(&json!({"result": false})).is_empty());
+        assert!(
+            files_of(&json!({"result": true, "params": {"found": 0, "infos": null}}))
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_failed_search_is_not_an_empty_day() {
+        let empty = json!({"result": false, "error": {"code": 285409284, "message": ""}});
+        assert!(!search_found_files(&empty).unwrap());
+        assert!(search_found_files(&json!({"result": true})).unwrap());
+
+        let expired = json!({"result": false, "error": {"code": 287637505, "message": "Invalid"}});
+        assert!(matches!(
+            search_found_files(&expired),
+            Err(Error::Unexpected(_))
+        ));
+        assert!(matches!(files_of(&expired), Err(Error::Unexpected(_))));
     }
 
     #[test]
@@ -1034,6 +1082,28 @@ mod tests {
         assert!(tried <= 2, "{tried}");
         assert!(!gate.allows());
         assert_eq!(requests.load(Ordering::Relaxed), tried);
+    }
+
+    #[test]
+    fn searches_starting_together_spend_one_login_on_a_changed_password() {
+        let (port, requests) = fake_recorder(
+            b"HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Length: 0\r\n\
+              WWW-Authenticate: Digest realm=\"x\", qop=\"auth\", nonce=\"n\"\r\n\r\n",
+        );
+        let client = Client::new("127.0.0.1", "admin", "wrong").with_ports(port, 554);
+        let gate = Arc::new(LoginGate::new(client));
+        let searches: Vec<_> = (0..4)
+            .map(|_| {
+                let gate = gate.clone();
+                std::thread::spawn(move || gate.allows())
+            })
+            .collect();
+        for search in searches {
+            assert!(!search.join().unwrap());
+        }
+        assert!(gate.is_refused());
+        let tried = requests.load(Ordering::Relaxed);
+        assert!(tried <= 2, "{tried}");
     }
 
     #[test]

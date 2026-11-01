@@ -35,6 +35,21 @@ pub fn file_stem(camera: &str, date: &str, start: u32, end: u32) -> String {
     format!("{safe} {date} {} {}", clock(start), clock(end))
 }
 
+/// Removes videos left unfinished by a process that was killed, which only its `Drop` would clean
+/// up. Call it while holding the instance lock, since a running export looks the same.
+pub fn remove_unfinished(folder: &Path) {
+    let Ok(entries) = std::fs::read_dir(folder) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with('.') && name.ends_with(".part") {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
 /// The first `.mp4` name in a folder that doesn't overwrite anything.
 pub fn free_path(folder: &Path, stem: &str) -> PathBuf {
     let path = folder.join(format!("{stem}.mp4"));
@@ -50,6 +65,26 @@ pub fn free_path(folder: &Path, stem: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn removes_only_unfinished_videos() {
+        let folder =
+            std::env::temp_dir().join(format!("rigelcam-unfinished-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let path = |name: &str| folder.join(name);
+        for name in [
+            ".Patio 2026-10-31.123.part",
+            "Patio 2026-10-31.mp4",
+            "notes.part",
+        ] {
+            std::fs::write(path(name), b"x").unwrap();
+        }
+        remove_unfinished(&folder);
+        assert!(!path(".Patio 2026-10-31.123.part").exists());
+        assert!(path("Patio 2026-10-31.mp4").exists());
+        assert!(path("notes.part").exists());
+        std::fs::remove_dir_all(&folder).unwrap();
+    }
 
     #[test]
     fn names_a_file_with_the_camera_and_the_stretch() {

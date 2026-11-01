@@ -29,6 +29,7 @@ struct RigelFrame {
 
 void rigel_prepare_graphics();
 bool rigel_has_window();
+bool rigel_graphics_ready();
 void rigel_register_types();
 void rigel_set_app_identity();
 int rigel_system_language();

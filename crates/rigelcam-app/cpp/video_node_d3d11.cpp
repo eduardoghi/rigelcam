@@ -222,6 +222,7 @@ private:
             m_res->height = frame.height;
             m_res->fullRange = frame.full_range;
             m_res->matrix = frame.matrix;
+            m_picture.shown(*m_link);
         }
         gst_memory_unmap(memory, &info);
     }
@@ -242,11 +243,8 @@ private:
         desc.MiscFlags = 0;
         desc.CPUAccessFlags = 0;
         if (FAILED(g_device->CreateTexture2D(&desc, nullptr, &m_res->texture))) {
-            if (!m_failed) {
+            if (m_picture.failed(*m_link))
                 fprintf(stderr, "could not create a %ux%u video texture\n", desc.Width, desc.Height);
-                m_link->reportNoPicture();
-            }
-            m_failed = true;
             return;
         }
         m_res->textureWidth = desc.Width;
@@ -370,7 +368,7 @@ private:
     QRectF m_rect;
     QRectF m_view{0, 0, 1, 1};
     float m_gamma = 1;
-    bool m_failed = false;
+    PictureReport m_picture;
 };
 
 } // namespace
@@ -403,4 +401,8 @@ void prepareWindow(QQuickWindow *window) {
     if (g_device) window->setGraphicsDevice(QQuickGraphicsDevice::fromDeviceAndContext(g_device, g_context));
 }
 
-extern "C" GstContext *rigel_decoder_context() { return gst_d3d11_context_new(g_gstDevice); }
+extern "C" bool rigel_graphics_ready() { return g_gstDevice != nullptr; }
+
+extern "C" GstContext *rigel_decoder_context() {
+    return g_gstDevice ? gst_d3d11_context_new(g_gstDevice) : nullptr;
+}

@@ -290,7 +290,7 @@ ApplicationWindow {
     // Closing waits for the cancelled export, which removes its unfinished file.
     property bool closeAfterExport: false
     onClosing: close => {
-        if (grid.exporting === "")
+        if (!grid.exportRunning)
             return
         closeAfterExport = true
         grid.cancelExports()
@@ -298,8 +298,8 @@ ApplicationWindow {
     }
     Connections {
         target: grid
-        function onExportingChanged() {
-            if (win.closeAfterExport && grid.exporting === "")
+        function onExportRunningChanged() {
+            if (win.closeAfterExport && !grid.exportRunning)
                 win.close()
         }
         function onExportFinished(folder, file, error) {
@@ -333,7 +333,7 @@ ApplicationWindow {
     property string mode: "live"
     readonly property bool inRecordings: mode === "recordings"
     // Off while a popup is open, which takes these keys for itself.
-    readonly property bool playerKeys: inRecordings && playback.spans.length > 0 && !addDialog.visible && !removeDialog.visible
+    readonly property bool playerKeys: inRecordings && playback.spans.length > 0 && !addDialog.visible && !removeDialog.visible && !exportDialog.visible
         && !calendar.visible && !comboOpen && !gammaFocused
     property bool comboOpen: false
     property bool gammaFocused: false
@@ -1740,18 +1740,50 @@ ApplicationWindow {
                 .sort((a, b) => a.start - b.start)
         }
 
-        onRecordingsChanged: {
-            if (!recordings || !win.inRecordings || !win.isPlayback(recordings.recorder, recordings.channel))
-                return
-            const key = win.cameraKey(recordings.recorder, recordings.channel)
-            const refreshed = refreshing[key] === true
+        // A search that nobody waits for anymore would leave `loading` on for good.
+        function forgetSearch(key) {
             delete refreshing[key]
             const waiting = Object.assign({}, pending)
             delete waiting[key]
             pending = waiting
-            if (!refreshed && recordings.error)
-                errors = Object.assign({}, errors, { [key]: recordings.error })
-            if (!recordings.error) {
+            if (!loading)
+                requestedDate = ""
+        }
+
+        function clearError(key) {
+            if (errors[key] === undefined)
+                return
+            const others = Object.assign({}, errors)
+            delete others[key]
+            errors = others
+        }
+
+        function lastRecordedSecond() {
+            return Math.max(...spans.map(span => span.end))
+        }
+
+        // With every answer in, so the cameras of a day open together.
+        function startWhenReady() {
+            if (started || loading || spans.length === 0)
+                return
+            started = true
+            const end = lastRecordedSecond()
+            seek(date === today ? Math.max(spans[spans.length - 1].start, end - 60) : spans[0].start)
+        }
+
+        onRecordingsChanged: {
+            if (!recordings)
+                return
+            const key = win.cameraKey(recordings.recorder, recordings.channel)
+            const refreshed = refreshing[key] === true
+            forgetSearch(key)
+            if (!win.inRecordings || !win.isPlayback(recordings.recorder, recordings.channel))
+                return
+            if (recordings.error) {
+                if (!refreshed)
+                    errors = Object.assign({}, errors, { [key]: recordings.error })
+            } else {
+                clearError(key)
                 date = recordings.date
                 const now = recordings.now.split(" ")
                 today = now[0]
@@ -1760,16 +1792,10 @@ ApplicationWindow {
                 spansOf = Object.assign({}, spansOf, { [key]: recordings.spans })
                 updateSpans()
             }
-            if (!loading)
-                requestedDate = ""
-            // With every answer in, so the cameras of a day open together.
-            if (!started && !loading && spans.length > 0) {
-                started = true
-                const end = Math.max(...spans.map(span => span.end))
-                seek(date === today ? Math.max(spans[spans.length - 1].start, end - 60) : spans[0].start)
-            } else if (started) {
+            if (started)
                 syncCells()
-            }
+            else
+                startWhenReady()
         }
 
         function searchCamera(camera, day) {
@@ -1814,12 +1840,17 @@ ApplicationWindow {
             const cameras = win.playbackCameras.slice()
             cameras[slot] = null
             win.playbackCameras = cameras
+            const key = keyOf(camera)
             const others = Object.assign({}, spansOf)
-            delete others[keyOf(camera)]
+            delete others[key]
             spansOf = others
             updateSpans()
+            clearError(key)
+            forgetSearch(key)
             if (!win.playbackCamera)
                 clear()
+            else
+                startWhenReady()
         }
 
         function changeDay(day) {
@@ -1887,7 +1918,7 @@ ApplicationWindow {
         function togglePlaying() {
             if (!leadCell()) {
                 // After the last recording it starts the day over.
-                seek(position >= spans[spans.length - 1].end - 2 ? spans[0].start : position)
+                seek(position >= lastRecordedSecond() - 2 ? spans[0].start : position)
                 return
             }
             playing = !playing
@@ -1908,6 +1939,8 @@ ApplicationWindow {
                 if (!cell.recordedAt(position)) {
                     if (cell.streamOpen)
                         cell.close()
+                    // Its stream ended at this gap, and the next recording needs another one.
+                    cell.finished = false
                 } else if (!cell.streamOpen && !cell.failed && !cell.finished) {
                     cell.open(position)
                 } else if (cell !== lead && cell.drifted(position)) {
@@ -2698,7 +2731,7 @@ ApplicationWindow {
     }
 
     Rectangle {
-        visible: grid.exporting !== ""
+        visible: grid.exportRunning
         z: 10
         anchors.horizontalCenter: parent.horizontalCenter
         anchors.bottom: parent.bottom

@@ -60,6 +60,27 @@ void ItemLink::reportNoPicture() {
     if (item) QMetaObject::invokeMethod(item, "setStatus", Qt::QueuedConnection, Q_ARG(bool, false), Q_ARG(bool, true));
 }
 
+void ItemLink::reportPicture() {
+    QMutexLocker lock(&mutex);
+    if (item) QMetaObject::invokeMethod(item, "setStatus", Qt::QueuedConnection, Q_ARG(bool, true), Q_ARG(bool, false));
+}
+
+bool PictureReport::failed(ItemLink &link) {
+    const bool first = !m_failing;
+    if (first || m_reported.hasExpired(kRepeatMs)) {
+        link.reportNoPicture();
+        m_reported.start();
+    }
+    m_failing = true;
+    return first;
+}
+
+void PictureReport::shown(ItemLink &link) {
+    if (!m_failing) return;
+    m_failing = false;
+    link.reportPicture();
+}
+
 void savePhotoImage(const QImage &image, const QString &name, const std::shared_ptr<ItemLink> &link) {
     QThreadPool::globalInstance()->start([image, name, link] {
         const QString path = writePhoto(image, name);

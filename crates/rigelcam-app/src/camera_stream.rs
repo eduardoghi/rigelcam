@@ -513,20 +513,22 @@ fn watch(
         lost("could not start the pipeline")
     } else {
         loop {
-            {
+            let wanted = {
                 let control = shared.control.lock().unwrap();
                 if control.stop || control.revision != revision {
                     break Outcome::Changed;
                 }
-                if control.paused != paused {
-                    paused = control.paused;
-                    let state = if paused {
-                        gst::State::Paused
-                    } else {
-                        gst::State::Playing
-                    };
-                    let _ = pipeline.set_state(state);
-                }
+                control.paused
+            };
+            // Outside the lock, which the interface thread takes to change the source.
+            if wanted != paused {
+                paused = wanted;
+                let state = if paused {
+                    gst::State::Paused
+                } else {
+                    gst::State::Playing
+                };
+                let _ = pipeline.set_state(state);
             }
             if paused {
                 *last_frame.lock().unwrap() = Instant::now();
@@ -942,7 +944,11 @@ fn build_pipeline(
 #[cfg(windows)]
 fn share_decoder_device(pipeline: &gst::Pipeline) {
     use gst::glib::translate::from_glib_full;
-    let context: gst::Context = unsafe { from_glib_full(rigel_decoder_context()) };
+    let context = unsafe { rigel_decoder_context() };
+    if context.is_null() {
+        return;
+    }
+    let context: gst::Context = unsafe { from_glib_full(context) };
     pipeline.set_context(&context);
 }
 
