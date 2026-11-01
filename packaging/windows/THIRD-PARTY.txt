@@ -1,0 +1,7 @@
+This package includes Qt and GStreamer, loaded as separate DLLs, so they can be replaced by
+versions built by you.
+
+Qt is available under the GNU LGPL version 3. Source code is at https://download.qt.io/.
+
+GStreamer is available under the GNU LGPL version 2.1 or later. Some plugins have terms of their
+own. Source code is at https://gstreamer.freedesktop.org/src/.

@@ -1,0 +1,143 @@
+name: release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Two runs at once would upload to the same draft. The second one waits, and then stops at the check
+# for a published version if the first one went all the way.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  GSTREAMER_VERSION: 1.28.8
+  GSTREAMER_SHA256: e4c41ee6ee9c6c32a45d198463ec08d79bac3bd5fa58adc93d13fe4a08abc9d9
+  QT_VERSION: 6.10.3
+  AQTINSTALL_VERSION: 3.3.0
+
+jobs:
+  checks:
+    name: ready to release
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: read the version
+        id: version
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/rigelcam-app/Cargo.toml | head -1)
+          test -n "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      # Published versions can't change, so one that exists has to be bumped first.
+      - name: require a new version on main with CI passing
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          test "$GITHUB_REF" = refs/heads/main
+          passed=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml --commit "$GITHUB_SHA" \
+            --status success --json databaseId --jq length)
+          test "$passed" -ge 1
+          draft=$(gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" --json isDraft \
+            --jq .isDraft 2>/dev/null || echo true)
+          test "$draft" = true
+
+  windows:
+    name: build for Windows
+    needs: checks
+    runs-on: windows-2025
+    timeout-minutes: 90
+    env:
+      VERSION: ${{ needs.checks.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: install GStreamer
+        shell: pwsh
+        run: |
+          $installer = "gstreamer-1.0-msvc-x86_64-$env:GSTREAMER_VERSION.exe"
+          Invoke-WebRequest -OutFile $installer `
+            "https://gstreamer.freedesktop.org/data/pkg/windows/$env:GSTREAMER_VERSION/msvc/$installer"
+          if ((Get-FileHash $installer -Algorithm SHA256).Hash -ne $env:GSTREAMER_SHA256) {
+            throw 'the GStreamer installer does not match its hash'
+          }
+          $process = Start-Process ".\$installer" -Wait -PassThru -ArgumentList `
+            '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/DIR=C:\gstreamer'
+          if ($process.ExitCode -ne 0) { throw "the GStreamer installer failed ($($process.ExitCode))" }
+          foreach ($file in 'bin\pkg-config.exe', 'lib\pkgconfig\gstreamer-d3d11-1.0.pc',
+                            'libexec\gstreamer-1.0\gst-plugin-scanner.exe') {
+            if (-not (Test-Path "C:\gstreamer\$file")) { throw "GStreamer came without $file" }
+          }
+      - name: install Qt
+        shell: pwsh
+        run: |
+          python -m pip install "aqtinstall==$env:AQTINSTALL_VERSION"
+          python -m aqt install-qt windows desktop $env:QT_VERSION win64_msvc2022_64 --outputdir C:\Qt
+          if ($LASTEXITCODE -ne 0) { throw 'aqt failed' }
+      - name: build and bundle
+        shell: pwsh
+        env:
+          QMAKE: C:\Qt\${{ env.QT_VERSION }}\msvc2022_64\bin\qmake.exe
+          PKG_CONFIG: C:\gstreamer\bin\pkg-config.exe
+          PKG_CONFIG_PATH: C:\gstreamer\lib\pkgconfig
+          GSTREAMER_ROOT: C:\gstreamer
+        run: |
+          $qt = "C:\Qt\$env:QT_VERSION\msvc2022_64"
+          $env:PATH = "$qt\bin;C:\gstreamer\bin;$env:PATH"
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vcvars = Join-Path (& $vswhere -latest -property installationPath) 'VC\Auxiliary\Build\vcvars64.bat'
+          $bundle = "powershell -NoProfile -ExecutionPolicy Bypass -File packaging\windows\bundle.ps1 " +
+            "-Executable target\release\rigelcam.exe -Qt $qt -Gstreamer C:\gstreamer -Output rigelcam"
+          cmd /c "`"$vcvars`" && cargo build --release --locked -p rigelcam-app && $bundle"
+          if ($LASTEXITCODE -ne 0) { throw 'the build failed' }
+          Compress-Archive rigelcam "rigelcam-$env:VERSION-windows-x64.zip"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: windows
+          path: rigelcam-*-windows-x64.zip
+          if-no-files-found: error
+
+  # Apart from the build, so nothing that compiles third-party code can write to the release or sign
+  # in as this workflow.
+  draft:
+    name: create the draft
+    needs: [checks, windows]
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      VERSION: ${{ needs.checks.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: assets
+          merge-multiple: true
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: assets/*.zip
+      - name: upload to a draft, which is published by hand
+        env:
+          GH_TOKEN: ${{ github.token }}
+        working-directory: assets
+        run: |
+          sha256sum -- *.zip > SHA256SUMS.txt
+          tag="v$VERSION"
+          if ! gh release view "$tag" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release create "$tag" --repo "$GITHUB_REPOSITORY" --draft --target "$GITHUB_SHA" \
+              --title "Rigelcam $VERSION" --notes "Write the release notes here before publishing."
+          fi
+          gh release upload "$tag" --repo "$GITHUB_REPOSITORY" --clobber -- *.zip SHA256SUMS.txt
