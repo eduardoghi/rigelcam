@@ -54,6 +54,11 @@ fn main() {
     } else {
         "cpp/video_node_gles.cpp"
     };
+    // qt-build-utils runs qmlcachegen before qmltyperegistrar, so the QML would be compiled against
+    // the types of the previous build. A new property then crashes the app as it opens on Windows
+    // until the QML changes again. Without the file every build works like a clean one.
+    let types = "qt-build-utils/qml_modules/rigelcam/plugin.qmltypes";
+    let _ = std::fs::remove_file(Path::new(&std::env::var("OUT_DIR").unwrap()).join(types));
     let builder = CxxQtBuilder::new_qml_module(QmlModule::new("rigelcam").qml_file("qml/Main.qml"))
         .qt_module("Quick")
         .qrc("resources.qrc")
