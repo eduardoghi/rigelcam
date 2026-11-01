@@ -133,6 +133,8 @@ jobs:
     needs: [checks, windows]
     runs-on: ubuntu-26.04
     timeout-minutes: 15
+    # Holds the signing key, and only admits runs on main.
+    environment: release
     permissions:
       contents: write
       id-token: write
@@ -147,15 +149,37 @@ jobs:
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: assets/rigelcam-*
+      # The version goes in the signed comment, which keeps an old installer from being offered as
+      # a new one. The key is only on the disk for this step.
+      - name: sign the installer and write the manifest
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+        working-directory: assets
+        run: |
+          test -n "$MINISIGN_SECRET_KEY"
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends minisign
+          umask 077
+          key="$RUNNER_TEMP/minisign.key"
+          printf '%s\n' "$MINISIGN_SECRET_KEY" > "$key"
+          installer="rigelcam-$VERSION-windows-x64-setup.exe"
+          minisign -S -s "$key" -m "$installer" -x "$RUNNER_TEMP/installer.minisig" \
+            -t "rigelcam $VERSION"
+          rm -f "$key"
+          url="https://github.com/$GITHUB_REPOSITORY/releases/download/v$VERSION/$installer"
+          jq -n --arg version "$VERSION" --arg url "$url" \
+            --rawfile signature "$RUNNER_TEMP/installer.minisig" \
+            '{version: $version, url: $url, signature: $signature}' > latest.json
       - name: upload to a draft, which is published by hand
         env:
           GH_TOKEN: ${{ github.token }}
         working-directory: assets
         run: |
-          sha256sum -- rigelcam-* > SHA256SUMS.txt
+          sha256sum -- rigelcam-* latest.json > SHA256SUMS.txt
           tag="v$VERSION"
           if ! gh release view "$tag" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
             gh release create "$tag" --repo "$GITHUB_REPOSITORY" --draft --target "$GITHUB_SHA" \
               --title "Rigelcam $VERSION" --notes "Write the release notes here before publishing."
           fi
-          gh release upload "$tag" --repo "$GITHUB_REPOSITORY" --clobber -- rigelcam-* SHA256SUMS.txt
+          gh release upload "$tag" --repo "$GITHUB_REPOSITORY" --clobber -- rigelcam-* latest.json \
+            SHA256SUMS.txt

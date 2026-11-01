@@ -66,6 +66,10 @@ rede dele, use uma VPN.
 As senhas dos gravadores ficam no cofre de senhas do sistema (Secret Service no Linux, Gerenciador
 de Credenciais no Windows) e nunca são gravadas em arquivos de configuração nem em logs.
 
+No Windows, o app consulta a última versão no GitHub ao abrir e mostra um aviso se houver uma nova.
+Nada é baixado sem você pedir, e um instalador só roda se a assinatura for válida. Para desligar a
+consulta, use `"check_updates": false` em `recorders.json`.
+
 O tráfego de vídeo e HTTP não é criptografado, então mantenha os gravadores numa rede confiável. A
 biblioteca de RTSP responde a um servidor que peça autenticação Basic, que envia a senha de forma
 reversível. Os gravadores usam Digest, e o risco é um aparelho na rede se passar por um deles.

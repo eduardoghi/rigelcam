@@ -5,6 +5,8 @@ mod camera_stream;
 mod export;
 mod grid;
 mod i18n;
+#[cfg(windows)]
+mod update;
 
 use rigelcam_core::recorders::RecorderList;
 

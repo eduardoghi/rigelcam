@@ -116,6 +116,26 @@
         <translation>Você não tem permissão para ver as gravações desta câmera.</translation>
     </message>
     <message>
+        <source>Version %1 is available.</source>
+        <translation>A versão %1 está disponível.</translation>
+    </message>
+    <message>
+        <source>Downloading version %1</source>
+        <translation>Baixando a versão %1</translation>
+    </message>
+    <message>
+        <source>Not now</source>
+        <translation>Agora não</translation>
+    </message>
+    <message>
+        <source>Update</source>
+        <translation>Atualizar</translation>
+    </message>
+    <message>
+        <source>Could not update Rigelcam (%1).</source>
+        <translation>Não foi possível atualizar o Rigelcam (%1).</translation>
+    </message>
+    <message>
         <source>No signal</source>
         <translation>Sem sinal</translation>
     </message>

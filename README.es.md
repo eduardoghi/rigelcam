@@ -71,6 +71,10 @@ Las contraseñas de los grabadores se guardan en el almacén del sistema (Secret
 Administrador de credenciales en Windows) y nunca se escriben en archivos de configuración ni en
 registros.
 
+En Windows, la aplicación consulta la última versión en GitHub al abrirse y muestra un aviso si hay
+una nueva. No se descarga nada hasta que lo pida, y un instalador solo se ejecuta si su firma es
+válida. Para desactivar la consulta, use `"check_updates": false` en `recorders.json`.
+
 El tráfico de video y HTTP no está cifrado, así que mantenga los grabadores en una red de confianza.
 La biblioteca de RTSP responde a un servidor que pida autenticación Basic, que envía la contraseña
 de forma reversible. Los grabadores usan Digest, y el riesgo es un equipo de la red que se haga

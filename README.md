@@ -66,6 +66,10 @@ from outside its network.
 Recorder passwords are kept in the system keyring (Secret Service on Linux, Credential Manager on
 Windows) and never written to config files or logs.
 
+On Windows the app asks GitHub for the latest version when it opens, and shows a notice if there
+is one. Nothing is downloaded until you ask, and an installer only runs if its signature is valid.
+Set `"check_updates": false` in `recorders.json` to turn the check off.
+
 Video and HTTP traffic is not encrypted, so keep recorders on a trusted network. The RTSP library
 answers a server that asks for Basic authentication, which sends the password in a reversible form.
 Recorders use Digest, and the risk is a device on the network pretending to be one.

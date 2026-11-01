@@ -199,6 +199,9 @@ struct Saved {
     /// "light" or "dark", or nothing to follow the system.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     theme: Option<String>,
+    /// `false` keeps the app from asking GitHub for new versions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    check_updates: Option<bool>,
 }
 
 pub struct RecorderList<S: Secrets> {
@@ -391,6 +394,10 @@ impl<S: Secrets> RecorderList<S> {
     pub fn set_language(&mut self, language: &str) -> Result<(), Error> {
         self.saved.language = Some(language.to_owned());
         self.write()
+    }
+
+    pub fn checks_for_updates(&self) -> bool {
+        self.saved.check_updates != Some(false)
     }
 
     pub fn theme(&self) -> Option<&str> {

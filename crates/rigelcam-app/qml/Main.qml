@@ -361,6 +361,9 @@ ApplicationWindow {
             if (win.closeAfterExport && !grid.exportRunning)
                 win.close()
         }
+        function onUpdateStarted() {
+            Qt.quit()
+        }
         function onExportFinished(folder, file, error) {
             photoToast.showVideo(folder, file, error)
         }
@@ -2791,6 +2794,65 @@ ApplicationWindow {
                 text: qsTr("Open folder")
                 edge: colors.line
                 onClicked: Qt.openUrlExternally(photoToast.folder)
+            }
+        }
+    }
+
+    Rectangle {
+        // Closed for this session with "Not now". The next start offers it again.
+        property bool dismissed: false
+        visible: grid.updateVersion !== "" && !dismissed
+        z: 10
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
+        anchors.margins: 20
+        width: Math.min(420, parent.width - 32)
+        height: updateLayout.implicitHeight + 24
+        radius: 9
+        color: colors.panel
+        border.color: colors.line
+        ColumnLayout {
+            id: updateLayout
+            anchors.fill: parent
+            anchors.margins: 12
+            spacing: 8
+            Text {
+                Layout.fillWidth: true
+                wrapMode: Text.WordWrap
+                textFormat: Text.PlainText
+                font.pixelSize: 13
+                color: grid.updateError !== "" ? colors.danger : colors.text
+                text: grid.updateError !== "" ? win.msg(grid.updateError)
+                    : grid.updateRunning ? qsTr("Downloading version %1").arg(grid.updateVersion)
+                        + "  " + Math.round(grid.updateProgress * 100) + "%"
+                    : qsTr("Version %1 is available.").arg(grid.updateVersion)
+            }
+            Rectangle {
+                visible: grid.updateRunning
+                Layout.fillWidth: true
+                implicitHeight: 4
+                radius: 2
+                color: colors.line
+                Rectangle {
+                    width: parent.width * grid.updateProgress
+                    height: parent.height
+                    radius: 2
+                    color: colors.accent
+                }
+            }
+            RowLayout {
+                visible: !grid.updateRunning
+                Layout.alignment: Qt.AlignRight
+                spacing: 8
+                AppButton {
+                    text: qsTr("Not now")
+                    edge: colors.line
+                    onClicked: parent.parent.parent.dismissed = true
+                }
+                PrimaryButton {
+                    text: qsTr("Update")
+                    onClicked: grid.installUpdate()
+                }
             }
         }
     }

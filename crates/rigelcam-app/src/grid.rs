@@ -33,6 +33,10 @@ pub mod qobject {
         #[qproperty(bool, ready)]
         #[qproperty(QString, exporting)]
         #[qproperty(bool, export_running, cxx_name = "exportRunning")]
+        #[qproperty(QString, update_version, cxx_name = "updateVersion")]
+        #[qproperty(f64, update_progress, cxx_name = "updateProgress")]
+        #[qproperty(bool, update_running, cxx_name = "updateRunning")]
+        #[qproperty(QString, update_error, cxx_name = "updateError")]
         #[qproperty(f64, export_progress, cxx_name = "exportProgress")]
         #[qproperty(i32, exports_waiting, cxx_name = "exportsWaiting")]
         type CameraGrid = super::CameraGridRust;
@@ -145,6 +149,16 @@ pub mod qobject {
             end: i32,
         );
 
+        /// Downloads and starts the version in `updateVersion`, then `updateStarted` asks the app
+        /// to close, so the installer can replace its files.
+        #[qinvokable]
+        #[cxx_name = "installUpdate"]
+        fn install_update(self: Pin<&mut Self>);
+
+        #[qsignal]
+        #[cxx_name = "updateStarted"]
+        fn update_started(self: Pin<&mut Self>);
+
         #[qinvokable]
         #[cxx_name = "cancelExports"]
         fn cancel_exports(self: Pin<&mut Self>);
@@ -211,6 +225,8 @@ use crate::camera_stream::{
 };
 use crate::export::{self, Job};
 use crate::i18n::{self, message};
+#[cfg(windows)]
+use crate::update;
 
 extern "C" {
     fn rigel_item_set_stream(
@@ -355,6 +371,12 @@ pub struct CameraGridRust {
     instance: Option<InstanceLock>,
     exporting: QString,
     export_running: bool,
+    update_version: QString,
+    update_progress: f64,
+    update_running: bool,
+    update_error: QString,
+    #[cfg(windows)]
+    update: Option<Arc<rigelcam_core::update::Manifest>>,
     export_progress: f64,
     exports_waiting: i32,
     exports: VecDeque<Job>,
@@ -404,8 +426,65 @@ impl qobject::CameraGrid {
         }
     }
 
+    #[cfg(windows)]
+    fn check_for_update(self: Pin<&mut Self>) {
+        let thread = self.qt_thread();
+        std::thread::spawn(move || {
+            update::remove_old_installers();
+            let Some(manifest) = update::check() else {
+                return;
+            };
+            let _ = thread.queue(move |mut grid: Pin<&mut qobject::CameraGrid>| {
+                let version = QString::from(manifest.version.as_str());
+                grid.as_mut().rust_mut().update = Some(Arc::new(manifest));
+                grid.set_update_version(version);
+            });
+        });
+    }
+
+    #[cfg(not(windows))]
+    fn check_for_update(self: Pin<&mut Self>) {}
+
+    #[cfg(windows)]
+    fn install_update(mut self: Pin<&mut Self>) {
+        let Some(manifest) = self.update.clone().filter(|_| !self.update_running) else {
+            return;
+        };
+        self.as_mut().set_update_error(QString::default());
+        self.as_mut().set_update_progress(0.0);
+        self.as_mut().set_update_running(true);
+        let thread = self.qt_thread();
+        std::thread::spawn(move || {
+            let mut progress = |fraction: f64| {
+                let _ = thread.queue(move |grid: Pin<&mut qobject::CameraGrid>| {
+                    grid.set_update_progress(fraction);
+                });
+            };
+            let result = update::install(&manifest, &mut progress);
+            let _ = thread.queue(move |mut grid: Pin<&mut qobject::CameraGrid>| {
+                grid.as_mut().set_update_running(false);
+                match result {
+                    Ok(()) => grid.update_started(),
+                    Err(error) => {
+                        let text = message("Could not update Rigelcam (%1).", &[&error]);
+                        grid.set_update_error(QString::from(text.as_str()));
+                    }
+                }
+            });
+        });
+    }
+
+    /// No notice offers an update outside Windows, so this only closes the signal in the bridge.
+    #[cfg(not(windows))]
+    fn install_update(self: Pin<&mut Self>) {
+        self.update_started();
+    }
+
     fn adopt_list(mut self: Pin<&mut Self>, list: RecorderList<SystemKeyring>) {
         self.as_mut().set_ready(true);
+        if list.checks_for_updates() {
+            self.as_mut().check_for_update();
+        }
         let ids: Vec<u64> = list.recorders().iter().map(|r| r.id).collect();
         let layout = list.layout().cloned();
         let collapsed = list.sidebar_collapsed();

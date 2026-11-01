@@ -48,3 +48,11 @@ Name: "{autodesktop}\Rigelcam"; Filename: "{app}\bin\rigelcam.exe"; IconFilename
 
 [Run]
 Filename: "{app}\bin\rigelcam.exe"; Description: "{cm:LaunchProgram,Rigelcam}"; Flags: nowait postinstall skipifsilent
+; The app closed itself to start this update, so it comes back at the end.
+Filename: "{app}\bin\rigelcam.exe"; Flags: nowait; Check: IsUpdate
+
+[Code]
+function IsUpdate: Boolean;
+begin
+  Result := ExpandConstant('{param:update|0}') = '1';
+end;

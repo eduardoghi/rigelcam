@@ -5,3 +5,4 @@ pub mod dahua;
 pub mod dav;
 pub mod layout;
 pub mod recorders;
+pub mod update;
