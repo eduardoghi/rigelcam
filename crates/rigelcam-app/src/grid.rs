@@ -23,6 +23,7 @@ pub mod qobject {
         #[qproperty(bool, sidebar_collapsed, cxx_name = "sidebarCollapsed")]
         #[qproperty(QString, theme)]
         #[qproperty(QString, language)]
+        #[qproperty(QString, app_version, cxx_name = "appVersion")]
         #[qproperty(QString, error)]
         #[qproperty(bool, list_corrupted, cxx_name = "listCorrupted")]
         #[qproperty(QString, notice)]
@@ -359,6 +360,7 @@ pub struct CameraGridRust {
     sidebar_collapsed: bool,
     theme: QString,
     language: QString,
+    app_version: QString,
     error: QString,
     list_corrupted: bool,
     notice: QString,
@@ -392,6 +394,8 @@ pub struct CameraGridRust {
 
 impl qobject::CameraGrid {
     fn load(mut self: Pin<&mut Self>) {
+        self.as_mut()
+            .set_app_version(QString::from(env!("CARGO_PKG_VERSION")));
         // The translator is already in place, from before QML started.
         let saved = RecorderList::open_default().ok();
         let language = saved.as_ref().and_then(|list| list.language());

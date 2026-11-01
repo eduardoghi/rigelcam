@@ -136,6 +136,26 @@
         <translation>No se pudo actualizar Rigelcam (%1).</translation>
     </message>
     <message>
+        <source>About Rigelcam</source>
+        <translation>Acerca de Rigelcam</translation>
+    </message>
+    <message>
+        <source>Version %1</source>
+        <translation>Versión %1</translation>
+    </message>
+    <message>
+        <source>Live cameras and recordings from Intelbras and Dahua recorders.</source>
+        <translation>Cámaras en vivo y grabaciones de grabadores Intelbras y Dahua.</translation>
+    </message>
+    <message>
+        <source>Open source under the MIT license. An independent project, not affiliated with Intelbras or Dahua.</source>
+        <translation>Código abierto bajo la licencia MIT. Proyecto independiente, sin vínculo con Intelbras ni Dahua.</translation>
+    </message>
+    <message>
+        <source>What&apos;s new</source>
+        <translation>Novedades</translation>
+    </message>
+    <message>
         <source>No signal</source>
         <translation>Sin señal</translation>
     </message>

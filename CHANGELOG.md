@@ -4,6 +4,10 @@ User-visible changes, newest first.
 
 ## [Unreleased]
 
+### Added
+
+- An About window with the installed version and links to the releases and to the repository.
+
 ## [0.1.1] (2026-11-01)
 
 ### Added

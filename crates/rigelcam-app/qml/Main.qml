@@ -18,6 +18,7 @@ ApplicationWindow {
     QtObject {
         id: colors
         readonly property bool dark: grid.theme ? grid.theme === "dark" : Qt.styleHints.colorScheme !== Qt.Light
+        readonly property url logo: dark ? "qrc:/rigelcam/logo.svg" : "qrc:/rigelcam/logo-light.svg"
         readonly property color page: dark ? "#0B101C" : "#E9EEF6"
         readonly property color bar: dark ? "#0F1626" : "#FFFFFF"
         readonly property color surface: dark ? "#121B2F" : "#F5F8FC"
@@ -643,7 +644,7 @@ ApplicationWindow {
             }
 
             Image {
-                source: colors.dark ? "qrc:/rigelcam/logo.svg" : "qrc:/rigelcam/logo-light.svg"
+                source: colors.logo
                 fillMode: Image.PreserveAspectFit
                 Layout.preferredHeight: 30
                 Layout.preferredWidth: 130
@@ -711,6 +712,21 @@ ApplicationWindow {
             }
 
             AppButton {
+                id: aboutButton
+                display: AbstractButton.IconOnly
+                icon.source: "qrc:/rigelcam/icons/info.svg"
+                text: qsTr("About Rigelcam")
+                implicitWidth: 34
+                leftPadding: 9
+                rightPadding: 9
+                onClicked: aboutDialog.open()
+                AppToolTip {
+                    visible: aboutButton.hovered
+                    text: aboutButton.text
+                }
+            }
+
+            AppButton {
                 id: themeButton
                 display: AbstractButton.IconOnly
                 icon.source: colors.dark ? "qrc:/rigelcam/icons/sun.svg" : "qrc:/rigelcam/icons/moon.svg"
@@ -737,6 +753,68 @@ ApplicationWindow {
                 AppToolTip {
                     visible: fullScreenButton.hovered
                     text: fullScreenButton.text
+                }
+            }
+        }
+    }
+
+    AppDialog {
+        id: aboutDialog
+        readonly property string repository: "https://github.com/eduardoghi/rigelcam"
+        title: qsTr("About Rigelcam")
+        // The logo already carries the name.
+        header: null
+        topPadding: 24
+        width: Math.min(400, parent.width - 32)
+        ColumnLayout {
+            anchors.fill: parent
+            spacing: 14
+            Image {
+                source: colors.logo
+                fillMode: Image.PreserveAspectFit
+                Layout.alignment: Qt.AlignHCenter
+                Layout.preferredHeight: 48
+                Layout.preferredWidth: 211
+                sourceSize.height: 96
+            }
+            Label {
+                Layout.alignment: Qt.AlignHCenter
+                textFormat: Text.PlainText
+                font.pixelSize: 14
+                font.weight: Font.Medium
+                color: colors.text
+                text: qsTr("Version %1").arg(grid.appVersion)
+            }
+            Label {
+                Layout.fillWidth: true
+                wrapMode: Text.WordWrap
+                textFormat: Text.PlainText
+                horizontalAlignment: Text.AlignHCenter
+                font.pixelSize: 13
+                color: colors.muted
+                text: qsTr("Live cameras and recordings from Intelbras and Dahua recorders.")
+            }
+            Label {
+                Layout.fillWidth: true
+                wrapMode: Text.WordWrap
+                textFormat: Text.PlainText
+                horizontalAlignment: Text.AlignHCenter
+                font.pixelSize: 13
+                color: colors.muted
+                text: qsTr("Open source under the MIT license. An independent project, not affiliated with Intelbras or Dahua.")
+            }
+            RowLayout {
+                Layout.alignment: Qt.AlignHCenter
+                Layout.topMargin: 4
+                spacing: 8
+                AppButton { text: qsTr("Close"); onClicked: aboutDialog.close() }
+                AppButton {
+                    text: qsTr("What's new")
+                    onClicked: Qt.openUrlExternally(aboutDialog.repository + "/releases")
+                }
+                PrimaryButton {
+                    text: "GitHub"
+                    onClicked: Qt.openUrlExternally(aboutDialog.repository)
                 }
             }
         }
