@@ -27,21 +27,26 @@ fn agent() -> ureq::Agent {
         .into()
 }
 
-/// The latest release, if it is newer than this app. Any failure counts as no update, since a
-/// computer without internet is normal here.
-pub fn check() -> Option<Manifest> {
+fn latest() -> Result<Manifest, String> {
     let text = agent()
         .get(LATEST)
         .call()
-        .ok()?
-        .body_mut()
-        .read_to_string()
-        .ok()?;
-    parse_manifest(&text).filter(|manifest| is_newer(&manifest.version, env!("CARGO_PKG_VERSION")))
+        .and_then(|mut response| response.body_mut().read_to_string())
+        .map_err(|error| error.to_string())?;
+    parse_manifest(&text).ok_or_else(|| "the manifest is not valid".to_owned())
 }
 
-/// Downloads the installer, checks it and starts it. Nothing runs unless the signature holds.
-pub fn install(manifest: &Manifest, progress: &mut dyn FnMut(f64)) -> Result<(), String> {
+/// The latest release, if it is newer than this app. No update isn't worth a message, since a
+/// computer without internet, or behind a proxy it doesn't trust, is normal here.
+pub fn check() -> Option<Manifest> {
+    latest()
+        .inspect_err(|error| eprintln!("could not check for updates ({error})"))
+        .ok()
+        .filter(|manifest| is_newer(&manifest.version, env!("CARGO_PKG_VERSION")))
+}
+
+/// Downloads an installer and returns it only if its signature holds.
+fn download(manifest: &Manifest, progress: &mut dyn FnMut(f64)) -> Result<Vec<u8>, String> {
     let failed = |error: &dyn std::fmt::Display| error.to_string();
     let response = agent().get(&manifest.url).call().map_err(|e| failed(&e))?;
     let total = response
@@ -64,6 +69,13 @@ pub fn install(manifest: &Manifest, progress: &mut dyn FnMut(f64)) -> Result<(),
     if !verify(&installer, manifest, PUBLIC_KEY) {
         return Err("the signature of the installer is not valid".to_owned());
     }
+    Ok(installer)
+}
+
+/// Downloads the installer, checks it and starts it. Nothing runs unless the signature holds.
+pub fn install(manifest: &Manifest, progress: &mut dyn FnMut(f64)) -> Result<(), String> {
+    let failed = |error: &dyn std::fmt::Display| error.to_string();
+    let installer = download(manifest, progress)?;
     let path = std::env::temp_dir().join(format!(
         "{INSTALLER_PREFIX}{}-{}.exe",
         manifest.version,
@@ -92,5 +104,19 @@ pub fn remove_old_installers() {
         {
             let _ = std::fs::remove_file(entry.path());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Runs in the release workflow, on a machine with a clean path to GitHub, since this reaches
+    /// the published release through the same code the app uses.
+    #[test]
+    #[ignore = "needs the internet"]
+    fn the_published_release_downloads_and_verifies() {
+        let manifest = latest().unwrap();
+        assert!(!download(&manifest, &mut |_| {}).unwrap().is_empty());
     }
 }

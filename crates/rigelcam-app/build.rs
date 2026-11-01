@@ -34,12 +34,33 @@ fn compile_translation(language: &str) {
     assert!(compiled, "lrelease from the Qt linguist tools is required");
 }
 
+/// Puts the icon inside the executable, which is what Windows shows for the file itself.
+fn embed_icon() {
+    let root = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+    let icon = Path::new(&root).join("../../assets/branding/rigelcam.ico");
+    println!("cargo:rerun-if-changed={}", icon.display());
+    let output = std::env::var("OUT_DIR").unwrap();
+    let script = Path::new(&output).join("icon.rc");
+    let resource = Path::new(&output).join("icon.res");
+    let path = icon.display().to_string().replace('\\', "/");
+    std::fs::write(&script, format!("1 ICON \"{path}\"\n")).unwrap();
+    let compiled = Command::new("rc.exe")
+        .args(["/nologo", "/fo"])
+        .arg(&resource)
+        .arg(&script)
+        .status()
+        .is_ok_and(|status| status.success());
+    assert!(compiled, "rc.exe from the Windows SDK is required");
+    println!("cargo:rustc-link-arg-bins={}", resource.display());
+}
+
 fn main() {
     compile_translation("pt_BR");
     compile_translation("es");
     let windows = std::env::var("CARGO_CFG_TARGET_OS").is_ok_and(|os| os == "windows");
     let mut include_paths = Vec::new();
     if windows {
+        embed_icon();
         let gstreamer = pkg_config::probe_library("gstreamer-d3d11-1.0")
             .expect("the GStreamer D3D11 library is required");
         include_paths = gstreamer.include_paths;

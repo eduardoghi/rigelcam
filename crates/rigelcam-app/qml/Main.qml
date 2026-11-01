@@ -2809,7 +2809,8 @@ ApplicationWindow {
         width: Math.min(420, parent.width - 32)
         height: updateLayout.implicitHeight + 24
         radius: 9
-        color: colors.panel
+        // Solid, so the grid under it doesn't get in the way of reading.
+        color: colors.surface
         border.color: colors.line
         ColumnLayout {
             id: updateLayout
