@@ -118,6 +118,21 @@ jobs:
           Compress-Archive rigelcam "rigelcam-$env:VERSION-windows-x64.zip"
           & C:\innosetup\ISCC.exe "/DVersion=$env:VERSION" packaging\windows\rigelcam.iss
           if ($LASTEXITCODE -ne 0) { throw 'the installer failed' }
+      # A published version can't be replaced, so a broken way to update has to stop the next one.
+      - name: reach the published release as the app does
+        shell: pwsh
+        env:
+          QMAKE: C:\Qt\${{ env.QT_VERSION }}\msvc2022_64\bin\qmake.exe
+          PKG_CONFIG: C:\gstreamer\bin\pkg-config.exe
+          PKG_CONFIG_PATH: C:\gstreamer\lib\pkgconfig
+          GSTREAMER_ROOT: C:\gstreamer
+        run: |
+          $qt = "C:\Qt\$env:QT_VERSION\msvc2022_64"
+          $env:PATH = "$qt\bin;C:\gstreamer\bin;$env:PATH"
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vcvars = Join-Path (& $vswhere -latest -property installationPath) 'VC\Auxiliary\Build\vcvars64.bat'
+          cmd /c "`"$vcvars`" && cargo test --release --locked -p rigelcam-app the_published_release -- --ignored"
+          if ($LASTEXITCODE -ne 0) { throw 'the published release could not be reached' }
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: windows
@@ -180,6 +195,9 @@ jobs:
           if ! gh release view "$tag" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
             gh release create "$tag" --repo "$GITHUB_REPOSITORY" --draft --target "$GITHUB_SHA" \
               --title "Rigelcam $VERSION" --notes "Write the release notes here before publishing."
+          else
+            # A draft keeps the commit of its first run, and publishing puts the tag there.
+            gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA"
           fi
           gh release upload "$tag" --repo "$GITHUB_REPOSITORY" --clobber -- rigelcam-* latest.json \
             SHA256SUMS.txt
