@@ -1938,6 +1938,8 @@ ApplicationWindow {
             let opened = false
             eachCell(cell => {
                 cell.finished = false
+                cell.resyncWait = cell.firstResyncWait
+                cell.nextResync = 0
                 if (cell.recordedAt(target))
                     cell.open(target)
                 else
@@ -1981,7 +1983,7 @@ ApplicationWindow {
                 } else if (!cell.streamOpen && !cell.failed && !cell.finished) {
                     cell.open(position)
                 } else if (cell !== lead && cell.drifted(position)) {
-                    cell.open(position)
+                    cell.resync(position)
                 }
             })
             if (leadCell())
@@ -2098,6 +2100,22 @@ ApplicationWindow {
                         finished = false
                         reported = false
                         grid.show(video, 0, 0, false, false)
+                    }
+
+                    // A stream slow to open is behind again when it opens, so reopening at once
+                    // would never end, with a login on the recorder each time. It waits longer
+                    // after every try, and a camera can stay a few seconds behind meanwhile.
+                    readonly property int firstResyncWait: 15000
+                    property int resyncWait: firstResyncWait
+                    property real nextResync: 0
+
+                    function resync(seconds) {
+                        const now = Date.now()
+                        if (now < nextResync)
+                            return
+                        nextResync = now + resyncWait
+                        resyncWait = Math.min(resyncWait * 2, 240000)
+                        open(seconds)
                     }
 
                     // A reopened stream starts up to a keyframe earlier, so small gaps are normal.
