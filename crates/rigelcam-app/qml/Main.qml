@@ -158,6 +158,65 @@ ApplicationWindow {
     }
 
     // Drags with a floating label, so the tile or row dragged stays where it is.
+    // Digital zoom of a video, with the top left of the visible part in fractions.
+    component VideoZoom: QtObject {
+        property real scale: 1
+        property real left: 0
+        property real top: 0
+        readonly property rect view: Qt.rect(left, top, 1 / scale, 1 / scale)
+
+        function reset() {
+            scale = 1
+            left = 0
+            top = 0
+        }
+
+        function panTo(x, y) {
+            const limit = 1 - 1 / scale
+            left = Math.min(Math.max(x, 0), limit)
+            top = Math.min(Math.max(y, 0), limit)
+        }
+
+        // Keeps the point at (px, py) of the view, in fractions, under the cursor.
+        function zoomAt(newScale, px, py) {
+            const x = left + px / scale
+            const y = top + py / scale
+            scale = Math.min(Math.max(newScale, 1), 8)
+            panTo(x - px / scale, y - py / scale)
+        }
+    }
+
+    component ZoomGestures: Item {
+        id: gestures
+        required property VideoZoom zoom
+        anchors.fill: parent
+
+        HoverHandler {
+            cursorShape: gestures.zoom.scale > 1 ? Qt.OpenHandCursor : Qt.ArrowCursor
+        }
+        WheelHandler {
+            target: null
+            acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
+            onWheel: event => gestures.zoom.zoomAt(gestures.zoom.scale * Math.pow(1.0015, event.angleDelta.y),
+                                                   event.x / gestures.width, event.y / gestures.height)
+        }
+        DragHandler {
+            property real startX
+            property real startY
+            enabled: gestures.zoom.scale > 1
+            target: null
+            onActiveChanged: {
+                startX = gestures.zoom.left
+                startY = gestures.zoom.top
+            }
+            onActiveTranslationChanged: {
+                if (active)
+                    gestures.zoom.panTo(startX - activeTranslation.x / gestures.width / gestures.zoom.scale,
+                                        startY - activeTranslation.y / gestures.height / gestures.zoom.scale)
+            }
+        }
+    }
+
     component CameraDrag: DragHandler {
         property var camera
         target: null
@@ -319,16 +378,9 @@ ApplicationWindow {
     onFullScreenChanged: if (fullScreen) fullScreenHint.restart()
     // The button that leaves the recordings only exists with a recorder.
     onRecorderListChanged: if (recorderList.length === 0) setMode("live")
-    // Digital zoom of the camera shown alone, with the top left of the visible part in fractions.
-    property real zoomScale: 1
-    property real zoomX: 0
-    property real zoomY: 0
-    readonly property rect zoomView: Qt.rect(zoomX, zoomY, 1 / zoomScale, 1 / zoomScale)
-    onZoomedChanged: {
-        zoomScale = 1
-        zoomX = 0
-        zoomY = 0
-    }
+    // Of the camera shown alone. Each cell of the recordings has its own.
+    readonly property VideoZoom zoom: VideoZoom {}
+    onZoomedChanged: zoom.reset()
     // "live" or "recordings", which stops the live cameras to free the network and the decoder.
     property string mode: "live"
     readonly property bool inRecordings: mode === "recordings"
@@ -371,20 +423,6 @@ ApplicationWindow {
 
     function clamp(value, low, high) {
         return Math.min(Math.max(value, low), high)
-    }
-
-    function panTo(x, y) {
-        const limit = 1 - 1 / zoomScale
-        zoomX = clamp(x, 0, limit)
-        zoomY = clamp(y, 0, limit)
-    }
-
-    // Keeps the point at (px, py) of the view, in fractions, under the cursor.
-    function zoomAt(scale, px, py) {
-        const x = zoomX + px / zoomScale
-        const y = zoomY + py / zoomScale
-        zoomScale = clamp(scale, 1, 8)
-        panTo(x - px / zoomScale, y - py / zoomScale)
     }
 
     function toggleFullScreen() {
@@ -1317,7 +1355,7 @@ ApplicationWindow {
                 readonly property bool included: square >= 0
                 readonly property bool shown: included && !win.inRecordings && (win.zoomed === "" || win.zoomed === key)
                 readonly property bool isMain: win.zoomed === key
-                view: isMain ? win.zoomView : Qt.rect(0, 0, 1, 1)
+                view: isMain ? win.zoom.view : Qt.rect(0, 0, 1, 1)
                 gamma: isMain ? win.gamma : 1
 
                 visible: shown
@@ -1462,31 +1500,10 @@ ApplicationWindow {
                     }
                 }
 
-                HoverHandler {
-                    id: tileHover
-                    cursorShape: tile.isMain && win.zoomScale > 1 ? Qt.OpenHandCursor : Qt.ArrowCursor
-                }
-                WheelHandler {
+                HoverHandler { id: tileHover }
+                ZoomGestures {
                     enabled: tile.isMain
-                    target: null
-                    acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
-                    onWheel: event => win.zoomAt(win.zoomScale * Math.pow(1.0015, event.angleDelta.y),
-                                                 event.x / tile.width, event.y / tile.height)
-                }
-                DragHandler {
-                    property real startX
-                    property real startY
-                    enabled: tile.isMain && win.zoomScale > 1
-                    target: null
-                    onActiveChanged: {
-                        startX = win.zoomX
-                        startY = win.zoomY
-                    }
-                    onActiveTranslationChanged: {
-                        if (active)
-                            win.panTo(startX - activeTranslation.x / tile.width / win.zoomScale,
-                                      startY - activeTranslation.y / tile.height / win.zoomScale)
-                    }
+                    zoom: win.zoom
                 }
                 TapHandler {
                     onDoubleTapped: {
@@ -1637,21 +1654,21 @@ ApplicationWindow {
             AppButton {
                 id: zoomOut
                 Layout.leftMargin: 8
-                enabled: win.zoomScale > 1
+                enabled: win.zoom.scale > 1
                 display: AbstractButton.IconOnly
                 icon.source: "qrc:/rigelcam/icons/minus.svg"
                 text: qsTr("Zoom out")
                 implicitWidth: 34
                 leftPadding: 9
                 rightPadding: 9
-                onClicked: win.zoomAt(win.zoomScale / 1.5, 0.5, 0.5)
+                onClicked: win.zoom.zoomAt(win.zoom.scale / 1.5, 0.5, 0.5)
                 AppToolTip {
                     visible: zoomOut.hovered
                     text: zoomOut.text
                 }
             }
             Text {
-                text: Math.round(win.zoomScale * 100) + "%"
+                text: Math.round(win.zoom.scale * 100) + "%"
                 horizontalAlignment: Text.AlignHCenter
                 Layout.preferredWidth: 42
                 font.pixelSize: 13
@@ -1659,14 +1676,14 @@ ApplicationWindow {
             }
             AppButton {
                 id: zoomIn
-                enabled: win.zoomScale < 8
+                enabled: win.zoom.scale < 8
                 display: AbstractButton.IconOnly
                 icon.source: "qrc:/rigelcam/icons/plus.svg"
                 text: qsTr("Zoom in")
                 implicitWidth: 34
                 leftPadding: 9
                 rightPadding: 9
-                onClicked: win.zoomAt(win.zoomScale * 1.5, 0.5, 0.5)
+                onClicked: win.zoom.zoomAt(win.zoom.scale * 1.5, 0.5, 0.5)
                 AppToolTip {
                     visible: zoomIn.hovered
                     text: zoomIn.text
@@ -2019,6 +2036,9 @@ ApplicationWindow {
                     readonly property var spans: playback.spansOf[key] ?? []
                     readonly property string searchError: playback.errors[key] ?? ""
                     readonly property alias video: video
+                    // Stays while the time or the speed changes, to follow one spot of the image.
+                    readonly property VideoZoom zoom: VideoZoom {}
+                    onKeyChanged: zoom.reset()
                     property int attempt: 0
                     property bool streamOpen: false
                     property bool failed: false
@@ -2090,6 +2110,7 @@ ApplicationWindow {
                         anchors.fill: parent
                         anchors.margins: 1
                         gamma: win.gamma
+                        view: cell.zoom.view
 
                         onPhotoFinished: file => photoToast.show(file)
                         onPlaybackPosition: (seconds, attempt) => {
@@ -2144,6 +2165,11 @@ ApplicationWindow {
                             : video.denied ? qsTr("You don't have permission to see the recordings of this camera.")
                             : cell.failed ? qsTr("Could not open this recording. Try another time on the bar.")
                             : qsTr("No recording at this time.")
+                    }
+
+                    ZoomGestures {
+                        enabled: video.hasVideo
+                        zoom: cell.zoom
                     }
 
                     Rectangle {
