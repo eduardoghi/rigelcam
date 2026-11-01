@@ -502,15 +502,19 @@ impl<'a> Session<'a> {
         self.calls.set(self.calls.get() + 1);
         self.client.post_rpc(
             "/RPC2",
-            &json!({
-                "method": method,
-                "params": params,
-                "id": self.calls.get(),
-                "session": self.id,
-                "object": object,
-            }),
+            &rpc_request(method, params, self.calls.get(), &self.id, object),
         )
     }
+}
+
+/// The body of a call. Recorders answer `Invalid Request` to some methods that get a null object,
+/// so a call without one doesn't carry the field.
+fn rpc_request(method: &str, params: Value, id: u32, session: &Value, object: &Value) -> Value {
+    let mut request = json!({"method": method, "params": params, "id": id, "session": session});
+    if !object.is_null() {
+        request["object"] = object.clone();
+    }
+    request
 }
 
 impl Drop for Session<'_> {
@@ -1086,6 +1090,15 @@ mod tests {
         assert_eq!(sizes.len(), 2);
         assert_eq!(sizes[&1], (1920, 1080));
         assert_eq!(sizes[&2], (1280, 960));
+    }
+
+    #[test]
+    fn a_call_without_an_object_does_not_carry_the_field() {
+        let session = json!("abc");
+        let without = rpc_request("m", Value::Null, 1, &session, &Value::Null);
+        assert!(without.get("object").is_none());
+        let with = rpc_request("m", Value::Null, 1, &session, &json!(7));
+        assert_eq!(with["object"], 7);
     }
 
     #[test]
