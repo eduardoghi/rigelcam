@@ -30,6 +30,25 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - run: rustup component add rustfmt clippy
       - run: cargo fmt --all --check
-      # rigelcam-app needs Qt and GStreamer, which this job doesn't install yet.
+      # rigelcam-app needs Qt and GStreamer, so it has a job of its own.
       - run: cargo clippy -p rigelcam-core --all-targets --locked -- -D warnings
       - run: cargo test -p rigelcam-core --locked
+
+  app:
+    name: app on Linux
+    # The newest image, since the Qt of the older ones is far behind the one the app is built on.
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: install Qt and GStreamer
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            gstreamer1.0-plugins-bad gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
+            libegl-dev libgles-dev libgstreamer-plugins-bad1.0-dev \
+            libgstreamer-plugins-base1.0-dev libgstreamer1.0-dev pkgconf \
+            qt6-base-dev qt6-declarative-dev qt6-l10n-tools
+      - run: rustup component add clippy
+      # The arguments of a QML function can't be grouped, since QML calls it with each of them.
+      - run: cargo clippy -p rigelcam-app --all-targets --locked -- -D warnings -A clippy::too_many_arguments
+      - run: cargo test -p rigelcam-app --locked
