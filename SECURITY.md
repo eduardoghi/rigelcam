@@ -1,6 +1,7 @@
 # Security policy
 
-Please don't open a public issue for a security problem. Send it to eduardoghi@proton.me, with the
+Please don't open a public issue for a security problem. Use
+[Report a vulnerability](https://github.com/eduardoghi/rigelcam/security/advisories/new), with the
 steps to reproduce it and the model and firmware of the recorder involved.
 
 Rigelcam has no releases yet, so fixes go to the `main` branch.
