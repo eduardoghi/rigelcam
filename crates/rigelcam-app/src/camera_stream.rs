@@ -481,7 +481,7 @@ fn open(
 
 /// Opens a live stream from the recorder or, for a channel it keeps answering 404 to, from the
 /// camera. A camera that dropped from the recorder also gets a 404, and its password is usually
-/// another one, so a 404 only leaves the recorder if the recorder says the camera is connected.
+/// another one, so the password only goes to a camera the recorder says is connected.
 fn open_live(
     shared: &Arc<Shared>,
     source: &Source,
@@ -501,7 +501,7 @@ fn open_live(
         if !not_found || !failed_before || served {
             return outcome;
         }
-        if direct.client.camera_connected(direct.channel) == Some(false) {
+        if direct.client.camera_connected(direct.channel) != Some(true) {
             return outcome;
         }
     }
