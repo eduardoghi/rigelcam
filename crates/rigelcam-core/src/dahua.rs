@@ -51,6 +51,10 @@ pub struct Channel {
     pub name: String,
     /// Where the camera of this channel answers, when the recorder tells.
     pub camera: Option<Camera>,
+    /// Width and height of the main stream, when the recorder tells. The substream can't give the
+    /// shape of the picture, since recorders send it at sizes like 704x480 for a 16:9 camera and
+    /// don't mark its pixels as wider than tall.
+    pub main_size: Option<(u32, u32)>,
 }
 
 /// Network address of the camera behind a channel.
@@ -236,6 +240,12 @@ impl Client {
             let cameras = parse_cameras(&devices);
             for channel in &mut channels {
                 channel.camera = cameras.get(&channel.number).cloned();
+            }
+        }
+        if let Ok(encode) = self.get("/cgi-bin/configManager.cgi?action=getConfig&name=Encode") {
+            let sizes = parse_main_sizes(&encode);
+            for channel in &mut channels {
+                channel.main_size = sizes.get(&channel.number).copied();
             }
         }
         Ok(channels)
@@ -756,6 +766,7 @@ fn parse_channel_titles(body: &str) -> Vec<Channel> {
             let name: String = name.chars().take(MAX_NAME_CHARS).collect();
             Some(Channel {
                 camera: None,
+                main_size: None,
                 number: index.parse::<u32>().ok()? + 1,
                 name,
             })
@@ -767,6 +778,32 @@ fn parse_channel_titles(body: &str) -> Vec<Channel> {
 
 /// The address of each channel that has one, from the fields of its entry. It ends up in a URL that
 /// gets the password of the recorder, so only a private IP address counts.
+/// The size of the main stream of each channel, from lines like
+/// `table.Encode[1].MainFormat[0].Video.resolution=1920x1080`, where channels start at 0.
+fn parse_main_sizes(body: &str) -> HashMap<u32, (u32, u32)> {
+    let mut sizes = HashMap::new();
+    for line in body.lines() {
+        let Some((index, size)) = line
+            .trim_end()
+            .strip_prefix("table.Encode[")
+            .and_then(|field| field.split_once("].MainFormat[0].Video.resolution="))
+        else {
+            continue;
+        };
+        let parsed =
+            index
+                .parse::<u32>()
+                .ok()
+                .zip(size.split_once('x').and_then(|(width, height)| {
+                    Some((width.parse::<u32>().ok()?, height.parse::<u32>().ok()?))
+                }));
+        if let Some((index, (width, height))) = parsed.filter(|(_, (_, height))| *height > 0) {
+            sizes.insert(index + 1, (width, height));
+        }
+    }
+    sizes
+}
+
 fn parse_cameras(body: &str) -> HashMap<u32, Camera> {
     let mut hosts = HashMap::new();
     let mut ports = HashMap::new();
@@ -996,6 +1033,19 @@ mod tests {
     }
 
     #[test]
+    fn reads_the_size_of_the_main_stream_of_each_channel() {
+        let body = "table.Encode[0].MainFormat[0].Video.resolution=1920x1080\r\n\
+                    table.Encode[0].ExtraFormat[0].Video.resolution=704x480\r\n\
+                    table.Encode[1].MainFormat[0].Video.resolution=1280x960\r\n\
+                    table.Encode[2].MainFormat[0].Video.resolution=1080P\r\n\
+                    table.Encode[3].MainFormat[0].Video.resolution=1920x0\r\n";
+        let sizes = parse_main_sizes(body);
+        assert_eq!(sizes.len(), 2);
+        assert_eq!(sizes[&1], (1920, 1080));
+        assert_eq!(sizes[&2], (1280, 960));
+    }
+
+    #[test]
     fn a_failed_search_is_not_an_empty_day() {
         let empty = json!({"result": false, "error": {"code": 285409284, "message": ""}});
         assert!(!search_found_files(&empty).unwrap());
@@ -1150,11 +1200,13 @@ mod tests {
             vec![
                 Channel {
                     camera: None,
+                    main_size: None,
                     number: 1,
                     name: "Gate = East".to_owned()
                 },
                 Channel {
                     camera: None,
+                    main_size: None,
                     number: 2,
                     name: "Yard".to_owned()
                 },

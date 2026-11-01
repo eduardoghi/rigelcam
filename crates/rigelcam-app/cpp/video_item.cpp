@@ -144,6 +144,13 @@ void VideoItem::savePhoto(const QString &name) {
     update();
 }
 
+void VideoItem::setAspect(qreal aspect) {
+    if (qFuzzyCompare(m_aspect, aspect)) return;
+    m_aspect = aspect;
+    emit aspectChanged();
+    update();
+}
+
 void VideoItem::setDenied() {
     m_denied = true;
     emit statusChanged();
@@ -183,6 +190,14 @@ void VideoItem::setFrame(const RigelFrame &frame) {
     QMetaObject::invokeMethod(this, "update", Qt::QueuedConnection);
 }
 
+// The part of `area` a picture takes at this aspect, centered and without being cut.
+static QRectF fitted(const QRectF &area, qreal aspect) {
+    if (aspect <= 0 || area.isEmpty()) return area;
+    QSizeF size(area.height() * aspect, area.height());
+    if (size.width() > area.width()) size = QSizeF(area.width(), area.width() / aspect);
+    return QRectF(area.center() - QPointF(size.width() / 2, size.height() / 2), size);
+}
+
 QSGNode *VideoItem::updatePaintNode(QSGNode *old, UpdatePaintNodeData *) {
     auto *node = static_cast<VideoNodeBase *>(old);
     if (!node) node = createVideoNode(m_resources, m_link);
@@ -195,7 +210,9 @@ QSGNode *VideoItem::updatePaintNode(QSGNode *old, UpdatePaintNodeData *) {
             m_hasPending = false;
         }
     }
-    node->setFrame(frame, QRectF(0, 0, width(), height()), m_view, float(m_gamma));
+    if (frame.height > 0) m_frameAspect = qreal(frame.width) / frame.height;
+    const qreal aspect = m_aspect > 0 ? m_aspect : m_frameAspect;
+    node->setFrame(frame, fitted(QRectF(0, 0, width(), height()), aspect), m_view, float(m_gamma));
     if (!m_photoName.isEmpty()) node->requestPhoto(std::exchange(m_photoName, QString()));
     node->markDirty(QSGNode::DirtyMaterial);
     return node;
@@ -205,7 +222,21 @@ extern "C" void rigel_prepare_graphics() { prepareGraphics(); }
 
 extern "C" bool rigel_has_window() { return !QGuiApplication::topLevelWindows().isEmpty(); }
 
-void GraphicsSetup::prepare(QQuickWindow *window) { prepareWindow(window); }
+void GraphicsSetup::prepare(QQuickWindow *window) {
+    prepareWindow(window);
+    window->installEventFilter(this);
+}
+
+bool GraphicsSetup::eventFilter(QObject *watched, QEvent *event) {
+    if (event->type() == QEvent::Expose) {
+        const bool exposed = static_cast<QQuickWindow *>(watched)->isExposed();
+        if (exposed != m_exposed) {
+            m_exposed = exposed;
+            emit exposedChanged();
+        }
+    }
+    return QObject::eventFilter(watched, event);
+}
 
 extern "C" void rigel_register_types() {
     qmlRegisterType<VideoItem>("rigelcam.video", 1, 0, "VideoItem");

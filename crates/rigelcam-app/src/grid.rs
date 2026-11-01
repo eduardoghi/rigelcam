@@ -486,7 +486,12 @@ impl qobject::CameraGrid {
                 let cameras: Vec<_> = channels
                     .into_iter()
                     .flatten()
-                    .map(|c| json!({"number": c.number, "name": c.name}))
+                    .map(|c| {
+                        let aspect = c
+                            .main_size
+                            .map_or(0.0, |(width, height)| f64::from(width) / f64::from(height));
+                        json!({"number": c.number, "name": c.name, "aspect": aspect})
+                    })
                     .collect();
                 json!({
                     "id": r.id,

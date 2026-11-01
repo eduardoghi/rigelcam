@@ -373,6 +373,9 @@ ApplicationWindow {
     property real gamma: 1
     property var zoomedCamera: null
     readonly property bool fullScreen: visibility === Window.FullScreen
+    // Nothing is seen, so the video stops using the decoder and the network.
+    readonly property bool minimized: visibility === Window.Minimized || !graphicsSetup.exposed
+    onMinimizedChanged: playback.windowMinimized(minimized)
     // Where F11 goes back to, since the window may have been maximized or not.
     property int windowedVisibility: Window.Maximized
     onFullScreenChanged: if (fullScreen) fullScreenHint.restart()
@@ -453,7 +456,7 @@ ApplicationWindow {
         for (const recorder of recorders) {
             for (const camera of recorder.cameras) {
                 const key = cameraKey(recorder.id, camera.number)
-                cameras.set(key, { key: key, recorder: recorder.id, number: camera.number, label: camera.name })
+                cameras.set(key, { key: key, recorder: recorder.id, number: camera.number, pictureAspect: camera.aspect, label: camera.name })
             }
         }
         const keys = new Set(cameras.keys())
@@ -1350,12 +1353,14 @@ ApplicationWindow {
                 required property int recorder
                 required property int number
                 required property string label
+                required property real pictureAspect
                 readonly property var payload: ({ recorder: recorder, number: number, name: label })
                 readonly property int square: win.gridKeys.indexOf(key)
                 readonly property bool included: square >= 0
-                readonly property bool shown: included && !win.inRecordings && (win.zoomed === "" || win.zoomed === key)
+                readonly property bool shown: included && !win.inRecordings && !win.minimized && (win.zoomed === "" || win.zoomed === key)
                 readonly property bool isMain: win.zoomed === key
                 view: isMain ? win.zoom.view : Qt.rect(0, 0, 1, 1)
+                aspect: pictureAspect
                 gamma: isMain ? win.gamma : 1
 
                 visible: shown
@@ -1890,6 +1895,18 @@ ApplicationWindow {
         function stop() {
             playing = false
             eachCell(cell => cell.close())
+        }
+
+        property bool resumeWhenShown: false
+
+        function windowMinimized(minimized) {
+            if (minimized && playing && leadCell()) {
+                resumeWhenShown = true
+                togglePlaying()
+            } else if (!minimized && resumeWhenShown) {
+                resumeWhenShown = false
+                togglePlaying()
+            }
         }
 
         // A time inside a gap goes to the next recording, and one after the last does nothing.

@@ -58,9 +58,22 @@ class QQuickWindow;
 /// Hands the window what it has to render with, which has to happen before it is shown.
 class GraphicsSetup : public QObject {
     Q_OBJECT
+    /// Whether the window can be seen. Wayland has no minimized state to read, and a minimized
+    /// window only shows as no longer exposed.
+    Q_PROPERTY(bool exposed READ exposed NOTIFY exposedChanged)
 public:
     using QObject::QObject;
     Q_INVOKABLE void prepare(QQuickWindow *window);
+    bool exposed() const { return m_exposed; }
+
+signals:
+    void exposedChanged();
+
+protected:
+    bool eventFilter(QObject *watched, QEvent *event) override;
+
+private:
+    bool m_exposed = true;
 };
 
 struct VideoResources;
@@ -72,6 +85,8 @@ class VideoItem : public QQuickItem {
     Q_PROPERTY(bool hasVideo READ hasVideo NOTIFY statusChanged)
     Q_PROPERTY(bool signalLost READ signalLost NOTIFY statusChanged)
     Q_PROPERTY(bool denied READ denied NOTIFY statusChanged)
+    /// Width over height of the picture, for streams that don't carry it. 0 goes by the frames.
+    Q_PROPERTY(qreal aspect READ aspect WRITE setAspect NOTIFY aspectChanged)
     /// Part of the picture to show, in fractions of its size, which is how digital zoom works.
     Q_PROPERTY(QRectF view READ view WRITE setView NOTIFY viewChanged)
     /// Lifts the midtones above 1 and lowers them below it, keeping black and white in place.
@@ -83,6 +98,8 @@ public:
     bool hasVideo() const { return m_hasVideo; }
     bool signalLost() const { return m_signalLost; }
     bool denied() const { return m_denied; }
+    qreal aspect() const { return m_aspect; }
+    void setAspect(qreal aspect);
     QRectF view() const { return m_view; }
     void setView(const QRectF &view);
     qreal gamma() const { return m_gamma; }
@@ -98,6 +115,7 @@ public:
 
 signals:
     void statusChanged();
+    void aspectChanged();
     void viewChanged();
     void gammaChanged();
     /// The recorder refused the user or password, and this stream stopped trying.
@@ -127,6 +145,8 @@ private:
     bool m_hasVideo = false;
     bool m_signalLost = false;
     bool m_denied = false;
+    qreal m_aspect = 0;
+    qreal m_frameAspect = 0;
     QRectF m_view{0, 0, 1, 1};
     qreal m_gamma = 1;
     void *m_stream = nullptr;

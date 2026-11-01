@@ -160,7 +160,8 @@ public:
         const float u0 = float(m_view.left()), u1 = float(m_view.right());
         const float v0 = float(m_view.top()), v1 = float(m_view.bottom());
         const float quad[] = {0, 0, u0, v0, w, 0, u1, v0, 0, h, u0, v1, w, h, u1, v1};
-        const QMatrix4x4 mvp = *state->projectionMatrix() * *matrix();
+        QMatrix4x4 mvp = *state->projectionMatrix() * *matrix();
+        mvp.translate(float(m_rect.x()), float(m_rect.y()));
 
         f->glDisable(GL_BLEND);
         f->glDisable(GL_DEPTH_TEST);

@@ -199,7 +199,8 @@ public:
         } else {
             g_context->RSSetState(p.plain.Get());
         }
-        const QMatrix4x4 mvp = *state->projectionMatrix() * *matrix();
+        QMatrix4x4 mvp = *state->projectionMatrix() * *matrix();
+        mvp.translate(float(m_rect.x()), float(m_rect.y()));
         draw(mvp, float(m_rect.width()), float(m_rect.height()));
         gst_d3d11_device_unlock(g_gstDevice);
     }
