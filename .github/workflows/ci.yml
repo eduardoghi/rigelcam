@@ -49,6 +49,8 @@ jobs:
             libgstreamer-plugins-base1.0-dev libgstreamer1.0-dev pkgconf \
             qt6-base-dev qt6-declarative-dev qt6-l10n-tools
       - run: rustup component add clippy
+      # Keeps the compiled dependencies, which take most of the time of this job.
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       # The arguments of a QML function can't be grouped, since QML calls it with each of them.
       - run: cargo clippy -p rigelcam-app --all-targets --locked -- -D warnings -A clippy::too_many_arguments
       - run: cargo test -p rigelcam-app --locked
