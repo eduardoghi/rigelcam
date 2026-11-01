@@ -260,6 +260,16 @@ impl Client {
             .ok_or_else(|| Error::Unexpected(body.clone()))
     }
 
+    /// Whether the recorder is connected to the camera of a channel, or `None` if it can't tell.
+    pub fn camera_connected(&self, channel: u32) -> Option<bool> {
+        let session = Session::open(self)?;
+        let params = json!({ "uniqueChannels": [-1] });
+        let answer = session
+            .call("LogicDeviceManager.getCameraState", params, &Value::Null)
+            .ok()?;
+        connection_state(&answer, channel)
+    }
+
     /// Lists what a channel recorded on a day given as `YYYY-MM-DD`. An old day comes back empty.
     pub fn recordings(&self, channel: u32, date: &str) -> Result<Vec<Span>, Error> {
         let finder = Finder::open(self)?;
@@ -519,6 +529,17 @@ fn login_hash(user: &str, password: &str, realm: &str, random: &str) -> String {
         "{user}:{random}:{}",
         md5(format!("{user}:{realm}:{password}"))
     ))
+}
+
+/// Reads a channel from the states of all cameras, where channels start at 0.
+fn connection_state(answer: &Value, channel: u32) -> Option<bool> {
+    let index = channel.checked_sub(1)?;
+    let state = answer
+        .pointer("/params/states")?
+        .as_array()?
+        .iter()
+        .find(|state| state.get("channel").and_then(Value::as_u64) == Some(u64::from(index)))?;
+    Some(state.get("connectionState")?.as_str()? == "Connected")
 }
 
 fn session_error(answer: &Value) -> Error {
@@ -1043,6 +1064,18 @@ mod tests {
         assert_eq!(sizes.len(), 2);
         assert_eq!(sizes[&1], (1920, 1080));
         assert_eq!(sizes[&2], (1280, 960));
+    }
+
+    #[test]
+    fn reads_the_connection_state_of_a_channel() {
+        let answer = json!({"result": true, "params": {"states": [
+            {"channel": 0, "connectionState": "Connected"},
+            {"channel": 22, "connectionState": "Unconnect"},
+        ]}});
+        assert_eq!(connection_state(&answer, 1), Some(true));
+        assert_eq!(connection_state(&answer, 23), Some(false));
+        assert_eq!(connection_state(&answer, 5), None);
+        assert_eq!(connection_state(&json!({"result": false}), 1), None);
     }
 
     #[test]

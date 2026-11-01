@@ -123,6 +123,7 @@ pub struct Direct {
     pub url: String,
     pub channel: u32,
     pub cameras: Arc<DirectCameras>,
+    pub client: Arc<Client>,
 }
 
 #[derive(Clone)]
@@ -479,7 +480,8 @@ fn open(
 }
 
 /// Opens a live stream from the recorder or, for a channel it keeps answering 404 to, from the
-/// camera. A healthy channel can get a 404 for a moment, so one isn't enough to leave the recorder.
+/// camera. A camera that dropped from the recorder also gets a 404, and its password is usually
+/// another one, so a 404 only leaves the recorder if the recorder says the camera is connected.
 fn open_live(
     shared: &Arc<Shared>,
     source: &Source,
@@ -497,6 +499,9 @@ fn open_live(
         let not_found = matches!(&outcome, Outcome::Lost { reason, .. } if reason == NOT_ON_RTSP);
         let served = cameras.served.lock().unwrap().contains(&direct.channel);
         if !not_found || !failed_before || served {
+            return outcome;
+        }
+        if direct.client.camera_connected(direct.channel) == Some(false) {
             return outcome;
         }
     }

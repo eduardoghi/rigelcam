@@ -1258,15 +1258,17 @@ impl qobject::CameraGrid {
                     .get(&(recorder as u64))
                     .and_then(|channels| channels.iter().find(|c| c.number == channel as u32))
                     .and_then(|channel| channel.camera.as_ref());
+                let client = Arc::new(connection.client());
                 let direct = camera.map(|camera| {
                     Arc::new(Direct {
                         url: camera.live_url(kind),
                         channel: channel as u32,
                         cameras: connection.direct_cameras.clone(),
+                        client: client.clone(),
                     })
                 });
                 Source {
-                    url: connection.client().live_url(channel as u32, kind),
+                    url: client.live_url(channel as u32, kind),
                     user: connection.user.clone(),
                     password: connection.password.clone(),
                     recording: false,
