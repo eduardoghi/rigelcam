@@ -24,4 +24,5 @@
     <file>icons/chevron.svg</file>
     <file>icons/camera-off.svg</file>
     <file>icons/info.svg</file>
+    <file>icons/check.svg</file>
 </qresource></RCC>

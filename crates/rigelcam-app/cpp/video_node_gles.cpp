@@ -324,6 +324,8 @@ void prepareGraphics() {
 }
 
 bool hasSuperResolution() { return false; }
+bool hasRtxHdr() { return false; }
+QSGNode *createHdrPassNode() { return nullptr; }
 
 void prepareWindow(QQuickWindow *) {}
 

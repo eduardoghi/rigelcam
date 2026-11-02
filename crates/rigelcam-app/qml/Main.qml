@@ -305,17 +305,36 @@ ApplicationWindow {
         Layout.topMargin: 6
     }
 
-    component SuperResolutionButton: AppButton {
-        id: superResolutionButton
+    component RtxButton: AppButton {
+        id: rtxButton
+        property bool on: false
+        property string tip
+        icon.source: on ? "qrc:/rigelcam/icons/check.svg" : ""
+        fill: on ? colors.accent : "transparent"
+        hoverFill: on ? colors.accentHover : colors.raised
+        edge: on ? colors.accent : colors.line
+        contentColor: on ? "#FFFFFF" : colors.muted
+        AppToolTip {
+            visible: rtxButton.hovered
+            width: 340
+            text: rtxButton.tip
+        }
+    }
+
+    component SuperResolutionButton: RtxButton {
         visible: graphicsSetup.superResolution
         text: "RTX Super Resolution"
-        edge: win.superResolution ? colors.accent : colors.line
+        on: win.superResolution
+        tip: qsTr("Uses NVIDIA RTX Video, which has to be on in the driver. Detail is rebuilt by AI, so don't rely on it to read plates or faces.")
         onClicked: win.superResolution = !win.superResolution
-        AppToolTip {
-            visible: superResolutionButton.hovered
-            width: 340
-            text: qsTr("Uses NVIDIA RTX Video, which has to be on in the driver. Detail is rebuilt by AI, so don't rely on it to read plates or faces.")
-        }
+    }
+
+    component RtxHdrButton: RtxButton {
+        visible: graphicsSetup.rtxHdr
+        text: "RTX HDR"
+        on: win.rtxHdr
+        tip: qsTr("Uses NVIDIA RTX Video, which has to be on in the driver. Brightness and color are estimated by AI for HDR screens.")
+        onClicked: win.rtxHdr = !win.rtxHdr
     }
 
     component AppDialog: Dialog {
@@ -391,6 +410,7 @@ ApplicationWindow {
     property real gamma: 1
     // Not saved, so nobody ends up watching rebuilt detail without having asked for it.
     property bool superResolution: false
+    property bool rtxHdr: false
     property var zoomedCamera: null
     readonly property bool fullScreen: visibility === Window.FullScreen
     // Nothing is seen, so the video stops using the decoder and the network.
@@ -500,6 +520,11 @@ ApplicationWindow {
     }
 
     GraphicsSetup { id: graphicsSetup }
+    HdrPass {
+        parent: Overlay.overlay
+        anchors.fill: parent
+        z: 1000000
+    }
     Component.onCompleted: {
         graphicsSetup.prepare(win)
         win.showMaximized()
@@ -1526,6 +1551,7 @@ ApplicationWindow {
                     view: tile.view
                     gamma: tile.gamma
                     superResolution: tile.isMain && win.superResolution
+                    rtxHdr: tile.isMain && win.rtxHdr
                     onPhotoFinished: file => photoToast.show(file)
                     onAuthRefused: Qt.callLater(grid.recorderRefused.bind(grid, tile.recorder))
                     Connections {
@@ -1793,6 +1819,7 @@ ApplicationWindow {
                 }
             }
             SuperResolutionButton { Layout.leftMargin: 8 }
+            RtxHdrButton {}
             GammaControl { Layout.leftMargin: 8 }
         }
     }
@@ -2246,6 +2273,7 @@ ApplicationWindow {
                         gamma: win.gamma
                         view: cell.zoom.view
                         superResolution: win.superResolution && videoArea.used.length === 1
+                        rtxHdr: win.rtxHdr && videoArea.used.length === 1
 
                         onPhotoFinished: file => photoToast.show(file)
                         onPlaybackPosition: (seconds, attempt) => {
@@ -2594,6 +2622,9 @@ ApplicationWindow {
 
                 SuperResolutionButton {
                     visible: graphicsSetup.superResolution && videoArea.used.length === 1
+                }
+                RtxHdrButton {
+                    visible: graphicsSetup.rtxHdr && videoArea.used.length === 1
                 }
                 GammaControl { Layout.rightMargin: 8 }
 

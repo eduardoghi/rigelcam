@@ -141,6 +141,13 @@ void VideoItem::setSuperResolution(bool superResolution) {
     update();
 }
 
+void VideoItem::setRtxHdr(bool rtxHdr) {
+    if (m_rtxHdr == rtxHdr) return;
+    m_rtxHdr = rtxHdr;
+    emit rtxHdrChanged();
+    update();
+}
+
 void VideoItem::savePhoto(const QString &name) {
     if (!m_hasVideo) {
         emit photoFinished({});
@@ -221,6 +228,7 @@ QSGNode *VideoItem::updatePaintNode(QSGNode *old, UpdatePaintNodeData *) {
     const qreal aspect = m_aspect > 0 ? m_aspect : m_frameAspect;
     node->setFrame(frame, fitted(QRectF(0, 0, width(), height()), aspect), m_view, float(m_gamma));
     node->setSuperResolution(m_superResolution);
+    node->setRtxHdr(m_rtxHdr);
     if (!m_photoName.isEmpty()) node->requestPhoto(std::exchange(m_photoName, QString()));
     node->markDirty(QSGNode::DirtyMaterial);
     return node;
@@ -237,6 +245,14 @@ void GraphicsSetup::prepare(QQuickWindow *window) {
 
 bool GraphicsSetup::superResolution() const { return hasSuperResolution(); }
 
+bool GraphicsSetup::rtxHdr() const { return hasRtxHdr(); }
+
+HdrPass::HdrPass(QQuickItem *parent) : QQuickItem(parent) { setFlag(ItemHasContents, true); }
+
+QSGNode *HdrPass::updatePaintNode(QSGNode *old, UpdatePaintNodeData *) {
+    return old ? old : createHdrPassNode();
+}
+
 bool GraphicsSetup::eventFilter(QObject *watched, QEvent *event) {
     if (event->type() == QEvent::Expose) {
         const bool exposed = static_cast<QQuickWindow *>(watched)->isExposed();
@@ -252,6 +268,7 @@ extern "C" void rigel_register_types() {
     qmlRegisterType<VideoItem>("rigelcam.video", 1, 0, "VideoItem");
     qmlRegisterType<Retranslator>("rigelcam.video", 1, 0, "Retranslator");
     qmlRegisterType<GraphicsSetup>("rigelcam.video", 1, 0, "GraphicsSetup");
+    qmlRegisterType<HdrPass>("rigelcam.video", 1, 0, "HdrPass");
 }
 
 void Retranslator::run() {

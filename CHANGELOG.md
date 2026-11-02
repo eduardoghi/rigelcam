@@ -9,6 +9,8 @@ User-visible changes, newest first.
 - An About window with the installed version and links to the releases and to the repository.
 - RTX Super Resolution on an open camera and on a recording of one camera, for Windows with an
   NVIDIA RTX card. It is off by default and photos keep the original picture.
+- RTX HDR at the same places, for an RTX card with HDR on in Windows. The window opens in HDR on
+  those computers, and the button works right away.
 
 ## [0.1.1] (2026-11-01)
 

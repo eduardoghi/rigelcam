@@ -144,6 +144,10 @@
         <translation>Usa NVIDIA RTX Video, que debe estar activado en el controlador. La IA reconstruye detalles, así que no lo use para leer matrículas o rostros.</translation>
     </message>
     <message>
+        <source>Uses NVIDIA RTX Video, which has to be on in the driver. Brightness and color are estimated by AI for HDR screens.</source>
+        <translation>Usa NVIDIA RTX Video, que debe estar activado en el controlador. La IA estima el brillo y el color para pantallas HDR.</translation>
+    </message>
+    <message>
         <source>Version %1</source>
         <translation>Versión %1</translation>
     </message>

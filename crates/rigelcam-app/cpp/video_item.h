@@ -63,11 +63,14 @@ class GraphicsSetup : public QObject {
     Q_PROPERTY(bool exposed READ exposed NOTIFY exposedChanged)
     /// Whether the graphics card has RTX Video Super Resolution. Doesn't change while running.
     Q_PROPERTY(bool superResolution READ superResolution CONSTANT)
+    /// Whether the window opened in HDR, which takes an RTX card and a screen with HDR on.
+    Q_PROPERTY(bool rtxHdr READ rtxHdr CONSTANT)
 public:
     using QObject::QObject;
     Q_INVOKABLE void prepare(QQuickWindow *window);
     bool exposed() const { return m_exposed; }
     bool superResolution() const;
+    bool rtxHdr() const;
 
 signals:
     void exposedChanged();
@@ -77,6 +80,16 @@ protected:
 
 private:
     bool m_exposed = true;
+};
+
+/// Finishes each frame of an HDR window. It has to be the last thing drawn.
+class HdrPass : public QQuickItem {
+    Q_OBJECT
+public:
+    explicit HdrPass(QQuickItem *parent = nullptr);
+
+protected:
+    QSGNode *updatePaintNode(QSGNode *old, UpdatePaintNodeData *) override;
 };
 
 struct VideoResources;
@@ -96,6 +109,8 @@ class VideoItem : public QQuickItem {
     Q_PROPERTY(qreal gamma READ gamma WRITE setGamma NOTIFY gammaChanged)
     /// Upscales the picture on screen with RTX Video Super Resolution. Photos keep the original.
     Q_PROPERTY(bool superResolution READ superResolution WRITE setSuperResolution NOTIFY superResolutionChanged)
+    /// Expands the picture on screen with RTX Video HDR. Photos keep the original.
+    Q_PROPERTY(bool rtxHdr READ rtxHdr WRITE setRtxHdr NOTIFY rtxHdrChanged)
 public:
     explicit VideoItem(QQuickItem *parent = nullptr);
     ~VideoItem() override;
@@ -111,6 +126,8 @@ public:
     void setGamma(qreal gamma);
     bool superResolution() const { return m_superResolution; }
     void setSuperResolution(bool superResolution);
+    bool rtxHdr() const { return m_rtxHdr; }
+    void setRtxHdr(bool rtxHdr);
     Q_INVOKABLE void setStatus(bool hasVideo, bool signalLost);
     /// The user has no permission on this channel. It lasts until the next status.
     Q_INVOKABLE void setDenied();
@@ -126,6 +143,7 @@ signals:
     void viewChanged();
     void gammaChanged();
     void superResolutionChanged();
+    void rtxHdrChanged();
     /// The recorder refused the user or password, and this stream stopped trying.
     void authRefused();
     /// Seconds of a recording played since the point it was opened at. Each signal carries the
@@ -158,6 +176,7 @@ private:
     QRectF m_view{0, 0, 1, 1};
     qreal m_gamma = 1;
     bool m_superResolution = false;
+    bool m_rtxHdr = false;
     void *m_stream = nullptr;
     void (*m_destroyStream)(void *) = nullptr;
 };

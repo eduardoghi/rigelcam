@@ -26,7 +26,7 @@ nativa en Linux.
 - Cuadrícula de cámaras de uno o más NVR, con el flujo secundario para que una cuadrícula completa
   siga siendo liviana
 - Doble clic para abrir una cámara en el flujo principal, con zoom digital y gamma
-- RTX Super Resolution en Windows con tarjeta NVIDIA RTX, desactivado por defecto
+- RTX Super Resolution y RTX HDR en Windows con tarjeta NVIDIA RTX, desactivados por defecto
 - Foto guardada con la resolución del video
 - Nombres de canal leídos del grabador
 - Las cámaras sin permiso para el usuario aparecen así, sin nuevos intentos

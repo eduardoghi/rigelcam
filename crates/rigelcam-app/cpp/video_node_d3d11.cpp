@@ -5,7 +5,7 @@
 
 #include <d3d11_4.h>
 #include <d3dcompiler.h>
-#include <dxgi1_2.h>
+#include <dxgi1_6.h>
 #include <gst/d3d11/gstd3d11.h>
 #include <gst/gst.h>
 #include <wrl/client.h>
@@ -36,6 +36,7 @@ cbuffer Constants : register(b0) {
     float gamma;
     float fullRange;
     float3 luma;
+    float mode;
 };
 Texture2D y : register(t0);
 Texture2D uv : register(t1);
@@ -48,9 +49,29 @@ V vs(uint id : SV_VertexID) {
     o.p = mul(mvp, float4(corner * size, 0, 1));
     return o;
 }
-float4 ps(V i) : SV_TARGET {
-    float Y = y.Sample(s, i.t).r;
-    float2 c = uv.Sample(s, i.t).rg - 0.5;
+// An HDR window draws everything as sRGB with SDR white at 1, as Qt draws the interface, with HDR
+// going above 1. The pass at the end of the frame turns all of it into the scRGB the window takes,
+// where 1 is 80 nits, and blending stays the same as on an SDR window.
+static const float sdrWhiteNits = 203;
+float3 pqToNits(float3 e) {
+    float3 p = pow(saturate(e), 1 / 78.84375);
+    return 10000 * pow(max(p - 0.8359375, 0) / (18.8515625 - 18.6875 * p), 1 / 0.1593017578125);
+}
+float3 toSrgb(float3 c) {
+    float3 a = abs(c);
+    return sign(c) * lerp(a * 12.92, 1.055 * pow(a, 1 / 2.4) - 0.055, step(0.0031308, a));
+}
+float3 fromSrgb(float3 c) {
+    float3 a = abs(c);
+    return sign(c) * lerp(a / 12.92, pow((a + 0.055) / 1.055, 2.4), step(0.04045, a));
+}
+float3 hdrColor(float2 t) {
+    const float3x3 toRec709 = {1.6605, -0.5876, -0.0728, -0.1246, 1.1329, -0.0083, -0.0182, -0.1006, 1.1187};
+    return toSrgb(mul(toRec709, pqToNits(y.Sample(s, t).rgb)) / sdrWhiteNits);
+}
+float3 sdrColor(float2 t) {
+    float Y = y.Sample(s, t).r;
+    float2 c = uv.Sample(s, t).rg - 0.5;
     if (fullRange < 0.5) {
         Y = (Y - 16.0 / 255.0) * 255.0 / 219.0;
         c *= 255.0 / 224.0;
@@ -58,8 +79,17 @@ float4 ps(V i) : SV_TARGET {
     float r = Y + 2 * (1 - luma.r) * c.y;
     float b = Y + 2 * (1 - luma.b) * c.x;
     float g = (Y - luma.r * r - luma.b * b) / luma.g;
-    float3 color = saturate(float3(r, g, b));
-    return float4(gamma == 1 ? color : pow(color, 1 / gamma), 1);
+    return saturate(float3(r, g, b));
+}
+float4 ps(V i) : SV_TARGET {
+    float3 color = mode > 0.5 ? hdrColor(i.t) : sdrColor(i.t);
+    return float4(gamma == 1 ? color : sign(color) * pow(abs(color), 1 / gamma), 1);
+}
+float4 vsFrame(uint id : SV_VertexID) : SV_POSITION {
+    return float4(float2(id & 2, (id << 1) & 2) * float2(2, -2) + float2(-1, 1), 0, 1);
+}
+float4 psFrame(float4 p : SV_POSITION) : SV_TARGET {
+    return float4(fromSrgb(y.Load(int3(p.xy, 0)).rgb) * sdrWhiteNits / 80, 1);
 }
 )";
 
@@ -71,7 +101,7 @@ struct Constants {
     float gamma;
     float fullRange;
     float luma[3];
-    float padding;
+    float mode;
 };
 static_assert(sizeof(Constants) % 16 == 0, "constant buffers go in blocks of 16 bytes");
 
@@ -81,13 +111,19 @@ const GUID kNvidiaExtension = {0xd43ce1b3, 0x1f4b, 0x48ac, {0xba, 0xee, 0xc3, 0x
 struct NvidiaExtension {
     UINT version, method, enable;
 };
+const GUID kNvidiaHdrExtension = {0xfdd62bb4, 0x620b, 0x4fd7, {0x9a, 0xb3, 0x1e, 0x59, 0xd0, 0xd5, 0x44, 0xb3}};
+struct NvidiaHdrExtension {
+    UINT version, method;
+    UINT enable : 1;
+    UINT reserved : 31;
+};
 // The feature takes up to 1440p, and 4K is enough for the zoom to cut from.
 constexpr int kUpscaleMaxInputHeight = 1440;
 constexpr int kUpscaleMaxHeight = 2160;
 
 struct Pipeline {
-    ComPtr<ID3D11VertexShader> vs;
-    ComPtr<ID3D11PixelShader> ps;
+    ComPtr<ID3D11VertexShader> vs, vsFrame;
+    ComPtr<ID3D11PixelShader> ps, psFrame;
     ComPtr<ID3D11SamplerState> sampler;
     ComPtr<ID3D11RasterizerState> plain, scissored;
     ComPtr<ID3D11DepthStencilState> noDepth;
@@ -109,6 +145,10 @@ Pipeline &pipeline() {
         auto ps = compile("ps", "ps_5_0");
         g_device->CreateVertexShader(vs->GetBufferPointer(), vs->GetBufferSize(), nullptr, &p.vs);
         g_device->CreatePixelShader(ps->GetBufferPointer(), ps->GetBufferSize(), nullptr, &p.ps);
+        auto vsFrame = compile("vsFrame", "vs_5_0");
+        auto psFrame = compile("psFrame", "ps_5_0");
+        g_device->CreateVertexShader(vsFrame->GetBufferPointer(), vsFrame->GetBufferSize(), nullptr, &p.vsFrame);
+        g_device->CreatePixelShader(psFrame->GetBufferPointer(), psFrame->GetBufferSize(), nullptr, &p.psFrame);
         D3D11_SAMPLER_DESC sampler{};
         sampler.Filter = D3D11_FILTER_MIN_MAG_LINEAR_MIP_POINT;
         sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
@@ -142,8 +182,9 @@ struct Upscaled {
     ComPtr<ID3D11Texture2D> texture;
     ComPtr<ID3D11ShaderResourceView> y, uv;
     int inputWidth = 0, inputHeight = 0;
+    bool superResolution = false;
     UINT width = 0, height = 0;
-    bool ready = false, failed = false;
+    bool ready = false, failed = false, hdr = false;
 };
 
 struct D3d11Resources : VideoResources {
@@ -183,6 +224,7 @@ public:
 
     void requestPhoto(const QString &name) override { m_photoName = name; }
     void setSuperResolution(bool enabled) override { m_superResolution = enabled; }
+    void setRtxHdr(bool enabled) override { m_rtxHdr = enabled; }
 
     StateFlags changedStates() const override { return BlendState | ViewportState | ScissorState | DepthState; }
     RenderingFlags flags() const override { return BoundedRectRendering | OpaqueRendering; }
@@ -236,10 +278,12 @@ public:
         mvp.translate(float(m_rect.x()), float(m_rect.y()));
         const float width = float(m_rect.width()), height = float(m_rect.height());
         const Upscaled &u = m_res->upscaled;
-        if (m_superResolution && u.ready)
-            draw(mvp, width, height, u.y.Get(), u.uv.Get(), m_view);
+        if (m_rtxHdr && u.ready && u.hdr)
+            draw(mvp, width, height, u.y.Get(), nullptr, m_view, 1);
+        else if (m_superResolution && u.ready && !u.hdr)
+            draw(mvp, width, height, u.y.Get(), u.uv.Get(), m_view, 0);
         else
-            draw(mvp, width, height, m_res->y.Get(), m_res->uv.Get(), picturePart());
+            draw(mvp, width, height, m_res->y.Get(), m_res->uv.Get(), picturePart(), 0);
         gst_d3d11_device_unlock(g_gstDevice);
     }
 
@@ -303,7 +347,7 @@ private:
         Upscaled &u = m_res->upscaled;
         // Also drops the last result, which would stay on screen as a frozen picture if the stream
         // changed to a size that can't be upscaled.
-        if (!m_superResolution || !m_res->texture || m_res->height <= 0 || m_res->height > kUpscaleMaxInputHeight) {
+        if ((!m_superResolution && !m_rtxHdr) || !m_res->texture || m_res->height <= 0 || m_res->height > kUpscaleMaxInputHeight) {
             if (u.processor || u.failed) u = Upscaled{};
             return;
         }
@@ -311,7 +355,7 @@ private:
         const UINT width = UINT(qRound(m_res->width * scale)) & ~1u;
         const UINT height = UINT(qRound(m_res->height * scale)) & ~1u;
         const bool sized = u.width == width && u.height == height && u.inputWidth == m_res->width &&
-                           u.inputHeight == m_res->height;
+                           u.inputHeight == m_res->height && u.hdr == m_rtxHdr && u.superResolution == m_superResolution;
         if (sized && (u.failed || (u.ready && !fresh))) return;
         gst_d3d11_device_lock(g_gstDevice);
         if (!sized) createProcessor(width, height);
@@ -334,6 +378,8 @@ private:
         u.height = height;
         u.inputWidth = m_res->width;
         u.inputHeight = m_res->height;
+        u.hdr = m_rtxHdr;
+        u.superResolution = m_superResolution;
         D3D11_VIDEO_PROCESSOR_CONTENT_DESC content{};
         content.InputFrameFormat = D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE;
         content.InputWidth = UINT(m_res->width);
@@ -351,7 +397,7 @@ private:
             desc.Height = height;
             desc.MipLevels = 1;
             desc.ArraySize = 1;
-            desc.Format = DXGI_FORMAT_NV12;
+            desc.Format = u.hdr ? DXGI_FORMAT_R10G10B10A2_UNORM : DXGI_FORMAT_NV12;
             desc.SampleDesc.Count = 1;
             desc.Usage = D3D11_USAGE_DEFAULT;
             desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
@@ -366,10 +412,10 @@ private:
             D3D11_SHADER_RESOURCE_VIEW_DESC view{};
             view.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
             view.Texture2D.MipLevels = 1;
-            view.Format = DXGI_FORMAT_R8_UNORM;
+            view.Format = u.hdr ? DXGI_FORMAT_R10G10B10A2_UNORM : DXGI_FORMAT_R8_UNORM;
             result = g_device->CreateShaderResourceView(u.texture.Get(), &view, &u.y);
         }
-        if (SUCCEEDED(result)) {
+        if (SUCCEEDED(result) && !u.hdr) {
             D3D11_SHADER_RESOURCE_VIEW_DESC view{};
             view.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
             view.Texture2D.MipLevels = 1;
@@ -382,6 +428,18 @@ private:
         }
         u.context->VideoProcessorSetStreamAutoProcessingMode(u.processor.Get(), 0, FALSE);
         u.context->VideoProcessorSetStreamOutputRate(u.processor.Get(), 0, D3D11_VIDEO_PROCESSOR_OUTPUT_RATE_NORMAL, FALSE, nullptr);
+        if (u.hdr) {
+            UINT supported = 0;
+            result = u.context->VideoProcessorGetStreamExtension(u.processor.Get(), 0, &kNvidiaHdrExtension, sizeof supported, &supported);
+            NvidiaHdrExtension values{4, 3, 1, 0};
+            if (SUCCEEDED(result) && supported)
+                result = u.context->VideoProcessorSetStreamExtension(u.processor.Get(), 0, &kNvidiaHdrExtension, sizeof values, &values);
+            if (FAILED(result) || !supported) {
+                upscaleFailed("the hdr extension", result);
+                return;
+            }
+        }
+        if (!u.superResolution) return;
         NvidiaExtension values{1, 2, 1};
         result = u.context->VideoProcessorSetStreamExtension(u.processor.Get(), 0, &kNvidiaExtension, sizeof values, &values);
         if (FAILED(result)) upscaleFailed("the driver extension", result);
@@ -398,11 +456,26 @@ private:
                 return;
             }
         }
-        D3D11_VIDEO_PROCESSOR_COLOR_SPACE color{};
-        color.YCbCr_Matrix = m_res->matrix == 0 ? 0 : 1;
-        color.Nominal_Range = m_res->fullRange ? D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_0_255 : D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_16_235;
-        u.context->VideoProcessorSetStreamColorSpace(u.processor.Get(), 0, &color);
-        u.context->VideoProcessorSetOutputColorSpace(u.processor.Get(), &color);
+        ComPtr<ID3D11VideoContext1> context1;
+        // Older contexts have no way to ask for PQ, and nothing here works without it.
+        if (u.hdr && FAILED(u.context.As(&context1))) {
+            upscaleFailed("the hdr color space", E_NOINTERFACE);
+            return;
+        }
+        if (u.hdr) {
+            const bool bt601 = m_res->matrix == 0;
+            const DXGI_COLOR_SPACE_TYPE input = m_res->fullRange
+                ? (bt601 ? DXGI_COLOR_SPACE_YCBCR_FULL_G22_LEFT_P601 : DXGI_COLOR_SPACE_YCBCR_FULL_G22_LEFT_P709)
+                : (bt601 ? DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P601 : DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P709);
+            context1->VideoProcessorSetStreamColorSpace1(u.processor.Get(), 0, input);
+            context1->VideoProcessorSetOutputColorSpace1(u.processor.Get(), DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020);
+        } else {
+            D3D11_VIDEO_PROCESSOR_COLOR_SPACE color{};
+            color.YCbCr_Matrix = m_res->matrix == 0 ? 0 : 1;
+            color.Nominal_Range = m_res->fullRange ? D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_0_255 : D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_16_235;
+            u.context->VideoProcessorSetStreamColorSpace(u.processor.Get(), 0, &color);
+            u.context->VideoProcessorSetOutputColorSpace(u.processor.Get(), &color);
+        }
 
         const RECT source{0, 0, LONG(m_res->width), LONG(m_res->height)};
         const RECT whole{0, 0, LONG(u.width), LONG(u.height)};
@@ -429,7 +502,7 @@ private:
     }
 
     void draw(const QMatrix4x4 &mvp, float width, float height, ID3D11ShaderResourceView *y, ID3D11ShaderResourceView *uv,
-              const QRectF &part) {
+              const QRectF &part, float mode) {
         Pipeline &p = pipeline();
         if (!m_res->constants) {
             D3D11_BUFFER_DESC desc{};
@@ -448,6 +521,7 @@ private:
         c.uvScale[1] = float(part.height());
         c.gamma = m_gamma;
         c.fullRange = float(m_res->fullRange);
+        c.mode = mode;
         // Weights of red, green and blue, which define BT.601, BT.709 and BT.2020.
         const float weights[3][3] = {{0.299f, 0.587f, 0.114f}, {0.2126f, 0.7152f, 0.0722f}, {0.2627f, 0.678f, 0.0593f}};
         memcpy(c.luma, weights[qBound(0, m_res->matrix, 2)], sizeof c.luma);
@@ -513,7 +587,7 @@ private:
         mvp.translate(-1, 1);
         mvp.scale(2.0f / float(width), -2.0f / float(height));
         // Always the original, so a photo never holds detail the upscaler made up.
-        draw(mvp, float(width), float(height), m_res->y.Get(), m_res->uv.Get(), picturePart());
+        draw(mvp, float(width), float(height), m_res->y.Get(), m_res->uv.Get(), picturePart(), 0);
 
         g_context->OMSetRenderTargets(1, savedTarget.GetAddressOf(), savedDepth.Get());
         if (viewports) g_context->RSSetViewports(1, &savedViewport);
@@ -538,7 +612,63 @@ private:
     QRectF m_view{0, 0, 1, 1};
     float m_gamma = 1;
     bool m_superResolution = false;
+    bool m_rtxHdr = false;
     PictureReport m_picture;
+};
+
+// The last thing drawn on an HDR window. A copy of the frame goes back to it as scRGB, because Qt
+// has no step of its own for interface colors on an HDR window.
+class HdrPassNode : public QSGRenderNode {
+public:
+    StateFlags changedStates() const override { return BlendState | ViewportState | ScissorState | DepthState; }
+
+    void render(const RenderState *) override {
+        gst_d3d11_device_lock(g_gstDevice);
+        ComPtr<ID3D11RenderTargetView> target;
+        g_context->OMGetRenderTargets(1, &target, nullptr);
+        ComPtr<ID3D11Resource> resource;
+        ComPtr<ID3D11Texture2D> texture;
+        if (target) target->GetResource(&resource);
+        if (resource) resource.As(&texture);
+        D3D11_TEXTURE2D_DESC desc{};
+        if (texture) texture->GetDesc(&desc);
+        if (desc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT && ensureCopy(desc)) {
+            g_context->CopyResource(m_copy.Get(), texture.Get());
+            Pipeline &p = pipeline();
+            const D3D11_VIEWPORT viewport{0, 0, float(desc.Width), float(desc.Height), 0, 1};
+            g_context->RSSetViewports(1, &viewport);
+            g_context->RSSetState(p.plain.Get());
+            g_context->OMSetBlendState(p.opaque.Get(), nullptr, 0xffffffff);
+            g_context->OMSetDepthStencilState(p.noDepth.Get(), 0);
+            g_context->IASetInputLayout(nullptr);
+            g_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            g_context->VSSetShader(p.vsFrame.Get(), nullptr, 0);
+            g_context->PSSetShader(p.psFrame.Get(), nullptr, 0);
+            g_context->PSSetShaderResources(0, 1, m_view.GetAddressOf());
+            g_context->Draw(3, 0);
+            ID3D11ShaderResourceView *none = nullptr;
+            g_context->PSSetShaderResources(0, 1, &none);
+        }
+        gst_d3d11_device_unlock(g_gstDevice);
+    }
+
+private:
+    bool ensureCopy(D3D11_TEXTURE2D_DESC desc) {
+        if (m_copy && m_width == desc.Width && m_height == desc.Height) return true;
+        m_view.Reset();
+        m_copy.Reset();
+        desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        desc.MiscFlags = 0;
+        if (FAILED(g_device->CreateTexture2D(&desc, nullptr, &m_copy))) return false;
+        if (FAILED(g_device->CreateShaderResourceView(m_copy.Get(), nullptr, &m_view))) return false;
+        m_width = desc.Width;
+        m_height = desc.Height;
+        return true;
+    }
+
+    ComPtr<ID3D11Texture2D> m_copy;
+    ComPtr<ID3D11ShaderResourceView> m_view;
+    UINT m_width = 0, m_height = 0;
 };
 
 } // namespace
@@ -565,7 +695,10 @@ void prepareGraphics() {
     ComPtr<ID3D10Multithread> multithread;
     if (SUCCEEDED(g_context->QueryInterface(IID_PPV_ARGS(&multithread)))) multithread->SetMultithreadProtected(TRUE);
     g_gstDevice = gst_d3d11_device_new_wrapped(g_device);
+    if (hasRtxHdr()) qputenv("QSG_RHI_HDR", "scrgb");
 }
+
+QSGNode *createHdrPassNode() { return hasRtxHdr() ? new HdrPassNode : nullptr; }
 
 // Runs on what the app renders with, so a laptop that renders on Intel doesn't offer the feature
 // even if it also has an RTX card.
@@ -579,6 +712,26 @@ bool hasSuperResolution() {
             return false;
         constexpr UINT kNvidiaVendor = 0x10DE;
         return desc.VendorId == kNvidiaVendor && wcsstr(desc.Description, L"RTX") != nullptr;
+    }();
+    return available;
+}
+
+// Decided before the window exists, since Qt picks the format of a window only once.
+bool hasRtxHdr() {
+    static const bool available = [] {
+        ComPtr<IDXGIDevice> device;
+        ComPtr<IDXGIAdapter> adapter;
+        if (!hasSuperResolution() || FAILED(g_device->QueryInterface(IID_PPV_ARGS(&device))) || FAILED(device->GetAdapter(&adapter)))
+            return false;
+        ComPtr<IDXGIOutput> output;
+        for (UINT i = 0; adapter->EnumOutputs(i, &output) != DXGI_ERROR_NOT_FOUND; i++) {
+            ComPtr<IDXGIOutput6> screen;
+            DXGI_OUTPUT_DESC1 desc{};
+            if (SUCCEEDED(output.As(&screen)) && SUCCEEDED(screen->GetDesc1(&desc)) &&
+                desc.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020)
+                return true;
+        }
+        return false;
     }();
     return available;
 }

@@ -57,6 +57,7 @@ public:
     virtual void requestPhoto(const QString &name) = 0;
     /// Only the Direct3D node acts on it, as the driver feature exists only there.
     virtual void setSuperResolution(bool) {}
+    virtual void setRtxHdr(bool) {}
 };
 
 // One file of the build implements these for each system.
@@ -65,3 +66,5 @@ VideoNodeBase *createVideoNode(std::shared_ptr<VideoResources> resources, std::s
 void prepareGraphics();
 void prepareWindow(QQuickWindow *window);
 bool hasSuperResolution();
+bool hasRtxHdr();
+QSGNode *createHdrPassNode();
