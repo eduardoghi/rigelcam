@@ -4,6 +4,8 @@ User-visible changes, newest first.
 
 ## [Unreleased]
 
+## [0.1.2] (2026-11-02)
+
 ### Added
 
 - An About window with the installed version and links to the releases and to the repository.
@@ -11,6 +13,7 @@ User-visible changes, newest first.
   NVIDIA RTX card. It is off by default and photos keep the original picture.
 - RTX HDR at the same places, for an RTX card with HDR on in Windows. The window opens in HDR on
   those computers, and the button works right away.
+- Both RTX options also have to be on in the NVIDIA App. Otherwise the picture stays the same.
 
 ## [0.1.1] (2026-11-01)
 
