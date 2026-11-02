@@ -61,10 +61,13 @@ class GraphicsSetup : public QObject {
     /// Whether the window can be seen. Wayland has no minimized state to read, and a minimized
     /// window only shows as no longer exposed.
     Q_PROPERTY(bool exposed READ exposed NOTIFY exposedChanged)
+    /// Whether the graphics card has RTX Video Super Resolution. Doesn't change while running.
+    Q_PROPERTY(bool superResolution READ superResolution CONSTANT)
 public:
     using QObject::QObject;
     Q_INVOKABLE void prepare(QQuickWindow *window);
     bool exposed() const { return m_exposed; }
+    bool superResolution() const;
 
 signals:
     void exposedChanged();
@@ -91,6 +94,8 @@ class VideoItem : public QQuickItem {
     Q_PROPERTY(QRectF view READ view WRITE setView NOTIFY viewChanged)
     /// Lifts the midtones above 1 and lowers them below it, keeping black and white in place.
     Q_PROPERTY(qreal gamma READ gamma WRITE setGamma NOTIFY gammaChanged)
+    /// Upscales the picture on screen with RTX Video Super Resolution. Photos keep the original.
+    Q_PROPERTY(bool superResolution READ superResolution WRITE setSuperResolution NOTIFY superResolutionChanged)
 public:
     explicit VideoItem(QQuickItem *parent = nullptr);
     ~VideoItem() override;
@@ -104,6 +109,8 @@ public:
     void setView(const QRectF &view);
     qreal gamma() const { return m_gamma; }
     void setGamma(qreal gamma);
+    bool superResolution() const { return m_superResolution; }
+    void setSuperResolution(bool superResolution);
     Q_INVOKABLE void setStatus(bool hasVideo, bool signalLost);
     /// The user has no permission on this channel. It lasts until the next status.
     Q_INVOKABLE void setDenied();
@@ -118,6 +125,7 @@ signals:
     void aspectChanged();
     void viewChanged();
     void gammaChanged();
+    void superResolutionChanged();
     /// The recorder refused the user or password, and this stream stopped trying.
     void authRefused();
     /// Seconds of a recording played since the point it was opened at. Each signal carries the
@@ -149,6 +157,7 @@ private:
     qreal m_frameAspect = 0;
     QRectF m_view{0, 0, 1, 1};
     qreal m_gamma = 1;
+    bool m_superResolution = false;
     void *m_stream = nullptr;
     void (*m_destroyStream)(void *) = nullptr;
 };

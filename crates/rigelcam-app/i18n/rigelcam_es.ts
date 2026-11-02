@@ -140,6 +140,10 @@
         <translation>Acerca de Rigelcam</translation>
     </message>
     <message>
+        <source>Uses NVIDIA RTX Video, which has to be on in the driver. Detail is rebuilt by AI, so don't rely on it to read plates or faces.</source>
+        <translation>Usa NVIDIA RTX Video, que debe estar activado en el controlador. La IA reconstruye detalles, así que no lo use para leer matrículas o rostros.</translation>
+    </message>
+    <message>
         <source>Version %1</source>
         <translation>Versión %1</translation>
     </message>

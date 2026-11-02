@@ -24,6 +24,7 @@ API HTTP da Dahua para o resto. Por isso não precisa do SDK do fabricante e rod
 
 - Grade de câmeras de um ou mais NVRs, usando o substream para a grade cheia continuar leve
 - Clique duplo para abrir uma câmera sozinha no stream principal, com zoom digital e gamma
+- RTX Super Resolution no Windows com placa NVIDIA RTX, desligado por padrão
 - Foto salva na resolução do vídeo
 - Nomes dos canais lidos do gravador
 - Câmeras sem permissão para o usuário aparecem assim, sem novas tentativas

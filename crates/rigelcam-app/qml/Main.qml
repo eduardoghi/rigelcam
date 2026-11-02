@@ -70,6 +70,7 @@ ApplicationWindow {
         padding: 7
         contentItem: Text {
             text: tip.text
+            wrapMode: Text.WordWrap
             font.pixelSize: 12
             color: colors.text
         }
@@ -304,6 +305,19 @@ ApplicationWindow {
         Layout.topMargin: 6
     }
 
+    component SuperResolutionButton: AppButton {
+        id: superResolutionButton
+        visible: graphicsSetup.superResolution
+        text: "RTX Super Resolution"
+        edge: win.superResolution ? colors.accent : colors.line
+        onClicked: win.superResolution = !win.superResolution
+        AppToolTip {
+            visible: superResolutionButton.hovered
+            width: 340
+            text: qsTr("Uses NVIDIA RTX Video, which has to be on in the driver. Detail is rebuilt by AI, so don't rely on it to read plates or faces.")
+        }
+    }
+
     component AppDialog: Dialog {
         id: dialog
         modal: true
@@ -375,6 +389,8 @@ ApplicationWindow {
     // Only for a camera seen alone, where someone is looking for detail. Not saved, because the
     // right value depends on the camera and on the hour.
     property real gamma: 1
+    // Not saved, so nobody ends up watching rebuilt detail without having asked for it.
+    property bool superResolution: false
     property var zoomedCamera: null
     readonly property bool fullScreen: visibility === Window.FullScreen
     // Nothing is seen, so the video stops using the decoder and the network.
@@ -1509,6 +1525,7 @@ ApplicationWindow {
                     visible: hasVideo && tile.isMain
                     view: tile.view
                     gamma: tile.gamma
+                    superResolution: tile.isMain && win.superResolution
                     onPhotoFinished: file => photoToast.show(file)
                     onAuthRefused: Qt.callLater(grid.recorderRefused.bind(grid, tile.recorder))
                     Connections {
@@ -1775,6 +1792,7 @@ ApplicationWindow {
                     text: zoomIn.text
                 }
             }
+            SuperResolutionButton { Layout.leftMargin: 8 }
             GammaControl { Layout.leftMargin: 8 }
         }
     }
@@ -2227,6 +2245,7 @@ ApplicationWindow {
                         anchors.margins: 1
                         gamma: win.gamma
                         view: cell.zoom.view
+                        superResolution: win.superResolution && videoArea.used.length === 1
 
                         onPhotoFinished: file => photoToast.show(file)
                         onPlaybackPosition: (seconds, attempt) => {
@@ -2573,6 +2592,9 @@ ApplicationWindow {
                     }
                 }
 
+                SuperResolutionButton {
+                    visible: graphicsSetup.superResolution && videoArea.used.length === 1
+                }
                 GammaControl { Layout.rightMargin: 8 }
 
                 Repeater {

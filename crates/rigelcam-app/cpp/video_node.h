@@ -55,6 +55,8 @@ public:
     /// Takes `frame` when it has a release function, which an empty update doesn't.
     virtual void setFrame(const RigelFrame &frame, const QRectF &rect, const QRectF &view, float gamma) = 0;
     virtual void requestPhoto(const QString &name) = 0;
+    /// Only the Direct3D node acts on it, as the driver feature exists only there.
+    virtual void setSuperResolution(bool) {}
 };
 
 // One file of the build implements these for each system.
@@ -62,3 +64,4 @@ std::shared_ptr<VideoResources> createVideoResources();
 VideoNodeBase *createVideoNode(std::shared_ptr<VideoResources> resources, std::shared_ptr<ItemLink> link);
 void prepareGraphics();
 void prepareWindow(QQuickWindow *window);
+bool hasSuperResolution();

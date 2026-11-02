@@ -134,6 +134,13 @@ void VideoItem::setGamma(qreal gamma) {
     update();
 }
 
+void VideoItem::setSuperResolution(bool superResolution) {
+    if (m_superResolution == superResolution) return;
+    m_superResolution = superResolution;
+    emit superResolutionChanged();
+    update();
+}
+
 void VideoItem::savePhoto(const QString &name) {
     if (!m_hasVideo) {
         emit photoFinished({});
@@ -213,6 +220,7 @@ QSGNode *VideoItem::updatePaintNode(QSGNode *old, UpdatePaintNodeData *) {
     if (frame.height > 0) m_frameAspect = qreal(frame.width) / frame.height;
     const qreal aspect = m_aspect > 0 ? m_aspect : m_frameAspect;
     node->setFrame(frame, fitted(QRectF(0, 0, width(), height()), aspect), m_view, float(m_gamma));
+    node->setSuperResolution(m_superResolution);
     if (!m_photoName.isEmpty()) node->requestPhoto(std::exchange(m_photoName, QString()));
     node->markDirty(QSGNode::DirtyMaterial);
     return node;
@@ -226,6 +234,8 @@ void GraphicsSetup::prepare(QQuickWindow *window) {
     prepareWindow(window);
     window->installEventFilter(this);
 }
+
+bool GraphicsSetup::superResolution() const { return hasSuperResolution(); }
 
 bool GraphicsSetup::eventFilter(QObject *watched, QEvent *event) {
     if (event->type() == QEvent::Expose) {

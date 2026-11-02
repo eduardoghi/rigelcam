@@ -16,6 +16,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <cwchar>
 #include <utility>
 
 using Microsoft::WRL::ComPtr;
@@ -74,6 +75,16 @@ struct Constants {
 };
 static_assert(sizeof(Constants) % 16 == 0, "constant buffers go in blocks of 16 bytes");
 
+// What RTX Video Super Resolution answers to in the driver. NVIDIA doesn't document it, and these
+// are the values Chromium and mpv send.
+const GUID kNvidiaExtension = {0xd43ce1b3, 0x1f4b, 0x48ac, {0xba, 0xee, 0xc3, 0xc2, 0x53, 0x75, 0xe6, 0xf7}};
+struct NvidiaExtension {
+    UINT version, method, enable;
+};
+// The feature takes up to 1440p, and 4K is enough for the zoom to cut from.
+constexpr int kUpscaleMaxInputHeight = 1440;
+constexpr int kUpscaleMaxHeight = 2160;
+
 struct Pipeline {
     ComPtr<ID3D11VertexShader> vs;
     ComPtr<ID3D11PixelShader> ps;
@@ -119,7 +130,24 @@ Pipeline &pipeline() {
     return p;
 }
 
+// The whole frame at twice its size, in NV12 so it goes through the same shader as the original.
+// Digital zoom cuts from this one, since upscaling only the cut showed no gain on a real camera.
+struct Upscaled {
+    ComPtr<ID3D11VideoDevice> device;
+    ComPtr<ID3D11VideoContext> context;
+    ComPtr<ID3D11VideoProcessorEnumerator> enumerator;
+    ComPtr<ID3D11VideoProcessor> processor;
+    ComPtr<ID3D11VideoProcessorInputView> input;
+    ComPtr<ID3D11VideoProcessorOutputView> output;
+    ComPtr<ID3D11Texture2D> texture;
+    ComPtr<ID3D11ShaderResourceView> y, uv;
+    int inputWidth = 0, inputHeight = 0;
+    UINT width = 0, height = 0;
+    bool ready = false, failed = false;
+};
+
 struct D3d11Resources : VideoResources {
+    Upscaled upscaled;
     RigelFrame next{};
     ComPtr<ID3D11Texture2D> texture;
     ComPtr<ID3D11ShaderResourceView> y, uv;
@@ -129,6 +157,7 @@ struct D3d11Resources : VideoResources {
 
     void clear() override {
         release(next);
+        upscaled = Upscaled{};
         y.Reset();
         uv.Reset();
         texture.Reset();
@@ -153,6 +182,7 @@ public:
     }
 
     void requestPhoto(const QString &name) override { m_photoName = name; }
+    void setSuperResolution(bool enabled) override { m_superResolution = enabled; }
 
     StateFlags changedStates() const override { return BlendState | ViewportState | ScissorState | DepthState; }
     RenderingFlags flags() const override { return BoundedRectRendering | OpaqueRendering; }
@@ -161,9 +191,12 @@ public:
     // Outside of the render pass, as the copy can't be recorded inside of it on every API, and the
     // frame goes back to the decoder as soon as it was copied.
     void prepare() override {
-        if (!m_res->next.release) return;
-        copy(m_res->next);
-        release(m_res->next);
+        const bool fresh = m_res->next.release != nullptr;
+        if (fresh) {
+            copy(m_res->next);
+            release(m_res->next);
+        }
+        upscale(fresh);
     }
 
     void render(const RenderState *state) override {
@@ -201,7 +234,12 @@ public:
         }
         QMatrix4x4 mvp = *state->projectionMatrix() * *matrix();
         mvp.translate(float(m_rect.x()), float(m_rect.y()));
-        draw(mvp, float(m_rect.width()), float(m_rect.height()));
+        const float width = float(m_rect.width()), height = float(m_rect.height());
+        const Upscaled &u = m_res->upscaled;
+        if (m_superResolution && u.ready)
+            draw(mvp, width, height, u.y.Get(), u.uv.Get(), m_view);
+        else
+            draw(mvp, width, height, m_res->y.Get(), m_res->uv.Get(), picturePart());
         gst_d3d11_device_unlock(g_gstDevice);
     }
 
@@ -237,10 +275,12 @@ private:
         m_res->y.Reset();
         m_res->uv.Reset();
         m_res->texture.Reset();
+        m_res->upscaled.input.Reset();
         desc.ArraySize = 1;
         desc.MipLevels = 1;
         desc.Usage = D3D11_USAGE_DEFAULT;
-        desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        // The video processor refuses a texture without the render target flag as its input.
+        desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
         desc.MiscFlags = 0;
         desc.CPUAccessFlags = 0;
         if (FAILED(g_device->CreateTexture2D(&desc, nullptr, &m_res->texture))) {
@@ -259,7 +299,137 @@ private:
         g_device->CreateShaderResourceView(m_res->texture.Get(), &view, &m_res->uv);
     }
 
-    void draw(const QMatrix4x4 &mvp, float width, float height) {
+    void upscale(bool fresh) {
+        Upscaled &u = m_res->upscaled;
+        // Also drops the last result, which would stay on screen as a frozen picture if the stream
+        // changed to a size that can't be upscaled.
+        if (!m_superResolution || !m_res->texture || m_res->height <= 0 || m_res->height > kUpscaleMaxInputHeight) {
+            if (u.processor || u.failed) u = Upscaled{};
+            return;
+        }
+        const double scale = qMin(2.0, kUpscaleMaxHeight / double(m_res->height));
+        const UINT width = UINT(qRound(m_res->width * scale)) & ~1u;
+        const UINT height = UINT(qRound(m_res->height * scale)) & ~1u;
+        const bool sized = u.width == width && u.height == height && u.inputWidth == m_res->width &&
+                           u.inputHeight == m_res->height;
+        if (sized && (u.failed || (u.ready && !fresh))) return;
+        gst_d3d11_device_lock(g_gstDevice);
+        if (!sized) createProcessor(width, height);
+        if (u.processor) process();
+        gst_d3d11_device_unlock(g_gstDevice);
+    }
+
+    void upscaleFailed(const char *step, HRESULT result) {
+        fprintf(stderr, "super resolution stopped at %s (0x%lx)\n", step, static_cast<unsigned long>(result));
+        Upscaled &u = m_res->upscaled;
+        u.processor.Reset();
+        u.ready = false;
+        u.failed = true;
+    }
+
+    void createProcessor(UINT width, UINT height) {
+        Upscaled &u = m_res->upscaled;
+        u = Upscaled{};
+        u.width = width;
+        u.height = height;
+        u.inputWidth = m_res->width;
+        u.inputHeight = m_res->height;
+        D3D11_VIDEO_PROCESSOR_CONTENT_DESC content{};
+        content.InputFrameFormat = D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE;
+        content.InputWidth = UINT(m_res->width);
+        content.InputHeight = UINT(m_res->height);
+        content.OutputWidth = width;
+        content.OutputHeight = height;
+        content.Usage = D3D11_VIDEO_USAGE_PLAYBACK_NORMAL;
+        HRESULT result = g_device->QueryInterface(IID_PPV_ARGS(&u.device));
+        if (SUCCEEDED(result)) result = g_context->QueryInterface(IID_PPV_ARGS(&u.context));
+        if (SUCCEEDED(result)) result = u.device->CreateVideoProcessorEnumerator(&content, &u.enumerator);
+        if (SUCCEEDED(result)) result = u.device->CreateVideoProcessor(u.enumerator.Get(), 0, &u.processor);
+        if (SUCCEEDED(result)) {
+            D3D11_TEXTURE2D_DESC desc{};
+            desc.Width = width;
+            desc.Height = height;
+            desc.MipLevels = 1;
+            desc.ArraySize = 1;
+            desc.Format = DXGI_FORMAT_NV12;
+            desc.SampleDesc.Count = 1;
+            desc.Usage = D3D11_USAGE_DEFAULT;
+            desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+            result = g_device->CreateTexture2D(&desc, nullptr, &u.texture);
+        }
+        if (SUCCEEDED(result)) {
+            D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC view{};
+            view.ViewDimension = D3D11_VPOV_DIMENSION_TEXTURE2D;
+            result = u.device->CreateVideoProcessorOutputView(u.texture.Get(), u.enumerator.Get(), &view, &u.output);
+        }
+        if (SUCCEEDED(result)) {
+            D3D11_SHADER_RESOURCE_VIEW_DESC view{};
+            view.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+            view.Texture2D.MipLevels = 1;
+            view.Format = DXGI_FORMAT_R8_UNORM;
+            result = g_device->CreateShaderResourceView(u.texture.Get(), &view, &u.y);
+        }
+        if (SUCCEEDED(result)) {
+            D3D11_SHADER_RESOURCE_VIEW_DESC view{};
+            view.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+            view.Texture2D.MipLevels = 1;
+            view.Format = DXGI_FORMAT_R8G8_UNORM;
+            result = g_device->CreateShaderResourceView(u.texture.Get(), &view, &u.uv);
+        }
+        if (FAILED(result)) {
+            upscaleFailed("the video processor setup", result);
+            return;
+        }
+        u.context->VideoProcessorSetStreamAutoProcessingMode(u.processor.Get(), 0, FALSE);
+        u.context->VideoProcessorSetStreamOutputRate(u.processor.Get(), 0, D3D11_VIDEO_PROCESSOR_OUTPUT_RATE_NORMAL, FALSE, nullptr);
+        NvidiaExtension values{1, 2, 1};
+        result = u.context->VideoProcessorSetStreamExtension(u.processor.Get(), 0, &kNvidiaExtension, sizeof values, &values);
+        if (FAILED(result)) upscaleFailed("the driver extension", result);
+    }
+
+    void process() {
+        Upscaled &u = m_res->upscaled;
+        if (!u.input) {
+            D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC view{};
+            view.ViewDimension = D3D11_VPIV_DIMENSION_TEXTURE2D;
+            const HRESULT result = u.device->CreateVideoProcessorInputView(m_res->texture.Get(), u.enumerator.Get(), &view, &u.input);
+            if (FAILED(result)) {
+                upscaleFailed("the input view", result);
+                return;
+            }
+        }
+        D3D11_VIDEO_PROCESSOR_COLOR_SPACE color{};
+        color.YCbCr_Matrix = m_res->matrix == 0 ? 0 : 1;
+        color.Nominal_Range = m_res->fullRange ? D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_0_255 : D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_16_235;
+        u.context->VideoProcessorSetStreamColorSpace(u.processor.Get(), 0, &color);
+        u.context->VideoProcessorSetOutputColorSpace(u.processor.Get(), &color);
+
+        const RECT source{0, 0, LONG(m_res->width), LONG(m_res->height)};
+        const RECT whole{0, 0, LONG(u.width), LONG(u.height)};
+        u.context->VideoProcessorSetStreamSourceRect(u.processor.Get(), 0, TRUE, &source);
+        u.context->VideoProcessorSetStreamDestRect(u.processor.Get(), 0, TRUE, &whole);
+        u.context->VideoProcessorSetOutputTargetRect(u.processor.Get(), TRUE, &whole);
+
+        D3D11_VIDEO_PROCESSOR_STREAM stream{};
+        stream.Enable = TRUE;
+        stream.pInputSurface = u.input.Get();
+        const HRESULT result = u.context->VideoProcessorBlt(u.processor.Get(), u.output.Get(), 0, 1, &stream);
+        if (FAILED(result)) {
+            upscaleFailed("a frame", result);
+            return;
+        }
+        u.ready = true;
+    }
+
+    // Decoders round their surfaces up, so the picture can fill only part of the texture.
+    QRectF picturePart() const {
+        const qreal scaleX = qreal(m_res->width) / qreal(m_res->textureWidth);
+        const qreal scaleY = qreal(m_res->height) / qreal(m_res->textureHeight);
+        return QRectF(m_view.left() * scaleX, m_view.top() * scaleY, m_view.width() * scaleX, m_view.height() * scaleY);
+    }
+
+    void draw(const QMatrix4x4 &mvp, float width, float height, ID3D11ShaderResourceView *y, ID3D11ShaderResourceView *uv,
+              const QRectF &part) {
         Pipeline &p = pipeline();
         if (!m_res->constants) {
             D3D11_BUFFER_DESC desc{};
@@ -268,17 +438,14 @@ private:
             desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
             g_device->CreateBuffer(&desc, nullptr, &m_res->constants);
         }
-        // Decoders round their surfaces up, so the picture can fill only part of the texture.
-        const float scaleX = float(m_res->width) / float(m_res->textureWidth);
-        const float scaleY = float(m_res->height) / float(m_res->textureHeight);
         Constants c{};
         memcpy(c.mvp, mvp.constData(), sizeof c.mvp);
         c.size[0] = width;
         c.size[1] = height;
-        c.uvOrigin[0] = float(m_view.left()) * scaleX;
-        c.uvOrigin[1] = float(m_view.top()) * scaleY;
-        c.uvScale[0] = float(m_view.width()) * scaleX;
-        c.uvScale[1] = float(m_view.height()) * scaleY;
+        c.uvOrigin[0] = float(part.left());
+        c.uvOrigin[1] = float(part.top());
+        c.uvScale[0] = float(part.width());
+        c.uvScale[1] = float(part.height());
         c.gamma = m_gamma;
         c.fullRange = float(m_res->fullRange);
         // Weights of red, green and blue, which define BT.601, BT.709 and BT.2020.
@@ -294,7 +461,7 @@ private:
         g_context->PSSetShader(p.ps.Get(), nullptr, 0);
         g_context->VSSetConstantBuffers(0, 1, m_res->constants.GetAddressOf());
         g_context->PSSetConstantBuffers(0, 1, m_res->constants.GetAddressOf());
-        ID3D11ShaderResourceView *views[2] = {m_res->y.Get(), m_res->uv.Get()};
+        ID3D11ShaderResourceView *views[2] = {y, uv};
         g_context->PSSetShaderResources(0, 2, views);
         g_context->PSSetSamplers(0, 1, p.sampler.GetAddressOf());
         g_context->Draw(4, 0);
@@ -345,7 +512,8 @@ private:
         QMatrix4x4 mvp;
         mvp.translate(-1, 1);
         mvp.scale(2.0f / float(width), -2.0f / float(height));
-        draw(mvp, float(width), float(height));
+        // Always the original, so a photo never holds detail the upscaler made up.
+        draw(mvp, float(width), float(height), m_res->y.Get(), m_res->uv.Get(), picturePart());
 
         g_context->OMSetRenderTargets(1, savedTarget.GetAddressOf(), savedDepth.Get());
         if (viewports) g_context->RSSetViewports(1, &savedViewport);
@@ -369,6 +537,7 @@ private:
     QRectF m_rect;
     QRectF m_view{0, 0, 1, 1};
     float m_gamma = 1;
+    bool m_superResolution = false;
     PictureReport m_picture;
 };
 
@@ -396,6 +565,22 @@ void prepareGraphics() {
     ComPtr<ID3D10Multithread> multithread;
     if (SUCCEEDED(g_context->QueryInterface(IID_PPV_ARGS(&multithread)))) multithread->SetMultithreadProtected(TRUE);
     g_gstDevice = gst_d3d11_device_new_wrapped(g_device);
+}
+
+// Runs on what the app renders with, so a laptop that renders on Intel doesn't offer the feature
+// even if it also has an RTX card.
+bool hasSuperResolution() {
+    static const bool available = [] {
+        ComPtr<IDXGIDevice> device;
+        ComPtr<IDXGIAdapter> adapter;
+        DXGI_ADAPTER_DESC desc{};
+        if (!g_device || FAILED(g_device->QueryInterface(IID_PPV_ARGS(&device))) ||
+            FAILED(device->GetAdapter(&adapter)) || FAILED(adapter->GetDesc(&desc)))
+            return false;
+        constexpr UINT kNvidiaVendor = 0x10DE;
+        return desc.VendorId == kNvidiaVendor && wcsstr(desc.Description, L"RTX") != nullptr;
+    }();
+    return available;
 }
 
 void prepareWindow(QQuickWindow *window) {

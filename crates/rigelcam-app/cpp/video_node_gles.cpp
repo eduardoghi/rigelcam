@@ -323,6 +323,8 @@ void prepareGraphics() {
     QSurfaceFormat::setDefaultFormat(format);
 }
 
+bool hasSuperResolution() { return false; }
+
 void prepareWindow(QQuickWindow *) {}
 
 extern "C" bool rigel_graphics_ready() { return true; }
