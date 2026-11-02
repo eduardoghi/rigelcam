@@ -14,9 +14,8 @@ It talks to the recorder over the protocols the device already exposes, RTSP for
 Dahua HTTP API for everything else, so it does not need the vendor SDK and runs natively on Linux.
 
 > [!NOTE]
-> Early stage, with no packaged release yet. The app is in daily use on Linux and has to be built
-> from source. On Windows, live view, recordings, export and photos were tested on Intel graphics
-> only.
+> Early stage. The app is in daily use on Linux. On Windows, live view, recordings, export and photos
+> were tested on Intel graphics, and the RTX options on a GeForce RTX 4070.
 
 ## Features
 
@@ -74,6 +73,18 @@ Set `"check_updates": false` in `recorders.json` to turn the check off.
 Video and HTTP traffic is not encrypted, so keep recorders on a trusted network. The RTSP library
 answers a server that asks for Basic authentication, which sends the password in a reversible form.
 Recorders use Digest, and the risk is a device on the network pretending to be one.
+
+## Installing
+
+Download from the [releases page](https://github.com/eduardoghi/rigelcam/releases). On Windows, the
+installer updates the app by itself. On Linux, install the Flatpak bundle:
+
+```sh
+flatpak install --user rigelcam-*-linux-x86_64.flatpak
+```
+
+The bundle gets its runtime from Flathub and doesn't update by itself, so install each new version
+the same way. Its data is apart from a build made from source, so add the recorders again.
 
 ## Building
 

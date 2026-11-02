@@ -15,9 +15,8 @@ HTTP de Dahua para todo lo demás, así que no necesita el SDK del fabricante y 
 nativa en Linux.
 
 > [!NOTE]
-> Etapa inicial, todavía sin versión empaquetada. La aplicación se usa a diario en Linux y hay que
-> compilarla desde el código. En Windows, la vista en vivo, las grabaciones, la exportación y las
-> fotos se probaron solo con gráficos Intel.
+> Etapa inicial. La aplicación se usa a diario en Linux. En Windows, la vista en vivo, las grabaciones,
+> la exportación y las fotos se probaron con gráficos Intel, y las opciones RTX en una GeForce RTX 4070.
 
 ## Funciones
 
@@ -80,6 +79,19 @@ El tráfico de video y HTTP no está cifrado, así que mantenga los grabadores e
 La biblioteca de RTSP responde a un servidor que pida autenticación Basic, que envía la contraseña
 de forma reversible. Los grabadores usan Digest, y el riesgo es un equipo de la red que se haga
 pasar por uno de ellos.
+
+## Instalación
+
+Descarga desde la [página de versiones](https://github.com/eduardoghi/rigelcam/releases). En Windows,
+el instalador actualiza la aplicación por sí solo. En Linux, instala el paquete Flatpak:
+
+```sh
+flatpak install --user rigelcam-*-linux-x86_64.flatpak
+```
+
+El paquete obtiene su runtime de Flathub y no se actualiza por sí solo, así que instala cada versión
+nueva de la misma forma. Sus datos están separados de una compilación desde el código, así que vuelve
+a agregar los grabadores.
 
 ## Compilación
 

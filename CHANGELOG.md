@@ -4,6 +4,10 @@ User-visible changes, newest first.
 
 ## [Unreleased]
 
+### Added
+
+- A Flatpak bundle for Linux, with hardware decoding through VA-API. It doesn't update by itself.
+
 ## [0.1.2] (2026-11-02)
 
 ### Added

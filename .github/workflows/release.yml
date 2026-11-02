@@ -141,11 +141,35 @@ jobs:
             rigelcam-*-windows-x64-setup.exe
           if-no-files-found: error
 
+  linux:
+    name: build for Linux
+    needs: checks
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    env:
+      VERSION: ${{ needs.checks.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: install Flatpak
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends flatpak flatpak-builder
+          flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+      - name: build the bundle
+        run: packaging/linux/build-flatpak.sh "rigelcam-$VERSION-linux-x86_64.flatpak"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: linux
+          path: rigelcam-*-linux-x86_64.flatpak
+          if-no-files-found: error
+
   # Apart from the build, so nothing that compiles third-party code can write to the release or sign
   # in as this workflow.
   draft:
     name: create the draft
-    needs: [checks, windows]
+    needs: [checks, windows, linux]
     runs-on: ubuntu-26.04
     timeout-minutes: 15
     # Holds the signing key, and only admits runs on main.

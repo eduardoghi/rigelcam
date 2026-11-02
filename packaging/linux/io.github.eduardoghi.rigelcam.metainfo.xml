@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.eduardoghi.rigelcam</id>
+  <name>Rigelcam</name>
+  <summary>Watch cameras and recordings from Intelbras and Dahua recorders</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <developer id="io.github.eduardoghi">
+    <name>Eduardo Hillesheim</name>
+  </developer>
+  <description>
+    <p>
+      Rigelcam talks directly to Intelbras and Dahua NVRs, with no vendor software or cloud account.
+      It shows a grid of live cameras and plays recordings by day, with up to 4 cameras in sync.
+    </p>
+    <p>
+      An independent project, not affiliated with Intelbras or Dahua.
+    </p>
+  </description>
+  <launchable type="desktop-id">io.github.eduardoghi.rigelcam.desktop</launchable>
+  <url type="homepage">https://github.com/eduardoghi/rigelcam</url>
+  <url type="bugtracker">https://github.com/eduardoghi/rigelcam/issues</url>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="0.1.2" date="2026-11-02"/>
+  </releases>
+</component>

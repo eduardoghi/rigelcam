@@ -307,8 +307,9 @@ extern "C" void rigel_install_translation(const unsigned char *data, int size) {
 
 extern "C" void rigel_set_app_identity() {
     QGuiApplication::setApplicationDisplayName(QStringLiteral("Rigelcam"));
-    // Wayland compositors look up the icon through the installed .desktop file with this name.
-    QGuiApplication::setDesktopFileName(QStringLiteral("rigelcam"));
+    // Wayland compositors look up the icon through the installed .desktop file with this name,
+    // which a Flatpak names after its id.
+    QGuiApplication::setDesktopFileName(qEnvironmentVariable("FLATPAK_ID", QStringLiteral("rigelcam")));
     QIcon icon;
     for (int size : {16, 24, 32, 48, 64, 128, 256})
         icon.addFile(QStringLiteral(":/rigelcam/icon-%1.png").arg(size));

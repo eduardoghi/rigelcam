@@ -1,0 +1,44 @@
+app-id: io.github.eduardoghi.rigelcam
+runtime: org.kde.Platform
+runtime-version: "6.10"
+sdk: org.kde.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: rigelcam
+finish-args:
+  - --share=ipc
+  - --share=network
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri
+  # Recorder passwords stay in the keyring of the session.
+  - --talk-name=org.freedesktop.secrets
+  - --filesystem=xdg-pictures/Rigelcam:create
+  - --filesystem=xdg-videos/Rigelcam:create
+modules:
+  - name: rigelcam
+    buildsystem: simple
+    build-options:
+      append-path: /usr/lib/sdk/rust-stable/bin
+      env:
+        CARGO_NET_OFFLINE: "true"
+    build-commands:
+      - install -Dm644 packaging/linux/cargo-vendor.toml .cargo/config.toml
+      - cargo build --offline --release --locked -j "$FLATPAK_BUILDER_N_JOBS" -p rigelcam-app
+      - install -Dm755 target/release/rigelcam "$FLATPAK_DEST/bin/rigelcam"
+      - install -Dm644 assets/branding/rigelcam.svg "$FLATPAK_DEST/share/icons/hicolor/scalable/apps/$FLATPAK_ID.svg"
+      - install -Dm644 packaging/linux/rigelcam.desktop "$FLATPAK_DEST/share/applications/$FLATPAK_ID.desktop"
+      - desktop-file-edit --set-icon="$FLATPAK_ID" "$FLATPAK_DEST/share/applications/$FLATPAK_ID.desktop"
+      - install -Dm644 packaging/linux/$FLATPAK_ID.metainfo.xml "$FLATPAK_DEST/share/metainfo/$FLATPAK_ID.metainfo.xml"
+      - install -Dm644 LICENSE "$FLATPAK_DEST/share/licenses/$FLATPAK_ID/LICENSE"
+    sources:
+      - type: dir
+        path: ../..
+        skip:
+          - target
+          - .git
+          - packaging/linux/vendor
+      # Made by `cargo vendor` in build-flatpak.sh, as the build has no network.
+      - type: dir
+        path: vendor
+        dest: vendor
