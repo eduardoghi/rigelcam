@@ -5,4 +5,6 @@ pub mod dahua;
 pub mod dav;
 pub mod layout;
 pub mod recorders;
+#[cfg(target_os = "linux")]
+mod secret_portal;
 pub mod update;

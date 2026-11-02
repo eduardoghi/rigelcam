@@ -6,7 +6,8 @@ User-visible changes, newest first.
 
 ### Added
 
-- A Flatpak bundle for Linux, with hardware decoding through VA-API. It doesn't update by itself.
+- A Flatpak bundle for Linux, with hardware decoding through VA-API. It doesn't update by itself,
+  and it keeps passwords in an encrypted file of its own, away from the keyring of the session.
 
 ## [0.1.2] (2026-11-02)
 

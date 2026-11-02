@@ -11,8 +11,6 @@ finish-args:
   - --socket=wayland
   - --socket=fallback-x11
   - --device=dri
-  # Recorder passwords stay in the keyring of the session.
-  - --talk-name=org.freedesktop.secrets
   - --filesystem=xdg-pictures/Rigelcam:create
   - --filesystem=xdg-videos/Rigelcam:create
 modules:

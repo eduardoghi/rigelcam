@@ -8,6 +8,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 use crate::layout::Layout;
+#[cfg(target_os = "linux")]
+use crate::secret_portal;
 
 const KEYRING_SERVICE: &str = "rigelcam";
 
@@ -150,30 +152,52 @@ pub trait Secrets {
 
 pub struct SystemKeyring;
 
+fn account(recorder_id: u64) -> String {
+    format!("recorder-{recorder_id}")
+}
+
+/// Flatpak creates this file in every sandbox.
+#[cfg(target_os = "linux")]
+fn in_flatpak() -> bool {
+    Path::new("/.flatpak-info").exists()
+}
+
 fn entry(recorder_id: u64) -> Result<keyring::Entry, Error> {
     // The library tries the keyring once per run, and after a failure it only answers that there
     // is no store, which hides why.
     if let Err(error) = keyring::Entry::store_status() {
         return Err(Error::Keyring(error.to_string()));
     }
-    keyring::Entry::new(KEYRING_SERVICE, &format!("recorder-{recorder_id}"))
+    keyring::Entry::new(KEYRING_SERVICE, &account(recorder_id))
         .map_err(|e| Error::Keyring(e.to_string()))
 }
 
 impl Secrets for SystemKeyring {
     fn set(&self, recorder_id: u64, password: &str) -> Result<(), Error> {
+        #[cfg(target_os = "linux")]
+        if in_flatpak() {
+            return secret_portal::set(KEYRING_SERVICE, &account(recorder_id), password);
+        }
         entry(recorder_id)?
             .set_password(password)
             .map_err(|e| Error::Keyring(e.to_string()))
     }
 
     fn get(&self, recorder_id: u64) -> Result<String, Error> {
+        #[cfg(target_os = "linux")]
+        if in_flatpak() {
+            return secret_portal::get(KEYRING_SERVICE, &account(recorder_id));
+        }
         entry(recorder_id)?
             .get_password()
             .map_err(|e| Error::Keyring(e.to_string()))
     }
 
     fn delete(&self, recorder_id: u64) -> Result<(), Error> {
+        #[cfg(target_os = "linux")]
+        if in_flatpak() {
+            return secret_portal::delete(KEYRING_SERVICE, &account(recorder_id));
+        }
         match entry(recorder_id)?.delete_credential() {
             Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
             Err(e) => Err(Error::Keyring(e.to_string())),

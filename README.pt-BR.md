@@ -64,7 +64,9 @@ rede dele, use uma VPN.
 ## Credenciais
 
 As senhas dos gravadores ficam no cofre de senhas do sistema (Secret Service no Linux, Gerenciador
-de Credenciais no Windows) e nunca são gravadas em arquivos de configuração nem em logs.
+de Credenciais no Windows) e nunca são gravadas em arquivos de configuração nem em logs. O Flatpak
+não tem acesso a esse cofre e as guarda num arquivo cifrado próprio, com a chave do portal de
+segredos do sistema.
 
 No Windows, o app consulta a última versão no GitHub ao abrir e mostra um aviso se houver uma nova.
 Nada é baixado sem você pedir, e um instalador só roda se a assinatura for válida. Para desligar a

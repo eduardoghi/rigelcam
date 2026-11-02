@@ -64,7 +64,8 @@ from outside its network.
 ## Credentials
 
 Recorder passwords are kept in the system keyring (Secret Service on Linux, Credential Manager on
-Windows) and never written to config files or logs.
+Windows) and never written to config files or logs. The Flatpak has no access to that keyring, and
+keeps them in an encrypted file of its own, with a key from the Secret portal of the desktop.
 
 On Windows the app asks GitHub for the latest version when it opens, and shows a notice if there
 is one. Nothing is downloaded until you ask, and an installer only runs if its signature is valid.

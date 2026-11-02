@@ -19,3 +19,8 @@ thiserror = "2.0.21"
 # Without gzip, so the limit on a body counts what was decoded, and without TLS, which recorders
 # here don't use.
 ureq = { version = "3.5.0", default-features = false }
+
+# For the Flatpak build, which stores passwords through the Secret portal.
+[target.'cfg(target_os = "linux")'.dependencies]
+futures-lite = "2"
+oo7 = { version = "0.6.0", default-features = false, features = ["async-std", "native_crypto"] }

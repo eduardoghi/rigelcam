@@ -69,7 +69,8 @@ grabador desde fuera de su red.
 
 Las contraseñas de los grabadores se guardan en el almacén del sistema (Secret Service en Linux,
 Administrador de credenciales en Windows) y nunca se escriben en archivos de configuración ni en
-registros.
+registros. El Flatpak no tiene acceso a ese almacén y las guarda en un archivo cifrado propio, con la
+clave del portal de secretos del sistema.
 
 En Windows, la aplicación consulta la última versión en GitHub al abrirse y muestra un aviso si hay
 una nueva. No se descarga nada hasta que lo pida, y un instalador solo se ejecuta si su firma es
