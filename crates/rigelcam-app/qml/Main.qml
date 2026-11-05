@@ -1468,6 +1468,8 @@ ApplicationWindow {
         id: cameraArea
         readonly property real cellWidth: (width - (win.cols - 1) * 2) / win.cols
         readonly property real cellHeight: (height - (win.cols - 1) * 2) / win.cols
+        // The tile under the mouse, whose name leaves room for the button that removes it.
+        property string hoveredKey: ""
         anchors.left: sidebar.right
         anchors.right: parent.right
         anchors.top: parent.top
@@ -1601,31 +1603,6 @@ ApplicationWindow {
                     }
                 }
 
-                // At the top because recorders usually print their own title at the bottom left.
-                Rectangle {
-                    visible: !tile.isMain
-                    x: 6
-                    y: 6
-                    width: Math.min(cameraName.implicitWidth + 14, tile.width - 12)
-                    height: cameraName.implicitHeight + 6
-                    radius: 5
-                    color: colors.overVideo
-                    Text {
-                        id: cameraName
-                        anchors.fill: parent
-                        anchors.leftMargin: 7
-                        anchors.rightMargin: 7
-                        verticalAlignment: Text.AlignVCenter
-                        text: tile.label
-                        // The name comes from the recorder, so it can't be read as markup.
-                        textFormat: Text.PlainText
-                        elide: Text.ElideRight
-                        font.pixelSize: 12
-                        font.weight: Font.Medium
-                        color: colors.overVideoText
-                    }
-                }
-
                 Rectangle {
                     anchors.fill: parent
                     visible: tileHover.hovered && !tile.isMain
@@ -1658,7 +1635,15 @@ ApplicationWindow {
                     }
                 }
 
-                HoverHandler { id: tileHover }
+                HoverHandler {
+                    id: tileHover
+                    onHoveredChanged: {
+                        if (hovered)
+                            cameraArea.hoveredKey = tile.key
+                        else if (cameraArea.hoveredKey === tile.key)
+                            cameraArea.hoveredKey = ""
+                    }
+                }
                 ZoomGestures {
                     enabled: tile.isMain
                     zoom: win.zoom
@@ -1673,6 +1658,43 @@ ApplicationWindow {
                 CameraDrag {
                     enabled: !tile.isMain
                     camera: tile.payload
+                }
+            }
+        }
+
+        // The names go above every video and not inside each tile. A video is drawn by a node of its
+        // own, which the scene graph can't batch with anything, so names between videos would each
+        // be drawn on their own, and together they become one or two draws.
+        Repeater {
+            model: tileModel
+
+            // At the top because recorders usually print their own title at the bottom left.
+            Rectangle {
+                id: nameTag
+                required property string key
+                required property string label
+                readonly property int square: win.gridKeys.indexOf(key)
+                visible: square >= 0 && win.zoomed === "" && !win.inRecordings
+                x: (square % win.cols) * (cameraArea.cellWidth + 2) + 6
+                y: Math.floor(square / win.cols) * (cameraArea.cellHeight + 2) + 6
+                width: Math.min(cameraName.implicitWidth + 14,
+                                cameraArea.cellWidth - (cameraArea.hoveredKey === key ? 44 : 12))
+                height: cameraName.implicitHeight + 6
+                radius: 5
+                color: colors.overVideo
+                Text {
+                    id: cameraName
+                    anchors.fill: parent
+                    anchors.leftMargin: 7
+                    anchors.rightMargin: 7
+                    verticalAlignment: Text.AlignVCenter
+                    text: nameTag.label
+                    // The name comes from the recorder, so it can't be read as markup.
+                    textFormat: Text.PlainText
+                    elide: Text.ElideRight
+                    font.pixelSize: 12
+                    font.weight: Font.Medium
+                    color: colors.overVideoText
                 }
             }
         }
