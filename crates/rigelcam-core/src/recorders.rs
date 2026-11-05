@@ -3,6 +3,8 @@
 use std::fs::{self, File, TryLockError};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::thread::JoinHandle;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -286,6 +288,69 @@ const ID_EPOCH: u64 = 1_767_225_600;
 pub struct RecorderList {
     path: PathBuf,
     saved: Saved,
+    saver: Saver,
+}
+
+/// Saves what the interface changes on a thread of its own, since a save waits for the disk.
+/// Only the newest copy waits, so a burst of changes costs one save.
+#[derive(Default)]
+struct Saver {
+    queue: Arc<SaveQueue>,
+    thread: Option<JoinHandle<()>>,
+}
+
+#[derive(Default)]
+struct SaveQueue {
+    state: Mutex<SaveState>,
+    changed: Condvar,
+}
+
+#[derive(Default)]
+struct SaveState {
+    pending: Option<Vec<u8>>,
+    saving: bool,
+    closing: bool,
+    on_error: Option<Arc<ErrorHandler>>,
+}
+
+type ErrorHandler = dyn Fn(Error) + Send + Sync;
+
+impl SaveQueue {
+    fn lock(&self) -> MutexGuard<'_, SaveState> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn wait<'a>(&self, state: MutexGuard<'a, SaveState>) -> MutexGuard<'a, SaveState> {
+        self.changed
+            .wait(state)
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn run(&self, path: &Path) {
+        let mut state = self.lock();
+        loop {
+            if let Some(bytes) = state.pending.take() {
+                state.saving = true;
+                drop(state);
+                let result = save(path, &bytes);
+                state = self.lock();
+                state.saving = false;
+                self.changed.notify_all();
+                if let Err(error) = result {
+                    let handler = state.on_error.clone();
+                    drop(state);
+                    if let Some(handler) = handler {
+                        handler(error);
+                    }
+                    state = self.lock();
+                }
+            } else if state.closing {
+                return;
+            } else {
+                state = self.wait(state);
+            }
+        }
+    }
 }
 
 /// Keeps other runs of the app away from the list while it lives. Two of them would each save
@@ -362,7 +427,11 @@ impl RecorderList {
         if let Some(layout) = &mut saved.layout {
             layout.normalize();
         }
-        Ok(Self { path, saved })
+        Ok(Self {
+            path,
+            saved,
+            saver: Saver::default(),
+        })
     }
 
     pub fn recorders(&self) -> &[Recorder] {
@@ -422,18 +491,18 @@ impl RecorderList {
         self.saved.layout.as_ref()
     }
 
-    pub fn set_layout(&mut self, layout: Layout) -> Result<(), Error> {
+    pub fn set_layout(&mut self, layout: Layout) {
         self.saved.layout = Some(layout);
-        self.write()
+        self.save_later();
     }
 
     pub fn language(&self) -> Option<&str> {
         self.saved.language.as_deref()
     }
 
-    pub fn set_language(&mut self, language: &str) -> Result<(), Error> {
+    pub fn set_language(&mut self, language: &str) {
         self.saved.language = Some(language.to_owned());
-        self.write()
+        self.save_later();
     }
 
     pub fn checks_for_updates(&self) -> bool {
@@ -444,27 +513,83 @@ impl RecorderList {
         self.saved.theme.as_deref()
     }
 
-    pub fn set_theme(&mut self, theme: &str) -> Result<(), Error> {
+    pub fn set_theme(&mut self, theme: &str) {
         self.saved.theme = Some(theme.to_owned());
-        self.write()
+        self.save_later();
     }
 
     pub fn sidebar_collapsed(&self) -> bool {
         self.saved.sidebar_collapsed
     }
 
-    pub fn set_sidebar_collapsed(&mut self, collapsed: bool) -> Result<(), Error> {
+    pub fn set_sidebar_collapsed(&mut self, collapsed: bool) {
         self.saved.sidebar_collapsed = collapsed;
-        self.write()
+        self.save_later();
     }
 
-    fn write(&self) -> Result<(), Error> {
-        if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent)?;
-            restrict_folder(parent)?;
-        }
-        write_atomically(&self.path, &serde_json::to_vec_pretty(&self.saved)?)
+    /// Where a save done by `set_layout` and the other settings reports its failure, on the
+    /// thread that saves. Without it the failure is lost.
+    pub fn on_save_error(&self, handler: impl Fn(Error) + Send + Sync + 'static) {
+        self.saver.queue.lock().on_error = Some(Arc::new(handler));
     }
+
+    fn save_later(&mut self) {
+        let bytes = match serde_json::to_vec_pretty(&self.saved) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                let handler = self.saver.queue.lock().on_error.clone();
+                if let Some(handler) = handler {
+                    handler(error.into());
+                }
+                return;
+            }
+        };
+        self.saver.queue.lock().pending = Some(bytes);
+        self.saver.queue.changed.notify_all();
+        if self.saver.thread.is_none() {
+            let queue = Arc::clone(&self.saver.queue);
+            let path = self.path.clone();
+            self.saver.thread = Some(std::thread::spawn(move || queue.run(&path)));
+        }
+    }
+
+    /// Saves now, for the changes that have to be undone when saving fails. A save still waiting
+    /// is dropped, since this one has everything it had, and one already running ends first, so
+    /// an older copy can't land after this one.
+    fn write(&self) -> Result<(), Error> {
+        let queue = &self.saver.queue;
+        let mut state = queue.lock();
+        state.pending = None;
+        while state.saving {
+            state = queue.wait(state);
+        }
+        // Holding the lock keeps the thread away from the temporary file.
+        let result = serde_json::to_vec_pretty(&self.saved)
+            .map_err(Error::from)
+            .and_then(|bytes| save(&self.path, &bytes));
+        drop(state);
+        result
+    }
+}
+
+impl Drop for RecorderList {
+    /// Waits for the last change to reach the disk, so closing the app doesn't lose it.
+    fn drop(&mut self) {
+        let Some(thread) = self.saver.thread.take() else {
+            return;
+        };
+        self.saver.queue.lock().closing = true;
+        self.saver.queue.changed.notify_all();
+        let _ = thread.join();
+    }
+}
+
+fn save(path: &Path, bytes: &[u8]) -> Result<(), Error> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+        restrict_folder(parent)?;
+    }
+    write_atomically(path, bytes)
 }
 
 // The list tells which recorders exist and which user opens them, so it stays private.
@@ -596,16 +721,51 @@ mod tests {
             recorder: first,
             channel: 1,
         }]);
-        list.set_layout(layout.clone()).unwrap();
-        list.set_sidebar_collapsed(true).unwrap();
-        list.set_theme("light").unwrap();
-        list.set_language("en").unwrap();
+        list.set_layout(layout.clone());
+        list.set_sidebar_collapsed(true);
+        list.set_theme("light");
+        list.set_language("en");
+        drop(list);
         let reopened = RecorderList::open(path).unwrap();
         assert_eq!(reopened.theme(), Some("light"));
         assert_eq!(reopened.language(), Some("en"));
         assert_eq!(reopened.recorders().len(), 2);
         assert_eq!(reopened.layout(), Some(&layout));
         assert!(reopened.sidebar_collapsed());
+    }
+
+    #[test]
+    fn saving_a_recorder_keeps_a_setting_still_waiting_to_be_saved() {
+        let path = temp_path("ordered");
+        let mut list = RecorderList::open(path.clone()).unwrap();
+        for _ in 0..50 {
+            list.set_theme("light");
+            add(&mut list, "A", &addr("192.0.2.1"));
+        }
+        list.set_language("en");
+        drop(list);
+        let reopened = RecorderList::open(path).unwrap();
+        assert_eq!(reopened.recorders().len(), 50);
+        assert_eq!(reopened.theme(), Some("light"));
+        assert_eq!(reopened.language(), Some("en"));
+    }
+
+    #[test]
+    fn a_setting_that_fails_to_save_reports_it() {
+        let path = temp_path("setting-unsaved");
+        let mut list = RecorderList::open(path.clone()).unwrap();
+        fs::create_dir_all(path.with_extension("json.tmp")).unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        list.on_save_error(move |error| {
+            let _ = sender.send(error.to_string());
+        });
+        list.set_theme("light");
+        let message = receiver
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap();
+        assert!(!message.is_empty());
+        drop(list);
+        assert!(!path.exists());
     }
 
     #[test]
@@ -626,7 +786,7 @@ mod tests {
             columns: 2,
             cameras: vec![camera(first), camera(second), None, None],
         };
-        list.set_layout(layout).unwrap();
+        list.set_layout(layout);
         assert_eq!(
             take_password(&secrets, second),
             (Previous::Password("p".to_owned()), true)

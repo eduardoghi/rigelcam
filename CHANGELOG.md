@@ -13,6 +13,8 @@ User-visible changes, newest first.
 - A camera without signal shows its state instead of the last picture, and frees the memory of the
   video while it waits to reconnect.
 - The window no longer freezes while a slow recorder answers a login check.
+- Moving a camera or changing the columns, the theme, the language or the side bar no longer
+  pauses the window while the disk saves the list.
 - A day sent by the recorder only goes into file names and URLs when it is a plain date.
 - A cancel that arrives just after an export ends no longer cancels the next one.
 - A wrong password found by the permission check of an export isn't tried again by the download.

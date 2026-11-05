@@ -503,6 +503,13 @@ impl qobject::CameraGrid {
         let layout = list.layout().cloned();
         let collapsed = list.sidebar_collapsed();
         let theme = QString::from(list.theme().unwrap_or_default());
+        let thread = self.qt_thread();
+        list.on_save_error(move |error| {
+            let text = error.to_string();
+            let _ = thread.queue(move |grid: Pin<&mut qobject::CameraGrid>| {
+                grid.set_error(QString::from(text.as_str()));
+            });
+        });
         self.as_mut().rust_mut().list = Some(list);
         self.as_mut().set_sidebar_collapsed(collapsed);
         self.as_mut().set_theme(theme);
@@ -739,19 +746,13 @@ impl qobject::CameraGrid {
         self.save_layout(layout);
     }
 
-    /// The grid follows the new layout even if saving fails, and the error goes to the toolbar.
+    /// The grid follows the new layout even if saving fails, and the error comes to the toolbar
+    /// later, from the thread that saves.
     fn save_layout(mut self: Pin<&mut Self>, layout: Layout) {
-        let result = self
-            .as_mut()
-            .rust_mut()
-            .list
-            .as_mut()
-            .map(|list| list.set_layout(layout.clone()));
-        let message = match result {
-            Some(Err(error)) => error.to_string(),
-            _ => String::new(),
-        };
-        self.as_mut().set_error(QString::from(message.as_str()));
+        if let Some(list) = self.as_mut().rust_mut().list.as_mut() {
+            list.set_layout(layout.clone());
+        }
+        self.as_mut().set_error(QString::default());
         self.publish_layout(&layout);
     }
 
@@ -1158,44 +1159,23 @@ impl qobject::CameraGrid {
     fn save_language(mut self: Pin<&mut Self>, language: &QString) {
         let code = i18n::resolve(&language.to_string());
         i18n::install(code);
-        let result = self
-            .as_mut()
-            .rust_mut()
-            .list
-            .as_mut()
-            .map(|list| list.set_language(code));
-        if let Some(Err(error)) = result {
-            self.as_mut()
-                .set_error(QString::from(error.to_string().as_str()));
+        if let Some(list) = self.as_mut().rust_mut().list.as_mut() {
+            list.set_language(code);
         }
         self.set_language(QString::from(code));
     }
 
     fn save_theme(mut self: Pin<&mut Self>, theme: &QString) {
         let text = theme.to_string();
-        let result = self
-            .as_mut()
-            .rust_mut()
-            .list
-            .as_mut()
-            .map(|list| list.set_theme(&text));
-        if let Some(Err(error)) = result {
-            self.as_mut()
-                .set_error(QString::from(error.to_string().as_str()));
+        if let Some(list) = self.as_mut().rust_mut().list.as_mut() {
+            list.set_theme(&text);
         }
         self.set_theme(theme.clone());
     }
 
     fn save_sidebar_collapsed(mut self: Pin<&mut Self>, collapsed: bool) {
-        let result = self
-            .as_mut()
-            .rust_mut()
-            .list
-            .as_mut()
-            .map(|list| list.set_sidebar_collapsed(collapsed));
-        if let Some(Err(error)) = result {
-            self.as_mut()
-                .set_error(QString::from(error.to_string().as_str()));
+        if let Some(list) = self.as_mut().rust_mut().list.as_mut() {
+            list.set_sidebar_collapsed(collapsed);
         }
         self.set_sidebar_collapsed(collapsed);
     }
