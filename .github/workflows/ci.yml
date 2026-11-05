@@ -12,10 +12,12 @@ jobs:
   secrets:
     name: secrets
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
+          persist-credentials: false
       # Scans the whole history, since a secret in any commit stays readable in a public repository.
       - name: gitleaks
         run: |
@@ -26,9 +28,13 @@ jobs:
   core:
     name: format, lint and test
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
       - run: rustup component add rustfmt clippy
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo fmt --all --check
       # rigelcam-app needs Qt and GStreamer, so it has a job of its own.
       - run: cargo clippy -p rigelcam-core --all-targets --locked -- -D warnings
@@ -38,8 +44,11 @@ jobs:
     name: app on Linux
     # The newest image, since the Qt of the older ones is far behind the one the app is built on.
     runs-on: ubuntu-26.04
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
       - name: install Qt and GStreamer
         run: |
           sudo apt-get update

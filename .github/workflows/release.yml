@@ -34,13 +34,17 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+          # The whole history, to find the last commit the Windows check ran on.
+          fetch-depth: 0
       - name: read the version
         id: version
         run: |
           version=$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/rigelcam-app/Cargo.toml | head -1)
           test -n "$version"
           echo "version=$version" >> "$GITHUB_OUTPUT"
-      # Published versions can't change, so one that exists has to be bumped first.
+      # Published versions can't change, so one that exists has to be bumped first. The Windows
+      # check only runs on commits that change what it builds, so it has to have passed since the
+      # last of those.
       - name: require a new version on main with CI passing
         env:
           GH_TOKEN: ${{ github.token }}
@@ -50,9 +54,23 @@ jobs:
           passed=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml --commit "$GITHUB_SHA" \
             --status success --json databaseId --jq length)
           test "$passed" -ge 1
-          draft=$(gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" --json isDraft \
-            --jq .isDraft 2>/dev/null || echo true)
-          test "$draft" = true
+          # A push of several commits runs it only on the newest, which also holds that change.
+          built=$(git log -1 --first-parent --format=%H -- crates Cargo.toml Cargo.lock .github/workflows/windows.yml)
+          checked=false
+          # Only runs on main itself, since a run of a pull request checked another tree.
+          for commit in $(git rev-list --first-parent "$built^..$GITHUB_SHA"); do
+            passed=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow windows.yml --commit "$commit" \
+              --event push --branch main --status success --json databaseId --jq length)
+            if [ "$passed" -ge 1 ]; then checked=true; break; fi
+          done
+          test "$checked" = true
+          # Only a release that doesn't exist counts as a draft, so a failing call stops here.
+          if answer=$(gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" --json isDraft \
+            --jq .isDraft 2>&1); then
+            test "$answer" = true
+          else
+            echo "$answer" | grep -q 'release not found'
+          fi
 
   windows:
     name: build for Windows

@@ -1,0 +1,89 @@
+name: Windows
+
+# Without this, code that only Windows builds is compiled for the first time by the release, when a
+# version is about to go out. Only changes that can break that build start it, and it checks without
+# linking or testing, which the release does.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/windows.yml"
+  pull_request:
+    paths:
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/windows.yml"
+
+permissions:
+  contents: read
+
+# A newer push makes the check of an older one pointless.
+concurrency:
+  group: windows-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GSTREAMER_VERSION: 1.28.8
+  GSTREAMER_SHA256: e4c41ee6ee9c6c32a45d198463ec08d79bac3bd5fa58adc93d13fe4a08abc9d9
+  QT_VERSION: 6.10.3
+  AQTINSTALL_VERSION: 3.3.0
+
+jobs:
+  app:
+    name: app on Windows
+    runs-on: windows-2025
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      # Installing both takes longer than the check, so they come back from the cache, keyed by
+      # what they are.
+      - id: sdks
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            C:\gstreamer
+            C:\Qt
+          key: sdks-gstreamer-${{ env.GSTREAMER_SHA256 }}-qt-${{ env.QT_VERSION }}-aqt-${{ env.AQTINSTALL_VERSION }}
+      - name: install GStreamer
+        if: steps.sdks.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $installer = "gstreamer-1.0-msvc-x86_64-$env:GSTREAMER_VERSION.exe"
+          Invoke-WebRequest -OutFile $installer `
+            "https://gstreamer.freedesktop.org/data/pkg/windows/$env:GSTREAMER_VERSION/msvc/$installer"
+          if ((Get-FileHash $installer -Algorithm SHA256).Hash -ne $env:GSTREAMER_SHA256) {
+            throw 'the GStreamer installer does not match its hash'
+          }
+          $process = Start-Process ".\$installer" -Wait -PassThru -ArgumentList `
+            '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/DIR=C:\gstreamer'
+          if ($process.ExitCode -ne 0) { throw "the GStreamer installer failed ($($process.ExitCode))" }
+      - name: install Qt
+        if: steps.sdks.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          python -m pip install "aqtinstall==$env:AQTINSTALL_VERSION"
+          python -m aqt install-qt windows desktop $env:QT_VERSION win64_msvc2022_64 --outputdir C:\Qt
+          if ($LASTEXITCODE -ne 0) { throw 'aqt failed' }
+      - run: rustup component add clippy
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      # The arguments of a QML function can't be grouped, since QML calls it with each of them.
+      - name: clippy
+        shell: pwsh
+        env:
+          QMAKE: C:\Qt\${{ env.QT_VERSION }}\msvc2022_64\bin\qmake.exe
+          PKG_CONFIG: C:\gstreamer\bin\pkg-config.exe
+          PKG_CONFIG_PATH: C:\gstreamer\lib\pkgconfig
+          GSTREAMER_ROOT: C:\gstreamer
+        run: |
+          $qt = "C:\Qt\$env:QT_VERSION\msvc2022_64"
+          $env:PATH = "$qt\bin;C:\gstreamer\bin;$env:PATH"
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vcvars = Join-Path (& $vswhere -latest -property installationPath) 'VC\Auxiliary\Build\vcvars64.bat'
+          cmd /c "`"$vcvars`" && cargo clippy -p rigelcam-app --all-targets --locked -- -D warnings -A clippy::too_many_arguments"
+          if ($LASTEXITCODE -ne 0) { throw 'clippy failed' }
