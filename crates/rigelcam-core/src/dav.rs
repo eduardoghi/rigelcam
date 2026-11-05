@@ -86,6 +86,12 @@ impl Reader {
 
     pub fn push(&mut self, bytes: &[u8]) -> Vec<Frame> {
         self.buffer.extend_from_slice(bytes);
+        self.read(false)
+    }
+
+    /// Reads the frames in the buffer. Before the end, a frame that runs past the buffer waits for
+    /// more bytes. At the end, its mark can only be one inside the video, so it is skipped.
+    fn read(&mut self, ended: bool) -> Vec<Frame> {
         let mut frames = Vec::new();
         let mut at = 0;
         loop {
@@ -101,6 +107,10 @@ impl Reader {
                 }
             }
             let Some(header) = self.buffer.get(at..at + HEADER_SIZE) else {
+                if ended {
+                    at += MARK.len();
+                    continue;
+                }
                 break;
             };
             let size = read_u32(header, 12) as usize;
@@ -110,6 +120,10 @@ impl Reader {
                 continue;
             }
             let Some(frame) = self.buffer.get(at..at + size) else {
+                if ended {
+                    at += MARK.len();
+                    continue;
+                }
                 break;
             };
             let trailer = size - TRAILER_SIZE;
@@ -136,13 +150,9 @@ impl Reader {
     /// Returns what was still held, for a stretch too short to be trusted before it ended.
     pub fn finish(&mut self) -> Vec<Frame> {
         // A mark inside the video can look like a frame longer than what is left, which holds back
-        // the real frames after it. Nothing else arrives now, so it is skipped and the rest read.
-        let mut frames = Vec::new();
-        while self.buffer.len() > MARK.len() && self.buffer.starts_with(MARK) {
-            let rest = self.buffer.split_off(MARK.len());
-            self.buffer.clear();
-            frames.extend(self.push(&rest));
-        }
+        // the real frames after it. Nothing else arrives now, so it is skipped and the rest read, in
+        // one pass, since the stretch left can hold many of them.
+        let mut frames = self.read(true);
         frames.extend(std::mem::take(&mut self.held));
         frames
     }
@@ -413,6 +423,21 @@ mod tests {
     fn a_stretch_too_short_to_be_trusted_still_comes_out() {
         let mut reader = Reader::new();
         let bytes = frame(KEY_FRAME, 1, NOON, 0, &[1]);
+        assert!(reader.push(&bytes).is_empty());
+        assert_eq!(reader.finish().len(), 1);
+    }
+
+    #[test]
+    fn many_marks_at_the_end_are_read_in_one_pass() {
+        // Each one claims a frame longer than the rest. Skipping them one at a time and copying what
+        // follows would copy almost 2 MB for each of the 80 thousand.
+        let mut fake = [0u8; HEADER_SIZE];
+        fake[..4].copy_from_slice(MARK);
+        fake[4] = KEY_FRAME;
+        fake[12..16].copy_from_slice(&1_000_000u32.to_le_bytes());
+        let mut bytes = fake.repeat(80_000);
+        bytes.extend(frame(KEY_FRAME, 1, NOON, 0, &[1]));
+        let mut reader = Reader::new();
         assert!(reader.push(&bytes).is_empty());
         assert_eq!(reader.finish().len(), 1);
     }
