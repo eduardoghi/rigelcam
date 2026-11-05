@@ -13,10 +13,6 @@ e Dahua, no Linux e no Windows.
 Ele conversa com o gravador pelos protocolos que o próprio aparelho já oferece, RTSP para o vídeo e a
 API HTTP da Dahua para o resto. Por isso não precisa do SDK do fabricante e roda nativo no Linux.
 
-> [!NOTE]
-> Fase inicial. O app está em uso diário no Linux. No Windows, ao vivo, gravações, exportação e fotos
-> foram testados com vídeo Intel, e as opções RTX numa GeForce RTX 4070.
-
 ## Recursos
 
 **Ao vivo**
@@ -48,14 +44,14 @@ A interface está em inglês, português e espanhol, com tema escuro e claro.
 | Exportação | HTTP Digest, `loadfile.cgi` |
 | Dados do aparelho e dos canais | HTTP Digest, `magicBox.cgi` e `configManager.cgi` |
 
-O vídeo é decodificado pelo GStreamer, com aceleração por hardware quando disponível (VA-API no
-Linux, Direct3D 11 no Windows). O núcleo é escrito em Rust e a interface em Qt 6 Quick.
+O vídeo é decodificado pelo GStreamer na placa de vídeo, por VA-API no Linux e Direct3D 11 no
+Windows, sem decodificador por software como alternativa. O núcleo é escrito em Rust e a interface em Qt 6 Quick.
 
 Alguns gravadores respondem 404 por RTSP para câmeras com firmware recente, que continuam gravando
 normalmente. Nesses canais, a gravação toca por HTTP e o vídeo ao vivo abre direto na câmera, no
 endereço informado pelo gravador e com o login dele.
 
-Testado até agora com os NVRs Intelbras NVD 1308 e NVD 7132. Outros gravadores com base Dahua devem
+Testado com os NVRs Intelbras NVD 1308 e NVD 7132. Outros gravadores com base Dahua devem
 funcionar do mesmo jeito, e relatos são bem-vindos.
 
 Acesso remoto pela nuvem da Intelbras (P2P) está fora do escopo. Para acessar o gravador de fora da

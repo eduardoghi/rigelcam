@@ -13,10 +13,6 @@ NVRs, for Linux and Windows.
 It talks to the recorder over the protocols the device already exposes, RTSP for video and the
 Dahua HTTP API for everything else, so it does not need the vendor SDK and runs natively on Linux.
 
-> [!NOTE]
-> Early stage. The app is in daily use on Linux. On Windows, live view, recordings, export and photos
-> were tested on Intel graphics, and the RTX options on a GeForce RTX 4070.
-
 ## Features
 
 **Live view**
@@ -48,14 +44,14 @@ The interface comes in English, Portuguese and Spanish, with dark and light them
 | Export | HTTP Digest, `loadfile.cgi` |
 | Device and channel info | HTTP Digest, `magicBox.cgi` and `configManager.cgi` |
 
-Video is decoded by GStreamer with hardware acceleration where available (VA-API on Linux,
-Direct3D 11 on Windows). The core is written in Rust and the interface in Qt 6 Quick.
+Video is decoded by GStreamer on the graphics card, through VA-API on Linux and Direct3D 11 on
+Windows, with no software decoder to fall back on. The core is written in Rust and the interface in Qt 6 Quick.
 
 Some recorders answer 404 over RTSP for cameras with recent firmware, which still record normally.
 Those channels play their recordings over HTTP and open live video directly from the camera, at the
 address the recorder lists and with the login of the recorder.
 
-Tested so far with the Intelbras NVD 1308 and NVD 7132. Other Dahua based recorders should work
+Tested with the Intelbras NVD 1308 and NVD 7132. Other Dahua based recorders should work
 the same way, reports are welcome.
 
 Remote access through the Intelbras cloud (P2P) is out of scope. Use a VPN to reach the recorder
