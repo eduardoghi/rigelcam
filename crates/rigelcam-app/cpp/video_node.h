@@ -15,6 +15,8 @@ struct VideoResources {
     virtual ~VideoResources() = default;
     /// Runs on the render thread.
     virtual void clear() = 0;
+    /// Lets go of the frames, which keep the decoder alive, without the graphics API.
+    virtual void releaseFrames() {}
 };
 
 /// Reaches the item from the render thread and the writer, which can outlive it.

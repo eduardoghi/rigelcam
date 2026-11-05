@@ -58,18 +58,18 @@ fn main() {
     compile_translation("pt_BR");
     compile_translation("es");
     let windows = std::env::var("CARGO_CFG_TARGET_OS").is_ok_and(|os| os == "windows");
-    let mut include_paths = Vec::new();
-    if windows {
+    let include_paths = if windows {
         embed_icon();
-        let gstreamer = pkg_config::probe_library("gstreamer-d3d11-1.0")
-            .expect("the GStreamer D3D11 library is required");
-        include_paths = gstreamer.include_paths;
         for library in ["d3d11", "dxgi", "d3dcompiler"] {
             println!("cargo:rustc-link-lib={library}");
         }
+        pkg_config::probe_library("gstreamer-d3d11-1.0")
+            .expect("the GStreamer D3D11 library is required")
+            .include_paths
     } else {
         println!("cargo:rustc-link-lib=EGL");
-    }
+        Vec::new()
+    };
     let node = if windows {
         "cpp/video_node_d3d11.cpp"
     } else {

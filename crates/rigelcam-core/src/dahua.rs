@@ -82,11 +82,12 @@ fn live_url(host: &str, port: u16, channel: u32, stream: Stream) -> String {
 /// How long a confirmed login spares the next opening of a stream from checking again. Long enough
 /// for a whole grid to open, and short enough for a password changed since.
 const LOGIN_CHECK_INTERVAL: Duration = Duration::from_secs(5);
+/// A recorder quiet for this long in the middle of a stretch stopped sending it.
+const STALLED_READ_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Default)]
 struct LoginState {
     checked: Option<Instant>,
-    refused: bool,
 }
 
 /// Decides whether the streams of a recorder may try to log in. `rtspsrc` repeats a wrong password
@@ -95,6 +96,9 @@ struct LoginState {
 pub struct LoginGate {
     client: Client,
     state: Mutex<LoginState>,
+    // Apart from the lock, which a check holds while the recorder answers, so the interface can
+    // read it without waiting.
+    refused: AtomicBool,
 }
 
 impl LoginGate {
@@ -102,6 +106,7 @@ impl LoginGate {
         Self {
             client,
             state: Mutex::default(),
+            refused: AtomicBool::new(false),
         }
     }
 
@@ -112,11 +117,11 @@ impl LoginGate {
 
     /// Stops all further logins, after a stream was refused.
     pub fn refuse(&self) {
-        self.state.lock().unwrap().refused = true;
+        self.refused.store(true, Ordering::Relaxed);
     }
 
     pub fn is_refused(&self) -> bool {
-        self.state.lock().unwrap().refused
+        self.refused.load(Ordering::Relaxed)
     }
 
     /// Whether a stream may log in now. The lock stays held during the check, so cameras opening
@@ -124,7 +129,8 @@ impl LoginGate {
     /// can't count a login that doesn't reach it.
     pub fn allows(&self) -> bool {
         let mut state = self.state.lock().unwrap();
-        if state.refused {
+        // Also after the lock, since another check may have been refused while this one waited.
+        if self.is_refused() {
             return false;
         }
         if state
@@ -134,7 +140,7 @@ impl LoginGate {
             return true;
         }
         if matches!(self.client.clock(), Err(Error::Unauthorized)) {
-            state.refused = true;
+            self.refuse();
             return false;
         }
         state.checked = Some(Instant::now());
@@ -282,7 +288,9 @@ impl Client {
             let files = finder.next(SEARCH_PAGE)?;
             let found = files.len();
             spans.extend(files.iter().filter_map(|file| file.span_on(date)));
-            if found < SEARCH_PAGE {
+            // Only an empty page ends the list, since a firmware may answer pages smaller than
+            // asked for with more still to come. It costs one more request at the end.
+            if found == 0 {
                 return Ok(merge_spans(spans));
             }
         }
@@ -393,6 +401,8 @@ impl Client {
                 .timeout_global(None)
                 .timeout_connect(Some(CONNECTION_TIMEOUT))
                 .timeout_recv_response(Some(CONNECTION_TIMEOUT))
+                // Each wait, so a slow reader or a pause doesn't count, only a silent recorder.
+                .timeout_per_read(Some(STALLED_READ_TIMEOUT))
                 .build()
         };
         let mut pending = request();
@@ -549,6 +559,51 @@ fn connection_state(answer: &Value, channel: u32) -> Option<bool> {
 
 fn session_error(answer: &Value) -> Error {
     Error::Unexpected(answer.get("error").unwrap_or(&Value::Null).to_string())
+}
+
+/// Whether `date` is a day as `YYYY-MM-DD`. Days come from the clock of the recorder and end up
+/// in file names and URLs, so nothing else gets through.
+pub fn is_date(date: &str) -> bool {
+    let bytes = date.as_bytes();
+    bytes.len() == 10
+        && bytes.iter().enumerate().all(|(i, &b)| {
+            if i == 4 || i == 7 {
+                b == b'-'
+            } else {
+                b.is_ascii_digit()
+            }
+        })
+}
+
+/// Whether `now` is the clock of a recorder as `YYYY-MM-DD HH:MM:SS`.
+pub fn is_clock(now: &str) -> bool {
+    let Some((date, time)) = now.split_once(' ') else {
+        return false;
+    };
+    let time = time.as_bytes();
+    is_date(date)
+        && time.len() == 8
+        && time.iter().enumerate().all(|(i, &b)| {
+            if i == 2 || i == 5 {
+                b == b':'
+            } else {
+                b.is_ascii_digit()
+            }
+        })
+}
+
+/// How many days a month of the form `YYYY-MM` has.
+pub fn days_in_month(month: &str) -> u32 {
+    let (year, month) = month.split_once('-').unwrap_or_default();
+    let year: u32 = year.parse().unwrap_or(0);
+    match month.parse().unwrap_or(0) {
+        2 if year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400)) => {
+            29
+        }
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    }
 }
 
 fn answered_true(answer: &Value) -> bool {
@@ -802,8 +857,6 @@ fn parse_channel_titles(body: &str) -> Vec<Channel> {
     channels
 }
 
-/// The address of each channel that has one, from the fields of its entry. It ends up in a URL that
-/// gets the password of the recorder, so only a private IP address counts.
 /// The size of the main stream of each channel, from lines like
 /// `table.Encode[1].MainFormat[0].Video.resolution=1920x1080`, where channels start at 0.
 fn parse_main_sizes(body: &str) -> HashMap<u32, (u32, u32)> {
@@ -830,6 +883,8 @@ fn parse_main_sizes(body: &str) -> HashMap<u32, (u32, u32)> {
     sizes
 }
 
+/// The address of each channel that has one, from the fields of its entry. It ends up in a URL that
+/// gets the password of the recorder, so only a private IP address counts.
 fn parse_cameras(body: &str) -> HashMap<u32, Camera> {
     let mut hosts = HashMap::new();
     let mut ports = HashMap::new();
@@ -1291,6 +1346,28 @@ mod tests {
     fn value_is_found_by_exact_key() {
         assert_eq!(parse_value("type=NVD 1308\r\n", "type"), Some("NVD 1308"));
         assert_eq!(parse_value("subtype=1\r\n", "type"), None);
+    }
+
+    #[test]
+    fn only_a_plain_day_and_clock_are_taken() {
+        assert!(is_date("2026-11-03"));
+        assert!(!is_date("..\\..\\x"));
+        assert!(!is_date("2026-11-3"));
+        assert!(!is_date("2026/11/03"));
+        assert!(is_clock("2026-11-03 10:00:00"));
+        assert!(!is_clock("2026-11-03"));
+        assert!(!is_clock("..\\x 10:00:00"));
+        assert!(!is_clock("2026-11-03 10:00"));
+    }
+
+    #[test]
+    fn days_in_month_follows_the_calendar() {
+        assert_eq!(days_in_month("2026-09"), 30);
+        assert_eq!(days_in_month("2026-10"), 31);
+        assert_eq!(days_in_month("2026-02"), 28);
+        assert_eq!(days_in_month("2028-02"), 29);
+        assert_eq!(days_in_month("2100-02"), 28);
+        assert_eq!(days_in_month("2000-02"), 29);
     }
 
     #[test]

@@ -54,6 +54,8 @@ pub enum Error {
     Cancelled,
     #[error("no recordings in this stretch")]
     Empty,
+    #[error("no permission for these recordings")]
+    Denied,
     #[error("the recorder stopped sending the video")]
     Stopped,
     #[error("GStreamer element {0} is missing")]
@@ -64,8 +66,8 @@ pub enum Error {
     Recorder(#[from] RecorderError),
 }
 
-/// Reads a stretch from the recorder on its own thread, in as many requests as it takes, since a
-/// read can't be interrupted and the recorder can stop answering. The channel closes at the end.
+/// Reads a stretch from the recorder on its own thread, in as many requests as it takes, since the
+/// recorder can stop answering while the caller waits. The channel closes at the end.
 /// Recorders answer a stretch with no recordings as a bad request, and `through_gaps` goes on to
 /// the next window after one.
 pub fn download(

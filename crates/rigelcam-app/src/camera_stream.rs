@@ -1,10 +1,11 @@
-//! Pipeline of a camera, which hands DMABuf frames to a video item and reconnects by itself. Video
-//! comes from the recorder over RTSP. What it answers 404 to while the camera works comes from
+//! Pipeline of a camera, which hands decoded frames to a video item and reconnects by itself. On
+//! Linux they go as DMABuf, and on Windows as Direct3D 11 textures of the decoder. Video comes from
+//! the recorder over RTSP. What it answers 404 to while the camera works comes from
 //! elsewhere, live video from the camera itself and recordings from the HTTP API.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -29,7 +30,8 @@ const H264_DECODER: &str = "d3d11h264dec";
 const H265_DECODER: &str = "d3d11h265dec";
 /// Frames stay on the GPU, in the memory the video item can read without copying them to the CPU.
 #[cfg(windows)]
-const DECODED_CAPS: &str = "video/x-raw(memory:D3D11Memory),format=NV12";
+// P010 is what a decoder gives for 10 bit video, which some H.265 cameras send.
+const DECODED_CAPS: &str = "video/x-raw(memory:D3D11Memory),format=(string){NV12,P010_10LE}";
 #[cfg(unix)]
 const H264_DECODER: &str = "vah264dec";
 #[cfg(unix)]
@@ -42,9 +44,13 @@ const REQUIRED_ELEMENTS: [&str; 4] = ["rtspsrc", "rtph264depay", "h264parse", H2
 const H265_ELEMENTS: [&str; 3] = ["rtph265depay", "h265parse", H265_DECODER];
 #[cfg(unix)]
 const DRM_FORMAT_NV12: u32 = 0x3231_564e;
-/// A stream that stops sending frames without an error counts as lost after this long.
+/// What VA gives for 10 bit video, which some H.265 cameras send.
+#[cfg(unix)]
+const DRM_FORMAT_P010: u32 = 0x3031_3050;
 const RTSP_FORBIDDEN: u32 = 403;
+/// A stream that stops sending frames without an error counts as lost after this long.
 const STALL_TIMEOUT: Duration = Duration::from_secs(15);
+const PERMISSION_TIMEOUT: Duration = Duration::from_secs(10);
 /// The first frame also waits for the RTSP handshake and for a key frame.
 const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_RETRY_DELAY: Duration = Duration::from_secs(30);
@@ -102,8 +108,8 @@ pub struct Stretch {
     /// Seconds after the midnight of `date`.
     pub start: u32,
     pub without_rtsp: Arc<Mutex<HashSet<u32>>>,
-    /// Channels whose recordings the recorder doesn't let this user play.
-    pub denied: Arc<Mutex<HashSet<u32>>>,
+    /// Channels an export found allowed, which a denied playback takes out.
+    pub allowed: Arc<Mutex<HashMap<u32, Instant>>>,
 }
 
 /// Channels of a recorder whose live video comes from the camera.
@@ -357,7 +363,7 @@ fn run(shared: Arc<Shared>) {
             Outcome::Denied => {
                 eprintln!("the recorder denied {}", source.url);
                 if let Some(stretch) = &source.stretch {
-                    stretch.denied.lock().unwrap().insert(stretch.channel);
+                    stretch.allowed.lock().unwrap().remove(&stretch.channel);
                 }
                 shared.set_status(false, true);
                 shared.report_denied();
@@ -424,7 +430,9 @@ enum Outcome {
 /// What the threads of a stream know about its video.
 #[derive(Clone)]
 struct Progress {
-    last_frame: Arc<Mutex<Instant>>,
+    /// Milliseconds after `started` of the last frame, apart from a lock since every frame sets it.
+    started: Instant,
+    last_frame: Arc<AtomicU64>,
     received_video: Arc<AtomicBool>,
     waiting_keyframe: Arc<AtomicBool>,
 }
@@ -432,10 +440,23 @@ struct Progress {
 impl Progress {
     fn new() -> Self {
         Self {
-            last_frame: Arc::new(Mutex::new(Instant::now())),
+            started: Instant::now(),
+            last_frame: Arc::new(AtomicU64::new(0)),
             received_video: Arc::new(AtomicBool::new(false)),
             waiting_keyframe: Arc::new(AtomicBool::new(true)),
         }
+    }
+}
+
+impl Progress {
+    fn saw_frame(&self) {
+        let now = self.started.elapsed().as_millis() as u64;
+        self.last_frame.store(now, Ordering::Relaxed);
+    }
+
+    fn since_last_frame(&self) -> Duration {
+        let now = self.started.elapsed().as_millis() as u64;
+        Duration::from_millis(now.saturating_sub(self.last_frame.load(Ordering::Relaxed)))
     }
 }
 
@@ -547,9 +568,9 @@ fn watch(
     mut speed_applied: bool,
 ) -> Outcome {
     let Progress {
-        last_frame,
         received_video,
         waiting_keyframe,
+        ..
     } = progress;
     let bus = pipeline.bus().unwrap();
     let mut paused = false;
@@ -575,7 +596,7 @@ fn watch(
                 let _ = pipeline.set_state(state);
             }
             if paused {
-                *last_frame.lock().unwrap() = Instant::now();
+                progress.saw_frame();
             }
             // Only once frames flow, because rtspsrc can't seek before it is playing.
             if !speed_applied && received_video.load(Ordering::Relaxed) {
@@ -630,7 +651,7 @@ fn watch(
             } else {
                 FIRST_FRAME_TIMEOUT
             };
-            if last_frame.lock().unwrap().elapsed() > limit {
+            if progress.since_last_frame() > limit {
                 break Outcome::Lost {
                     received_video: on_video,
                     reason: format!("no frames for {} s", limit.as_secs()),
@@ -803,7 +824,7 @@ fn build_stretch_pipeline(
     };
     let description = format!(
         "appsrc name=video format=time block=true max-bytes=8388608 ! {parse} ! {decoder} \
-         ! {DECODED_CAPS} ! appsink name=sink sync=true max-buffers=1"
+         ! {DECODED_CAPS} ! appsink name=sink enable-last-sample=false sync=true max-buffers=1"
     );
     let pipeline = gst::parse::launch(&description)
         .ok()?
@@ -847,6 +868,7 @@ fn attach_sink(
             gst::PadProbeReturn::Ok
         });
     let mut last_report = Instant::now();
+    let mut format = FrameFormat::default();
     sink.set_callbacks(
         AppSinkCallbacks::builder()
             .new_sample(move |sink| {
@@ -858,8 +880,8 @@ fn attach_sink(
                     }
                 }
                 // A frame the item can't take doesn't count, so the stream ends up as lost.
-                if push_sample(&shared, sample, generation).is_some() {
-                    *progress.last_frame.lock().unwrap() = Instant::now();
+                if push_sample(&shared, sample, generation, &mut format).is_some() {
+                    progress.saw_frame();
                     if !progress.received_video.swap(true, Ordering::Relaxed) {
                         shared.set_status(true, false);
                     }
@@ -868,6 +890,112 @@ fn attach_sink(
             })
             .build(),
     );
+}
+
+/// rtspsrc answers every refusal with the same password, 8 times before it gives up. Past the few
+/// requests a good login takes, the next one is refused here and it stops.
+fn limit_logins(src: &gst::Element) {
+    let requests = Arc::new(AtomicU32::new(0));
+    let logged_in = Arc::new(AtomicBool::new(false));
+    let seen = logged_in.clone();
+    src.connect("before-send", false, move |_| {
+        let sent = requests.fetch_add(1, Ordering::Relaxed);
+        Some((seen.load(Ordering::Relaxed) || sent < MAX_REQUESTS_BEFORE_LOGIN).to_value())
+    });
+    src.connect("on-sdp", false, move |_| {
+        logged_in.store(true, Ordering::Relaxed);
+        None
+    });
+}
+
+/// What the recorder answers when asked for a recording over RTSP.
+#[derive(Debug, PartialEq)]
+pub enum Access {
+    /// The video arrived.
+    Allowed,
+    /// The user can't play this channel.
+    Denied,
+    /// Recordings of this channel answer 404 over RTSP, so asking tells nothing.
+    NotOnRtsp,
+    /// The password is wrong.
+    Refused,
+    /// Anything else, which the work that comes next deals with.
+    Unknown,
+}
+
+/// Asks for a recording to learn the permission of a channel. Waits for the video, so a refusal at
+/// any step of the request counts. Stops waiting once `cancel` is set.
+pub fn recording_access(url: &str, user: &str, password: &str, cancel: &AtomicBool) -> Access {
+    let Ok(src) = gst::ElementFactory::make("rtspsrc")
+        .property("location", url)
+        .property_from_str("protocols", "tcp")
+        .property("user-id", user)
+        .property("user-pw", password)
+        .build()
+    else {
+        return Access::Unknown;
+    };
+    limit_logins(&src);
+    let pipeline = gst::Pipeline::new();
+    if pipeline.add(&src).is_err() {
+        return Access::Unknown;
+    }
+    let playing = Arc::new(AtomicBool::new(false));
+    let seen = playing.clone();
+    let weak_pipeline = pipeline.downgrade();
+    src.connect_pad_added(move |_, pad| {
+        let Some(pipeline) = weak_pipeline.upgrade() else {
+            return;
+        };
+        let Ok(sink) = gst::ElementFactory::make("fakesink")
+            .property("sync", false)
+            .property("signal-handoffs", true)
+            .build()
+        else {
+            return;
+        };
+        let seen = seen.clone();
+        sink.connect("handoff", false, move |_| {
+            seen.store(true, Ordering::Relaxed);
+            None
+        });
+        let _ = pipeline.add(&sink);
+        let _ = sink.sync_state_with_parent();
+        if let Some(input) = sink.static_pad("sink") {
+            let _ = pad.link(&input);
+        }
+    });
+    if pipeline.set_state(gst::State::Playing).is_err() {
+        let _ = pipeline.set_state(gst::State::Null);
+        return Access::Unknown;
+    }
+    let bus = pipeline.bus().expect("a pipeline has a bus");
+    let started = Instant::now();
+    let mut access = Access::Unknown;
+    while started.elapsed() < PERMISSION_TIMEOUT
+        && !playing.load(Ordering::Relaxed)
+        && !cancel.load(Ordering::Relaxed)
+    {
+        let message = bus.timed_pop_filtered(
+            gst::ClockTime::from_mseconds(100),
+            &[gst::MessageType::Error],
+        );
+        if let Some(gst::MessageView::Error(error)) = message.as_ref().map(|m| m.view()) {
+            if rtsp_status(error) == Some(RTSP_FORBIDDEN) {
+                access = Access::Denied;
+            } else if error.error().matches(gst::ResourceError::NotAuthorized) {
+                access = Access::Refused;
+            } else if error.error().matches(gst::ResourceError::NotFound) {
+                access = Access::NotOnRtsp;
+            }
+            break;
+        }
+    }
+    let _ = pipeline.set_state(gst::State::Null);
+    if playing.load(Ordering::Relaxed) {
+        access = Access::Allowed;
+    }
+    access
 }
 
 fn build_pipeline(
@@ -889,19 +1017,7 @@ fn build_pipeline(
         .ok()?;
     pipeline.add(&src).ok()?;
 
-    // rtspsrc answers every refusal with the same password, 8 times before it gives up. Past the
-    // few requests a good login takes, the next one is refused here and it stops.
-    let requests = Arc::new(AtomicU32::new(0));
-    let logged_in = Arc::new(AtomicBool::new(false));
-    let seen = logged_in.clone();
-    src.connect("before-send", false, move |_| {
-        let sent = requests.fetch_add(1, Ordering::Relaxed);
-        Some((seen.load(Ordering::Relaxed) || sent < MAX_REQUESTS_BEFORE_LOGIN).to_value())
-    });
-    src.connect("on-sdp", false, move |_| {
-        logged_in.store(true, Ordering::Relaxed);
-        None
-    });
+    limit_logins(&src);
 
     src.connect("select-stream", false, |values| {
         let media = values[2].get::<gst::Caps>().ok().and_then(|caps| {
@@ -935,7 +1051,7 @@ fn build_pipeline(
         };
         let description = format!(
             "{depay} ! {parse} name=parser ! {decoder} ! {DECODED_CAPS} \
-             ! appsink name=sink sync=false max-buffers=1 drop=true"
+             ! appsink name=sink enable-last-sample=false sync=false max-buffers=1 drop=true"
         );
         let Ok(branch) = gst::parse::bin_from_description(&description, true) else {
             fail(&pipeline, "could not build the decoding branch");
@@ -999,23 +1115,27 @@ fn share_decoder_device(pipeline: &gst::Pipeline) {
     pipeline.set_context(&context);
 }
 
+// One VA display shared by every pipeline saved about 200 MB with 31 cameras, but took about 10
+// points more of a CPU core, so each pipeline keeps its own.
 #[cfg(unix)]
 fn share_decoder_device(_: &gst::Pipeline) {}
 
-/// Reports a failure from a streaming thread to the loop in `play`, which handles it as a lost stream.
+/// Reports a failure from a streaming thread to the loop in `watch`, which handles it as a lost stream.
 fn fail(pipeline: &gst::Pipeline, reason: &str) {
     let _ = pipeline.post_message(gst::message::Error::new(gst::CoreError::Failed, reason));
 }
 
 #[cfg(unix)]
-fn modifier_of(sample: &gst::Sample) -> Option<u64> {
-    let caps = sample.caps()?;
+fn drm_format_of(caps: &gst::CapsRef) -> Option<(u32, u64)> {
     let drm = caps.structure(0)?.get::<String>("drm-format").ok()?;
     let (format, modifier) = drm.split_once(':').unwrap_or((drm.as_str(), "0x0"));
-    if format != "NV12" {
-        return None;
-    }
-    u64::from_str_radix(modifier.trim_start_matches("0x"), 16).ok()
+    let fourcc = match format {
+        "NV12" => DRM_FORMAT_NV12,
+        "P010" => DRM_FORMAT_P010,
+        _ => return None,
+    };
+    let modifier = u64::from_str_radix(modifier.trim_start_matches("0x"), 16).ok()?;
+    Some((fourcc, modifier))
 }
 
 /// Seconds of recording this frame is at, since the point the stream was opened at.
@@ -1026,9 +1146,50 @@ fn stream_time_of(sample: &gst::Sample) -> Option<f64> {
     Some(time.nseconds() as f64 / 1e9)
 }
 
+/// What a frame takes from the caps of its stream, read again only when the caps change, which
+/// is rare next to the frames.
+#[derive(Default)]
+struct FrameFormat {
+    caps: Option<gst::Caps>,
+    #[cfg(windows)]
+    width: i32,
+    #[cfg(windows)]
+    height: i32,
+    #[cfg(unix)]
+    fourcc: u32,
+    #[cfg(unix)]
+    modifier: u64,
+    full_range: i32,
+    matrix: i32,
+}
+
+impl FrameFormat {
+    /// None when the frame can't be shown, as with a format the item doesn't draw.
+    fn of(&mut self, sample: &gst::Sample) -> Option<&Self> {
+        let caps = sample.caps()?;
+        if self.caps.as_ref().map(|known| known.as_ptr()) != Some(caps.as_ptr()) {
+            self.caps = None;
+            // On Linux the size comes from the meta of each frame, and the caps of a DMABuf can't
+            // be read as plain video.
+            #[cfg(windows)]
+            {
+                let info = VideoInfo::from_caps(caps).ok()?;
+                (self.width, self.height) = (info.width() as i32, info.height() as i32);
+            }
+            #[cfg(unix)]
+            {
+                (self.fourcc, self.modifier) = drm_format_of(caps)?;
+            }
+            (self.full_range, self.matrix) = color_of(caps).unwrap_or((0, 0));
+            // A reference, since `to_owned` would copy the caps and never match the next frame.
+            self.caps = sample.caps_owned();
+        }
+        Some(self)
+    }
+}
+
 /// Whether the range is full, and the code of the color matrix for the video item.
-fn color_of(sample: &gst::Sample) -> Option<(i32, i32)> {
-    let caps = sample.caps()?;
+fn color_of(caps: &gst::CapsRef) -> Option<(i32, i32)> {
     let text = caps.structure(0)?.get::<String>("colorimetry").ok()?;
     let colorimetry: VideoColorimetry = text.parse().ok()?;
     let matrix = match colorimetry.matrix() {
@@ -1043,20 +1204,24 @@ fn color_of(sample: &gst::Sample) -> Option<(i32, i32)> {
 }
 
 #[cfg(windows)]
-fn push_sample(shared: &Shared, sample: gst::Sample, generation: u64) -> Option<()> {
+fn push_sample(
+    shared: &Shared,
+    sample: gst::Sample,
+    generation: u64,
+    format: &mut FrameFormat,
+) -> Option<()> {
     use gst::glib::translate::ToGlibPtr;
-    let info = VideoInfo::from_caps(sample.caps()?).ok()?;
-    let (full_range, matrix) = color_of(&sample).unwrap_or((0, 0));
+    let format = format.of(&sample)?;
     let raw: *const gst::ffi::GstSample = sample.to_glib_none().0;
     let mut frame = RigelFrame {
-        width: info.width() as i32,
-        height: info.height() as i32,
+        width: format.width,
+        height: format.height,
         fourcc: 0,
         modifier: 0,
         generation,
         n_planes: 0,
-        full_range,
-        matrix,
+        full_range: format.full_range,
+        matrix: format.matrix,
         fds: [-1; 4],
         offsets: [0; 4],
         strides: [0; 4],
@@ -1074,19 +1239,24 @@ fn push_sample(shared: &Shared, sample: gst::Sample, generation: u64) -> Option<
 }
 
 #[cfg(unix)]
-fn push_sample(shared: &Shared, sample: gst::Sample, generation: u64) -> Option<()> {
+fn push_sample(
+    shared: &Shared,
+    sample: gst::Sample,
+    generation: u64,
+    format: &mut FrameFormat,
+) -> Option<()> {
+    let format = format.of(&sample)?;
     let buffer = sample.buffer()?;
     let meta = buffer.meta::<VideoMeta>()?;
-    let (full_range, matrix) = color_of(&sample).unwrap_or((0, 0));
     let mut frame = RigelFrame {
         width: meta.width() as i32,
         height: meta.height() as i32,
-        fourcc: DRM_FORMAT_NV12,
-        modifier: modifier_of(&sample)?,
+        fourcc: format.fourcc,
+        modifier: format.modifier,
         generation,
         n_planes: meta.n_planes() as i32,
-        full_range,
-        matrix,
+        full_range: format.full_range,
+        matrix: format.matrix,
         fds: [-1; 4],
         offsets: [0; 4],
         strides: [0; 4],
@@ -1116,8 +1286,15 @@ mod tests {
 
     /// A recorder that answers every RTSP request with `status`.
     fn fake_recorder(status: &'static str) -> u16 {
+        counting_recorder(status, "").0
+    }
+
+    /// The same, with `headers` in each answer, and a count of the requests it got.
+    fn counting_recorder(status: &'static str, headers: &'static str) -> (u16, Arc<AtomicU32>) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
+        let requests = Arc::new(AtomicU32::new(0));
+        let counted = requests.clone();
         std::thread::spawn(move || {
             for mut stream in listener.incoming().flatten() {
                 let mut buffer = [0; 2048];
@@ -1125,18 +1302,19 @@ mod tests {
                     if size == 0 {
                         break;
                     }
+                    counted.fetch_add(1, Ordering::Relaxed);
                     let request = String::from_utf8_lossy(&buffer[..size]);
                     let sequence = request
                         .lines()
                         .find(|line| line.to_lowercase().starts_with("cseq"))
                         .unwrap_or("CSeq: 1")
                         .to_owned();
-                    let answer = format!("RTSP/1.0 {status}\r\n{sequence}\r\n\r\n");
+                    let answer = format!("RTSP/1.0 {status}\r\n{sequence}\r\n{headers}\r\n");
                     let _ = stream.write_all(answer.as_bytes());
                 }
             }
         });
-        port
+        (port, requests)
     }
 
     #[test]
@@ -1157,5 +1335,111 @@ mod tests {
         };
         assert_eq!(rtsp_status(error), Some(RTSP_FORBIDDEN));
         pipeline.set_state(gst::State::Null).unwrap();
+    }
+
+    // The limit leans on how rtspsrc retries, which no version of it promises to keep, and a wrong
+    // password repeated can get a user locked out of the recorder.
+    #[test]
+    fn a_wrong_password_stops_after_a_few_requests() {
+        gst::init().unwrap();
+        let (port, requests) = counting_recorder(
+            "401 Unauthorized",
+            "WWW-Authenticate: Digest realm=\"recorder\", nonce=\"1\"\r\n",
+        );
+        let src = gst::ElementFactory::make("rtspsrc")
+            .property("location", format!("rtsp://127.0.0.1:{port}/cam"))
+            .property_from_str("protocols", "tcp")
+            .property("user-id", "admin")
+            .property("user-pw", "wrong")
+            .build()
+            .unwrap();
+        limit_logins(&src);
+        let pipeline = gst::Pipeline::new();
+        pipeline.add(&src).unwrap();
+        pipeline.set_state(gst::State::Playing).unwrap();
+        let message = pipeline
+            .bus()
+            .unwrap()
+            .timed_pop_filtered(gst::ClockTime::from_seconds(10), &[gst::MessageType::Error])
+            .expect("an error from rtspsrc");
+        let gst::MessageView::Error(error) = message.view() else {
+            unreachable!();
+        };
+        pipeline.set_state(gst::State::Null).unwrap();
+        assert!(error.error().matches(gst::ResourceError::NotAuthorized));
+        assert!(requests.load(Ordering::Relaxed) <= MAX_REQUESTS_BEFORE_LOGIN);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn eight_and_ten_bit_frames_are_taken() {
+        gst::init().unwrap();
+        let caps = |format: &str| {
+            gst::Caps::builder("video/x-raw")
+                .field("drm-format", format)
+                .build()
+        };
+        assert_eq!(drm_format_of(&caps("NV12:0x0")), Some((DRM_FORMAT_NV12, 0)));
+        assert_eq!(
+            drm_format_of(&caps("P010:0x100000000000002")),
+            Some((DRM_FORMAT_P010, 0x100000000000002))
+        );
+        assert_eq!(drm_format_of(&caps("YUY2")), None);
+    }
+
+    #[test]
+    fn a_frame_format_reads_the_caps_once() {
+        gst::init().unwrap();
+        let caps = gst::Caps::builder("video/x-raw")
+            .field("drm-format", "NV12:0x0")
+            .field("colorimetry", "bt709")
+            .field("format", "NV12")
+            .field("width", 1920i32)
+            .field("height", 1080i32)
+            .build();
+        let sample = |caps: &gst::Caps| gst::Sample::builder().caps(caps).build();
+        let mut format = FrameFormat::default();
+        let first = sample(&caps);
+        assert_eq!(format.of(&first).map(|f| f.matrix), Some(1));
+        let kept = format.caps.as_ref().map(|c| c.as_ptr());
+        assert_eq!(kept, first.caps().map(|c| c.as_ptr()));
+        format.of(&sample(&caps));
+        assert_eq!(format.caps.as_ref().map(|c| c.as_ptr()), kept);
+    }
+
+    #[test]
+    fn cancelling_stops_the_permission_check() {
+        gst::init().unwrap();
+        // Takes the connection and never answers, so only the cancel can end the wait.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let _held: Vec<_> = listener.incoming().flatten().collect();
+        });
+        let cancel = Arc::new(AtomicBool::new(false));
+        let later = cancel.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            later.store(true, Ordering::Relaxed);
+        });
+        let started = Instant::now();
+        let url = format!("rtsp://127.0.0.1:{port}/cam");
+        assert_eq!(
+            recording_access(&url, "user", "pw", &cancel),
+            Access::Unknown
+        );
+        assert!(started.elapsed() < Duration::from_secs(3));
+    }
+
+    #[test]
+    fn only_a_403_denies_recordings() {
+        gst::init().unwrap();
+        let url = |status| format!("rtsp://127.0.0.1:{}/cam", fake_recorder(status));
+        let cancel = AtomicBool::new(false);
+        let access = |status| recording_access(&url(status), "user", "pw", &cancel);
+        assert_eq!(access("403 Forbidden"), Access::Denied);
+        assert_eq!(access("404 Not Found"), Access::NotOnRtsp);
+        assert_ne!(access("200 OK"), Access::Allowed);
+        assert_eq!(access("401 Unauthorized"), Access::Refused);
     }
 }

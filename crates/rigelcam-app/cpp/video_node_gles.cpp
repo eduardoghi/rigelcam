@@ -17,6 +17,7 @@
 
 #include <cstdio>
 #include <map>
+#include <mutex>
 #include <utility>
 
 namespace {
@@ -38,6 +39,7 @@ struct Program {
     GLuint id = 0;
     GLint mvp = -1, tex = -1, gamma = -1, pos = -1, uv = -1;
     GLuint vbo = 0;
+    QOpenGLContext *context = nullptr;
 };
 
 GLuint compile(QOpenGLFunctions *f, GLenum type, const char *source) {
@@ -55,10 +57,18 @@ GLuint compile(QOpenGLFunctions *f, GLenum type, const char *source) {
 }
 
 // Shared by all items, which draw on the same thread and in the same context.
+Program g_program;
+
 Program &program(QOpenGLFunctions *f) {
-    static Program p;
-    // A lost context takes the program with it.
-    if (!p.id || !f->glIsProgram(p.id)) {
+    Program &p = g_program;
+    // A context that is gone takes the program with it. Its name alone can't tell, since a new
+    // context hands out names from the start again and Qt may already hold the same one.
+    QOpenGLContext *context = QOpenGLContext::currentContext();
+    if (!p.id || p.context != context) {
+        p = Program{};
+        p.context = context;
+        // Also forgotten when the context goes, in case the next one gets the same address.
+        QObject::connect(context, &QOpenGLContext::aboutToBeDestroyed, [] { g_program = Program{}; });
         p.id = f->glCreateProgram();
         f->glAttachShader(p.id, compile(f, GL_VERTEX_SHADER, kVertex));
         f->glAttachShader(p.id, compile(f, GL_FRAGMENT_SHADER, kFragment));
@@ -83,9 +93,15 @@ struct Imported {
 } // namespace
 
 // Owned by both the item and its node, so the item can free them on the render thread once its
-// stream stops. Only the render thread touches this.
+// stream stops. Only the render thread touches the cache, and the frames are also let go from the
+// interface thread while the window isn't rendered, under `frames`.
 struct GlesResources : VideoResources {
+    std::mutex frames;
     RigelFrame next{}, current{}, previous{};
+    // The texture of `current`, found once per frame instead of on every draw, also when the
+    // import failed, which would fail again on every draw.
+    GLuint currentTexture = 0;
+    bool currentLooked = false;
     uint64_t generation = 0;
     std::map<ino_t, Imported> cache;
 
@@ -98,10 +114,20 @@ struct GlesResources : VideoResources {
             destroyImage(eglGetCurrentDisplay(), imported.image);
         }
         cache.clear();
+        currentTexture = 0;
+        currentLooked = false;
+    }
+
+    void releaseFrames() override {
+        std::lock_guard lock(frames);
+        release(next);
+        release(current);
+        release(previous);
     }
 
     void clear() override {
         clearCache();
+        std::lock_guard lock(frames);
         release(next);
         release(current);
         release(previous);
@@ -121,6 +147,7 @@ public:
         m_view = view;
         m_gamma = gamma;
         if (frame.release) {
+            std::lock_guard lock(m_res->frames);
             release(m_res->next);
             m_res->next = frame;
         }
@@ -135,6 +162,7 @@ public:
     void releaseResources() override { m_res->clearCache(); }
 
     void render(const RenderState *state) override {
+        std::lock_guard lock(m_res->frames);
         auto *context = QOpenGLContext::currentContext();
         if (!context) return;
         auto *f = context->functions();
@@ -145,8 +173,14 @@ public:
             m_res->previous = m_res->current;
             m_res->current = m_res->next;
             m_res->next = RigelFrame{};
+            m_res->currentTexture = 0;
+            m_res->currentLooked = false;
         }
-        GLuint texture = m_res->current.release ? textureFor(f, m_res->current) : 0;
+        if (m_res->current.release && !m_res->currentLooked) {
+            m_res->currentTexture = textureFor(f, m_res->current);
+            m_res->currentLooked = true;
+        }
+        GLuint texture = m_res->current.release ? m_res->currentTexture : 0;
         if (!texture) {
             if (!m_photoName.isEmpty()) {
                 m_photoName.clear();

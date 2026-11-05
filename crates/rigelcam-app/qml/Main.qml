@@ -159,7 +159,6 @@ ApplicationWindow {
         }
     }
 
-    // Drags with a floating label, so the tile or row dragged stays where it is.
     // Digital zoom of a video, with the top left of the visible part in fractions.
     component VideoZoom: QtObject {
         property real scale: 1
@@ -219,6 +218,7 @@ ApplicationWindow {
         }
     }
 
+    // Drags with a floating label, so the tile or row dragged stays where it is.
     component CameraDrag: DragHandler {
         property var camera
         target: null
@@ -378,10 +378,11 @@ ApplicationWindow {
     property int liveCount: 0
     // State of each camera in the grid, by key, as "live", "denied", "lost" or "connecting".
     property var cameraStatus: ({})
-    // Key of the camera shown alone after a double click, or empty for the whole grid.
     signal photoRequested()
     // Closing waits for the cancelled export, which removes its unfinished file.
     property bool closeAfterExport: false
+    // The installer closes the app, which would lose the video being exported, so it waits.
+    property bool updateAfterExport: false
     onClosing: close => {
         if (!grid.exportRunning)
             return
@@ -394,6 +395,11 @@ ApplicationWindow {
         function onExportRunningChanged() {
             if (win.closeAfterExport && !grid.exportRunning)
                 win.close()
+            // Between two exports of the queue it turns false for a moment, with others waiting.
+            if (win.updateAfterExport && !grid.exportRunning && grid.exportsWaiting === 0) {
+                win.updateAfterExport = false
+                grid.installUpdate()
+            }
         }
         function onUpdateStarted() {
             Qt.quit()
@@ -403,6 +409,7 @@ ApplicationWindow {
         }
     }
 
+    // Key of the camera shown alone after a double click, or empty for the whole grid.
     property string zoomed: ""
     property string zoomedName: ""
     // Only for a camera seen alone, where someone is looking for detail. Not saved, because the
@@ -411,6 +418,11 @@ ApplicationWindow {
     // Not saved, so nobody ends up watching rebuilt detail without having asked for it.
     property bool superResolution: false
     property bool rtxHdr: false
+    // A day as the recorder takes it, with Latin digits whatever the locale.
+    function isoDay(date) {
+        const pad = n => String(n).padStart(2, "0")
+        return date.getFullYear() + "-" + pad(date.getMonth() + 1) + "-" + pad(date.getDate())
+    }
     property var zoomedCamera: null
     readonly property bool fullScreen: visibility === Window.FullScreen
     // Nothing is seen, so the video stops using the decoder and the network.
@@ -1498,7 +1510,8 @@ ApplicationWindow {
                 onIncludedChanged: win.updateLiveCount()
 
                 // Hidden cameras keep running for a while, since going back to the grid right after
-                // zooming is common and reconnecting all of them takes seconds.
+                // zooming is common and reconnecting all of them takes seconds. Recordings stop them
+                // right away, as they need the network and the decoder at the same moment.
                 Timer {
                     id: stopHidden
                     interval: 20000
@@ -1508,7 +1521,7 @@ ApplicationWindow {
                     if (shown) {
                         stopHidden.stop()
                         grid.show(tile, recorder, number, true, false)
-                    } else if (included) {
+                    } else if (included && !win.inRecordings) {
                         stopHidden.restart()
                     } else {
                         stopHidden.stop()
@@ -1554,11 +1567,27 @@ ApplicationWindow {
                     rtxHdr: tile.isMain && win.rtxHdr
                     onPhotoFinished: file => photoToast.show(file)
                     onAuthRefused: Qt.callLater(grid.recorderRefused.bind(grid, tile.recorder))
+                    // Waits like stopHidden, since a window often comes back right after minimizing.
+                    Timer {
+                        id: stopMain
+                        interval: 20000
+                        onTriggered: grid.show(mainStream, tile.recorder, tile.number, false, true)
+                    }
+                    function apply() {
+                        if (tile.isMain && tile.shown) {
+                            stopMain.stop()
+                            grid.show(mainStream, tile.recorder, tile.number, true, true)
+                        } else if (tile.isMain && !win.inRecordings) {
+                            stopMain.restart()
+                        } else {
+                            stopMain.stop()
+                            grid.show(mainStream, tile.recorder, tile.number, false, true)
+                        }
+                    }
                     Connections {
                         target: tile
-                        function onIsMainChanged() {
-                            grid.show(mainStream, tile.recorder, tile.number, tile.isMain, true)
-                        }
+                        function onIsMainChanged() { mainStream.apply() }
+                        function onShownChanged() { mainStream.apply() }
                     }
                 }
 
@@ -1837,8 +1866,42 @@ ApplicationWindow {
         // What each camera recorded on the day, by key, and all of it together for the bar.
         property var spansOf: ({})
         property var spans: []
-        property int nowSeconds: 86400
-        property string today: ""
+        // The clock of each recorder, by recorder, as { today, seconds }, since cameras of
+        // different recorders can be open together and their clocks don't agree.
+        property var clocks: ({})
+        // The bar is shared, so the recorder that is behind decides, and no day shows as over while
+        // one of them is still in it.
+        readonly property string today: earliestDay(clocks, win.playbackCameras)
+        readonly property int nowSeconds: secondsOn(date, clocks, win.playbackCameras)
+
+        function playbackRecorders(cameras) {
+            return [...new Set(cameras.filter(camera => camera).map(camera => camera.recorder))]
+        }
+
+        function earliestDay(known, cameras) {
+            let day = ""
+            for (const recorder of playbackRecorders(cameras)) {
+                const clock = known[recorder]
+                if (clock && (day === "" || clock.today < day))
+                    day = clock.today
+            }
+            return day
+        }
+
+        // Seconds of `day` already past on every recorder, which is all of it when none is in it.
+        function secondsOn(day, known, cameras) {
+            let seconds = 86400
+            for (const recorder of playbackRecorders(cameras)) {
+                const clock = known[recorder]
+                if (!clock)
+                    continue
+                if (clock.today === day)
+                    seconds = Math.min(seconds, clock.seconds)
+                else if (clock.today < day)
+                    seconds = 0
+            }
+            return seconds
+        }
         property int rate: 1
         property bool playing: false
         // Cameras waiting for their search, and the ones that only bring the day up to date.
@@ -1937,9 +2000,9 @@ ApplicationWindow {
                 clearError(key)
                 date = recordings.date
                 const now = recordings.now.split(" ")
-                today = now[0]
                 const clock = now[1].split(":")
-                nowSeconds = date === today ? parseInt(clock[0]) * 3600 + parseInt(clock[1]) * 60 + parseInt(clock[2]) : 86400
+                const seconds = parseInt(clock[0]) * 3600 + parseInt(clock[1]) * 60 + parseInt(clock[2])
+                clocks = Object.assign({}, clocks, { [recordings.recorder]: { today: now[0], seconds: seconds } })
                 spansOf = Object.assign({}, spansOf, { [key]: recordings.spans })
                 updateSpans()
             }
@@ -2015,7 +2078,7 @@ ApplicationWindow {
             // From the day asked for, so a second click doesn't wait for the first answer.
             const day = new Date(viewDate + "T12:00:00")
             day.setDate(day.getDate() + days)
-            changeDay(Qt.formatDate(day, "yyyy-MM-dd"))
+            changeDay(win.isoDay(day))
         }
 
         function stop() {
@@ -2470,7 +2533,7 @@ ApplicationWindow {
                         }
                         // Days with recordings, by camera and month, since searching takes seconds.
                         property var knownDays: ({})
-                        readonly property string monthText: Qt.formatDate(shown, "yyyy-MM")
+                        readonly property string monthText: win.isoDay(shown).slice(0, 7)
                         readonly property string monthKey: win.playbackCamera
                             ? win.playbackCamera.recorder + ":" + win.playbackCamera.number + ":" + monthText : ""
                         readonly property var days: knownDays[monthKey] ?? []
@@ -2495,7 +2558,7 @@ ApplicationWindow {
                                 known[found.key] = found.days
                                 calendar.knownDays = Object.assign({}, known)
                                 // The current month still gets new days.
-                                const current = found.key.endsWith(Qt.formatDate(new Date(), "yyyy-MM"))
+                                const current = found.key.endsWith(win.isoDay(new Date()).slice(0, 7))
                                 if (found.done && !current)
                                     calendar.finished[found.key] = true
                             }
@@ -2532,7 +2595,7 @@ ApplicationWindow {
                                 locale: Qt.locale(grid.language)
                                 onClicked: date => {
                                     calendar.close()
-                                    playback.changeDay(Qt.formatDate(date, "yyyy-MM-dd"))
+                                    playback.changeDay(win.isoDay(date))
                                 }
                                 delegate: Rectangle {
                                     id: dayCell
@@ -2879,7 +2942,8 @@ ApplicationWindow {
             failed = error !== ""
             title = failed ? win.msg(error) : qsTr("Video saved")
             const prefix = Qt.platform.os === "windows" ? "file:///" : "file://"
-            folder = failed ? "" : encodeURI(prefix + savedIn.replace(/\\/g, "/"))
+            // encodeURI keeps # and ?, which a URL would read as the end of the path.
+            folder = failed ? "" : encodeURI(prefix + savedIn.replace(/\\/g, "/")).replace(/#/g, "%23").replace(/\?/g, "%3F")
             fileName = file
             hideToast.restart()
         }
@@ -2955,6 +3019,7 @@ ApplicationWindow {
                 font.pixelSize: 13
                 color: grid.updateError !== "" ? colors.danger : colors.text
                 text: grid.updateError !== "" ? win.msg(grid.updateError)
+                    : win.updateAfterExport ? qsTr("The update starts when the export ends.")
                     : grid.updateRunning ? qsTr("Downloading version %1").arg(grid.updateVersion)
                         + "  " + Math.round(grid.updateProgress * 100) + "%"
                     : qsTr("Version %1 is available.").arg(grid.updateVersion)
@@ -2973,7 +3038,7 @@ ApplicationWindow {
                 }
             }
             RowLayout {
-                visible: !grid.updateRunning
+                visible: !grid.updateRunning && !win.updateAfterExport
                 Layout.alignment: Qt.AlignRight
                 spacing: 8
                 AppButton {
@@ -2983,7 +3048,12 @@ ApplicationWindow {
                 }
                 PrimaryButton {
                     text: qsTr("Update")
-                    onClicked: grid.installUpdate()
+                    onClicked: {
+                        if (grid.exportRunning)
+                            win.updateAfterExport = true
+                        else
+                            grid.installUpdate()
+                    }
                 }
             }
         }

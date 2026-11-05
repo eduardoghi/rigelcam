@@ -135,7 +135,16 @@ impl Reader {
 
     /// Returns what was still held, for a stretch too short to be trusted before it ended.
     pub fn finish(&mut self) -> Vec<Frame> {
-        std::mem::take(&mut self.held)
+        // A mark inside the video can look like a frame longer than what is left, which holds back
+        // the real frames after it. Nothing else arrives now, so it is skipped and the rest read.
+        let mut frames = Vec::new();
+        while self.buffer.len() > MARK.len() && self.buffer.starts_with(MARK) {
+            let rest = self.buffer.split_off(MARK.len());
+            self.buffer.clear();
+            frames.extend(self.push(&rest));
+        }
+        frames.extend(std::mem::take(&mut self.held));
+        frames
     }
 
     fn accept(
@@ -236,6 +245,20 @@ mod tests {
         let mut frames = reader.push(bytes);
         frames.extend(reader.finish());
         frames
+    }
+
+    #[test]
+    fn a_false_mark_at_the_end_doesnt_hide_the_frames_after_it() {
+        let mut bytes = run(100, NOON, 0);
+        let mut fake = MARK.to_vec();
+        fake.extend([0u8; 8]);
+        fake.extend(1_000_000u32.to_le_bytes());
+        fake.extend([0u8; 8]);
+        bytes.extend(fake);
+        bytes.extend(frame(DELTA_FRAME, 164, NOON, 3200, b"after"));
+        let frames = read_all(&bytes);
+        assert_eq!(frames.len(), TRUSTED_RUN + 1);
+        assert_eq!(frames.last().unwrap().data, b"after");
     }
 
     #[test]

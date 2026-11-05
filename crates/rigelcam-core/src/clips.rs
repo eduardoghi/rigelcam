@@ -32,6 +32,11 @@ pub fn file_stem(camera: &str, date: &str, start: u32, end: u32) -> String {
         .chars()
         .take(MAX_NAME_CHARS)
         .collect();
+    // The day is checked when it comes from the recorder, and only digits and dashes go anyway.
+    let date: String = date
+        .chars()
+        .filter(|c| c.is_ascii_digit() || *c == '-')
+        .collect();
     format!("{safe} {date} {} {}", clock(start), clock(end))
 }
 

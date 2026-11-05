@@ -95,7 +95,8 @@ protected:
 struct VideoResources;
 struct ItemLink;
 
-/// QML item that draws the latest DMABuf frame it received, imported as an external texture.
+/// QML item that draws the latest frame it received. On Linux it imports the DMABuf as an external
+/// texture, and on Windows it copies the texture of the decoder inside the GPU.
 class VideoItem : public QQuickItem {
     Q_OBJECT
     Q_PROPERTY(bool hasVideo READ hasVideo NOTIFY statusChanged)
@@ -158,6 +159,7 @@ signals:
 
 protected:
     QSGNode *updatePaintNode(QSGNode *old, UpdatePaintNodeData *) override;
+    void itemChange(ItemChange change, const ItemChangeData &value) override;
 
 private:
     void releaseVideo();

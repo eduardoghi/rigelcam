@@ -39,7 +39,7 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(error) => {
-            eprintln!("error: {error}");
+            eprintln!("error: {}", printable(&error.to_string()));
             ExitCode::FAILURE
         }
     }

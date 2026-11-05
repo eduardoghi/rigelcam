@@ -108,7 +108,7 @@ VideoItem::VideoItem(QQuickItem *parent)
 }
 
 VideoItem::~VideoItem() {
-    // Stops the pipeline first, so that no streaming thread can still call setFrame on this item.
+    // Cuts the stream off first, so that no streaming thread can still call setFrame on this item.
     if (m_destroyStream) m_destroyStream(m_stream);
     release(m_pending);
     QMutexLocker lock(&m_link->mutex);
@@ -176,8 +176,9 @@ void VideoItem::setStatus(bool hasVideo, bool signalLost) {
     m_signalLost = signalLost;
     m_denied = false;
     emit statusChanged();
-    // Neither video nor a reconnection means the stream was stopped.
-    if (!hasVideo && !signalLost) releaseVideo();
+    // Without video the item shows the state of the camera instead, and the frames it holds keep the
+    // surfaces of a decoder that is gone, or will be once it reconnects.
+    if (!hasVideo) releaseVideo();
 }
 
 // The node of a hidden item never renders again by itself, so its surfaces would stay imported.
@@ -190,18 +191,30 @@ void VideoItem::releaseVideo() {
     if (QQuickWindow *view = window()) {
         view->scheduleRenderJob(new ClearVideoJob(m_resources), QQuickWindow::BeforeRenderingStage);
         view->update();
+        // A window that isn't exposed doesn't render, so the job waits for it to come back. The
+        // frames keep every decoder alive with its surfaces until then, and need no graphics API.
+        if (!view->isExposed()) m_resources->releaseFrames();
     }
 }
 
 void VideoItem::setFrame(const RigelFrame &frame) {
+    bool queued;
     {
         QMutexLocker lock(&m_mutex);
         // A frame the scene graph didn't get to is dropped, so nothing queues up here.
         release(m_pending);
         m_pending = frame;
-        m_hasPending = true;
+        queued = std::exchange(m_hasPending, true);
     }
-    QMetaObject::invokeMethod(this, "update", Qt::QueuedConnection);
+    // A frame still pending already has an update on its way, which draws this one instead.
+    if (!queued) QMetaObject::invokeMethod(this, [this] { update(); }, Qt::QueuedConnection);
+}
+
+// A frame that arrived while the item was hidden waits with its update already asked for, and a
+// hidden item may not get it, so showing the item asks again.
+void VideoItem::itemChange(ItemChange change, const ItemChangeData &value) {
+    QQuickItem::itemChange(change, value);
+    if ((change == ItemVisibleHasChanged && value.boolValue) || change == ItemSceneChange) update();
 }
 
 // The part of `area` a picture takes at this aspect, centered and without being cut.

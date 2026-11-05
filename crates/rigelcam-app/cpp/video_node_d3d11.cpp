@@ -16,6 +16,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <mutex>
 #include <cwchar>
 #include <utility>
 
@@ -189,20 +190,29 @@ struct Upscaled {
 
 struct D3d11Resources : VideoResources {
     Upscaled upscaled;
+    // Also let go from the interface thread while the window isn't rendered.
+    std::mutex frames;
     RigelFrame next{};
     ComPtr<ID3D11Texture2D> texture;
     ComPtr<ID3D11ShaderResourceView> y, uv;
     ComPtr<ID3D11Buffer> constants;
     UINT textureWidth = 0, textureHeight = 0;
+    DXGI_FORMAT textureFormat = DXGI_FORMAT_UNKNOWN;
     int width = 0, height = 0, fullRange = 0, matrix = 0;
 
-    void clear() override {
+    void releaseFrames() override {
+        std::lock_guard lock(frames);
         release(next);
+    }
+
+    void clear() override {
+        releaseFrames();
         upscaled = Upscaled{};
         y.Reset();
         uv.Reset();
         texture.Reset();
         textureWidth = textureHeight = 0;
+        textureFormat = DXGI_FORMAT_UNKNOWN;
     }
 };
 
@@ -216,6 +226,7 @@ public:
         m_rect = rect;
         m_view = view;
         m_gamma = gamma;
+        std::lock_guard lock(m_res->frames);
         if (frame.release) {
             release(m_res->next);
             m_res->next = frame;
@@ -233,6 +244,7 @@ public:
     // Outside of the render pass, as the copy can't be recorded inside of it on every API, and the
     // frame goes back to the decoder as soon as it was copied.
     void prepare() override {
+        std::lock_guard lock(m_res->frames);
         const bool fresh = m_res->next.release != nullptr;
         if (fresh) {
             copy(m_res->next);
@@ -315,7 +327,9 @@ private:
         source->QueryInterface(IID_PPV_ARGS(&texture));
         D3D11_TEXTURE2D_DESC desc;
         texture->GetDesc(&desc);
-        if (m_res->texture && m_res->textureWidth == desc.Width && m_res->textureHeight == desc.Height) return;
+        if (m_res->texture && m_res->textureWidth == desc.Width && m_res->textureHeight == desc.Height &&
+            m_res->textureFormat == desc.Format)
+            return;
         m_res->y.Reset();
         m_res->uv.Reset();
         m_res->texture.Reset();
@@ -334,20 +348,25 @@ private:
         }
         m_res->textureWidth = desc.Width;
         m_res->textureHeight = desc.Height;
+        m_res->textureFormat = desc.Format;
+        // P010 keeps 10 bits at the top of 16, which read as unsigned normalized come out in the
+        // same range as NV12, so the shader is the same.
+        const bool deep = desc.Format == DXGI_FORMAT_P010;
         D3D11_SHADER_RESOURCE_VIEW_DESC view{};
         view.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
         view.Texture2D.MipLevels = 1;
-        view.Format = DXGI_FORMAT_R8_UNORM;
+        view.Format = deep ? DXGI_FORMAT_R16_UNORM : DXGI_FORMAT_R8_UNORM;
         g_device->CreateShaderResourceView(m_res->texture.Get(), &view, &m_res->y);
-        view.Format = DXGI_FORMAT_R8G8_UNORM;
+        view.Format = deep ? DXGI_FORMAT_R16G16_UNORM : DXGI_FORMAT_R8G8_UNORM;
         g_device->CreateShaderResourceView(m_res->texture.Get(), &view, &m_res->uv);
     }
 
     void upscale(bool fresh) {
         Upscaled &u = m_res->upscaled;
         // Also drops the last result, which would stay on screen as a frozen picture if the stream
-        // changed to a size that can't be upscaled.
-        if ((!m_superResolution && !m_rtxHdr) || !m_res->texture || m_res->height <= 0 || m_res->height > kUpscaleMaxInputHeight) {
+        // changed to a size that can't be upscaled. 10 bit video isn't, as the processor is set up for
+        // NV12.
+        if ((!m_superResolution && !m_rtxHdr) || !m_res->texture || m_res->textureFormat != DXGI_FORMAT_NV12 || m_res->height <= 0 || m_res->height > kUpscaleMaxInputHeight) {
             if (u.processor || u.failed) u = Upscaled{};
             return;
         }

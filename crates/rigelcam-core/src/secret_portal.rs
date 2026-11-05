@@ -34,9 +34,7 @@ pub fn get(service: &str, account: &str) -> Result<String, Error> {
             .search_items(&attributes(service, account))
             .await
             .map_err(failed)?;
-        let item = items
-            .first()
-            .ok_or_else(|| Error::Keyring(format!("no password for {account}")))?;
+        let item = items.first().ok_or(Error::NoPassword)?;
         let secret = item.secret().await.map_err(failed)?;
         String::from_utf8(secret.as_bytes().to_vec())
             .map_err(|_| Error::Keyring(format!("the password of {account} is not text")))

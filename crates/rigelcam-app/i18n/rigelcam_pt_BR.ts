@@ -148,6 +148,10 @@
         <translation>Usa o NVIDIA RTX Video, que precisa estar ligado no driver. A IA estima o brilho e a cor para telas HDR.</translation>
     </message>
     <message>
+        <source>The update starts when the export ends.</source>
+        <translation>A atualização começa quando a exportação terminar.</translation>
+    </message>
+    <message>
         <source>Version %1</source>
         <translation>Versão %1</translation>
     </message>
@@ -250,6 +254,10 @@
     <message>
         <source>Invalid address. Use an IP or a host name.</source>
         <translation>Endereço inválido. Use um IP ou nome de máquina.</translation>
+    </message>
+    <message>
+        <source>This computer can&apos;t decode the video of the cameras on its graphics card (%1).</source>
+        <translation>Este computador não consegue decodificar o vídeo das câmeras na placa de vídeo (%1).</translation>
     </message>
     <message>
         <source>GStreamer components are missing to show video (%1). Install the GStreamer plugins and VA-API support.</source>

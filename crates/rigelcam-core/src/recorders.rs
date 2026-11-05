@@ -21,6 +21,8 @@ pub enum Error {
     Format(#[from] serde_json::Error),
     #[error("the system keyring failed ({0})")]
     Keyring(String),
+    #[error("the system keyring has no password for this recorder")]
+    NoPassword,
     #[error("this system has no folder for configuration files")]
     NoConfigDir,
 }
@@ -188,9 +190,11 @@ impl Secrets for SystemKeyring {
         if in_flatpak() {
             return secret_portal::get(KEYRING_SERVICE, &account(recorder_id));
         }
-        entry(recorder_id)?
-            .get_password()
-            .map_err(|e| Error::Keyring(e.to_string()))
+        match entry(recorder_id)?.get_password() {
+            Ok(password) => Ok(password),
+            Err(keyring::Error::NoEntry) => Err(Error::NoPassword),
+            Err(e) => Err(Error::Keyring(e.to_string())),
+        }
     }
 
     fn delete(&self, recorder_id: u64) -> Result<(), Error> {
@@ -205,6 +209,52 @@ impl Secrets for SystemKeyring {
     }
 }
 
+/// What the keyring held for a recorder before a change, to undo it.
+#[derive(Debug, PartialEq)]
+pub enum Previous {
+    Password(String),
+    Nothing,
+    /// The keyring failed to answer, so undoing could only guess.
+    Unknown,
+}
+
+impl Previous {
+    fn of(secrets: &impl Secrets, id: u64) -> Self {
+        match secrets.get(id) {
+            Ok(password) => Self::Password(password),
+            Err(Error::NoPassword) => Self::Nothing,
+            Err(_) => Self::Unknown,
+        }
+    }
+}
+
+/// Puts the password of a recorder about to be saved, and returns what it replaces. The keyring
+/// goes first, so a failure there leaves the list as it was.
+pub fn put_password(secrets: &impl Secrets, id: u64, password: &str) -> Result<Previous, Error> {
+    let previous = Previous::of(secrets, id);
+    secrets.set(id, password)?;
+    Ok(previous)
+}
+
+/// Undoes `put_password` or `take_password` after the list couldn't be saved, putting back the
+/// password there was, or deleting the one of a recorder that never made it to the list. When the
+/// keyring didn't tell what there was, the new password stays, since deleting could lose the only
+/// one that works.
+pub fn restore_password(secrets: &impl Secrets, id: u64, previous: &Previous) {
+    let _ = match previous {
+        Previous::Password(password) => secrets.set(id, password),
+        Previous::Nothing => secrets.delete(id),
+        Previous::Unknown => Ok(()),
+    };
+}
+
+/// Deletes the password of a recorder about to be removed. Returns it, for `restore_password`, and
+/// whether it went, since a keyring that refuses doesn't keep the recorder in the list.
+pub fn take_password(secrets: &impl Secrets, id: u64) -> (Previous, bool) {
+    let previous = Previous::of(secrets, id);
+    (previous, secrets.delete(id).is_ok())
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct Saved {
     recorders: Vec<Recorder>,
@@ -217,7 +267,7 @@ struct Saved {
     layout: Option<Layout>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     sidebar_collapsed: bool,
-    /// "pt_BR" or "en", or nothing to follow the system.
+    /// "pt_BR", "en" or "es", or nothing to follow the system.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     language: Option<String>,
     /// "light" or "dark", or nothing to follow the system.
@@ -228,22 +278,14 @@ struct Saved {
     check_updates: Option<bool>,
 }
 
-pub struct RecorderList<S: Secrets> {
+/// The saved recorders without their passwords, which can wait for the keyring to be unlocked and
+/// so go through `put_password`, `restore_password` and `take_password` on another thread.
+/// 2026-01-01 in seconds since 1970, where ids of a list started over count from.
+const ID_EPOCH: u64 = 1_767_225_600;
+
+pub struct RecorderList {
     path: PathBuf,
-    secrets: S,
     saved: Saved,
-}
-
-impl RecorderList<SystemKeyring> {
-    /// Opens the list in the configuration folder of the user.
-    pub fn open_default() -> Result<Self, Error> {
-        Self::open(default_path()?, SystemKeyring)
-    }
-
-    /// Starts an empty list after setting the file of the user aside.
-    pub fn start_over_default() -> Result<(Self, PathBuf), Error> {
-        Self::start_over(default_path()?, SystemKeyring)
-    }
 }
 
 /// Keeps other runs of the app away from the list while it lives. Two of them would each save
@@ -282,23 +324,36 @@ fn default_path() -> Result<PathBuf, Error> {
         .join("recorders.json"))
 }
 
-impl<S: Secrets> RecorderList<S> {
+impl RecorderList {
+    /// Opens the list in the configuration folder of the user.
+    pub fn open_default() -> Result<Self, Error> {
+        Self::open(default_path()?)
+    }
+
+    /// Starts an empty list after setting the file of the user aside.
+    pub fn start_over_default() -> Result<(Self, PathBuf), Error> {
+        Self::start_over(default_path()?)
+    }
+
     /// Keeps a damaged file next to the list under a new name, so it can still be fixed by hand,
     /// and opens an empty list, also returning where the copy went. The name has the time so that
     /// an older copy isn't overwritten. New ids start from the time too, since the passwords of
     /// the damaged list stay in the keyring and it may come back.
-    pub fn start_over(path: PathBuf, secrets: S) -> Result<(Self, PathBuf), Error> {
+    pub fn start_over(path: PathBuf) -> Result<(Self, PathBuf), Error> {
         let seconds = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |elapsed| elapsed.as_secs());
         let copy = path.with_extension(format!("json.corrupted-{seconds}"));
         fs::rename(&path, &copy)?;
-        let mut list = Self::open(path, secrets)?;
-        list.saved.next_id = seconds;
+        let mut list = Self::open(path)?;
+        // Counted from 2026, since the interface takes ids as 32 bit numbers, which seconds since
+        // 1970 outgrow in 2038.
+        list.saved.next_id = seconds.saturating_sub(ID_EPOCH).max(1);
+        list.write()?;
         Ok((list, copy))
     }
 
-    pub fn open(path: PathBuf, secrets: S) -> Result<Self, Error> {
+    pub fn open(path: PathBuf) -> Result<Self, Error> {
         let mut saved: Saved = match fs::read(&path) {
             Ok(bytes) => serde_json::from_slice(&bytes)?,
             Err(e) if e.kind() == io::ErrorKind::NotFound => Saved::default(),
@@ -307,61 +362,30 @@ impl<S: Secrets> RecorderList<S> {
         if let Some(layout) = &mut saved.layout {
             layout.normalize();
         }
-        Ok(Self {
-            path,
-            secrets,
-            saved,
-        })
+        Ok(Self { path, saved })
     }
 
     pub fn recorders(&self) -> &[Recorder] {
         &self.saved.recorders
     }
 
-    /// Saves a new recorder. The password goes first, so a keyring failure doesn't
-    /// leave a recorder in the list that has no password.
-    pub fn add(
-        &mut self,
-        name: &str,
-        address: &Address,
-        user: &str,
-        password: &str,
-    ) -> Result<u64, Error> {
+    /// An id for a recorder that isn't in the list yet, which a keyring can take before `store`.
+    pub fn reserve_id(&mut self) -> u64 {
         let highest = self.saved.recorders.iter().map(|r| r.id).max();
         let id = self.saved.next_id.max(highest.unwrap_or(0) + 1);
-        self.secrets.set(id, password)?;
-        let before = self.saved.clone();
         self.saved.next_id = id + 1;
-        self.saved.recorders.push(Recorder {
-            id,
-            name: name.to_owned(),
-            host: address.host.clone(),
-            user: user.to_owned(),
-            http_port: address.http_port,
-            rtsp_port: address.rtsp_port,
-        });
-        if let Err(error) = self.write() {
-            self.saved = before;
-            let _ = self.secrets.delete(id);
-            return Err(error);
-        }
-        Ok(id)
+        id
     }
 
-    /// Changes a recorder and keeps its id, so its squares in the grid stay. Without a `password`,
-    /// the saved one stays too.
-    pub fn update(
+    /// Saves a recorder by id, without touching its password, which can wait for the user to unlock
+    /// the keyring and so goes apart from this.
+    pub fn store(
         &mut self,
         id: u64,
         name: &str,
         address: &Address,
         user: &str,
-        password: Option<&str>,
     ) -> Result<(), Error> {
-        let old_password = password.and_then(|_| self.secrets.get(id).ok());
-        if let Some(password) = password {
-            self.secrets.set(id, password)?;
-        }
         let before = self.saved.clone();
         if let Some(recorder) = self.saved.recorders.iter_mut().find(|r| r.id == id) {
             recorder.name = name.to_owned();
@@ -369,22 +393,21 @@ impl<S: Secrets> RecorderList<S> {
             recorder.user = user.to_owned();
             recorder.http_port = address.http_port;
             recorder.rtsp_port = address.rtsp_port;
+        } else {
+            self.saved.recorders.push(Recorder {
+                id,
+                name: name.to_owned(),
+                host: address.host.clone(),
+                user: user.to_owned(),
+                http_port: address.http_port,
+                rtsp_port: address.rtsp_port,
+            });
         }
-        if let Err(error) = self.write() {
-            self.saved = before;
-            if let Some(password) = old_password {
-                let _ = self.secrets.set(id, &password);
-            }
-            return Err(error);
-        }
-        Ok(())
+        self.write().inspect_err(|_| self.saved = before)
     }
 
-    /// Removes a recorder and returns whether its password went too. Without the keyring the
-    /// recorder couldn't be used anyway, so that doesn't keep it in the list.
-    pub fn remove(&mut self, id: u64) -> Result<bool, Error> {
-        let password = self.secrets.get(id).ok();
-        let password_removed = self.secrets.delete(id).is_ok();
+    /// Takes a recorder out of the list and the layout, leaving its password to the caller.
+    pub fn forget(&mut self, id: u64) -> Result<(), Error> {
         let before = self.saved.clone();
         // A list saved before next_id existed has to remember the id going away too.
         self.saved.next_id = self.saved.next_id.max(id + 1);
@@ -392,14 +415,7 @@ impl<S: Secrets> RecorderList<S> {
         if let Some(layout) = &mut self.saved.layout {
             layout.remove_recorder(id);
         }
-        if let Err(error) = self.write() {
-            self.saved = before;
-            if let Some(password) = password {
-                let _ = self.secrets.set(id, &password);
-            }
-            return Err(error);
-        }
-        Ok(password_removed)
+        self.write().inspect_err(|_| self.saved = before)
     }
 
     pub fn layout(&self) -> Option<&Layout> {
@@ -440,10 +456,6 @@ impl<S: Secrets> RecorderList<S> {
     pub fn set_sidebar_collapsed(&mut self, collapsed: bool) -> Result<(), Error> {
         self.saved.sidebar_collapsed = collapsed;
         self.write()
-    }
-
-    pub fn password(&self, id: u64) -> Result<String, Error> {
-        self.secrets.get(id)
     }
 
     fn write(&self) -> Result<(), Error> {
@@ -507,11 +519,7 @@ mod tests {
             Ok(())
         }
         fn get(&self, id: u64) -> Result<String, Error> {
-            self.0
-                .borrow()
-                .get(&id)
-                .cloned()
-                .ok_or_else(|| Error::Keyring("missing".to_owned()))
+            self.0.borrow().get(&id).cloned().ok_or(Error::NoPassword)
         }
         fn delete(&self, id: u64) -> Result<(), Error> {
             self.0.borrow_mut().remove(&id);
@@ -547,6 +555,12 @@ mod tests {
         }
     }
 
+    fn add(list: &mut RecorderList, name: &str, address: &Address) -> u64 {
+        let id = list.reserve_id();
+        list.store(id, name, address, "u").unwrap();
+        id
+    }
+
     fn addr(host: &str) -> Address {
         Address::parse(host, None, None).unwrap()
     }
@@ -560,11 +574,13 @@ mod tests {
     #[test]
     fn password_never_reaches_the_file() {
         let path = temp_path("password");
-        let mut list = RecorderList::open(path.clone(), MemorySecrets::default()).unwrap();
-        let id = list
-            .add("Depot", &addr("192.0.2.1"), "viewer", "s3cret-value")
+        let secrets = MemorySecrets::default();
+        let mut list = RecorderList::open(path.clone()).unwrap();
+        let id = list.reserve_id();
+        put_password(&secrets, id, "s3cret-value").unwrap();
+        list.store(id, "Depot", &addr("192.0.2.1"), "viewer")
             .unwrap();
-        assert_eq!(list.password(id).unwrap(), "s3cret-value");
+        assert_eq!(secrets.get(id).unwrap(), "s3cret-value");
         let file = fs::read_to_string(&path).unwrap();
         assert!(file.contains("192.0.2.1"));
         assert!(!file.contains("s3cret-value"));
@@ -573,10 +589,9 @@ mod tests {
     #[test]
     fn recorders_layout_and_sidebar_survive_reopening() {
         let path = temp_path("reopen");
-        let secrets = MemorySecrets::default();
-        let mut list = RecorderList::open(path.clone(), secrets.clone()).unwrap();
-        let first = list.add("A", &addr("192.0.2.1"), "u", "p").unwrap();
-        list.add("B", &addr("192.0.2.2"), "u", "p").unwrap();
+        let mut list = RecorderList::open(path.clone()).unwrap();
+        let first = add(&mut list, "A", &addr("192.0.2.1"));
+        add(&mut list, "B", &addr("192.0.2.2"));
         let layout = Layout::fitting(&[CameraId {
             recorder: first,
             channel: 1,
@@ -585,7 +600,7 @@ mod tests {
         list.set_sidebar_collapsed(true).unwrap();
         list.set_theme("light").unwrap();
         list.set_language("en").unwrap();
-        let reopened = RecorderList::open(path, secrets).unwrap();
+        let reopened = RecorderList::open(path).unwrap();
         assert_eq!(reopened.theme(), Some("light"));
         assert_eq!(reopened.language(), Some("en"));
         assert_eq!(reopened.recorders().len(), 2);
@@ -596,9 +611,11 @@ mod tests {
     #[test]
     fn removing_deletes_the_password_and_empties_its_squares() {
         let path = temp_path("remove");
-        let mut list = RecorderList::open(path, MemorySecrets::default()).unwrap();
-        let first = list.add("A", &addr("192.0.2.1"), "u", "p").unwrap();
-        let second = list.add("B", &addr("192.0.2.2"), "u", "p").unwrap();
+        let secrets = MemorySecrets::default();
+        let mut list = RecorderList::open(path).unwrap();
+        let first = add(&mut list, "A", &addr("192.0.2.1"));
+        let second = add(&mut list, "B", &addr("192.0.2.2"));
+        put_password(&secrets, second, "p").unwrap();
         let camera = |recorder| {
             Some(CameraId {
                 recorder,
@@ -610,8 +627,12 @@ mod tests {
             cameras: vec![camera(first), camera(second), None, None],
         };
         list.set_layout(layout).unwrap();
-        list.remove(second).unwrap();
-        assert!(list.password(second).is_err());
+        assert_eq!(
+            take_password(&secrets, second),
+            (Previous::Password("p".to_owned()), true)
+        );
+        list.forget(second).unwrap();
+        assert!(secrets.get(second).is_err());
         assert_eq!(list.recorders().len(), 1);
         assert_eq!(
             list.layout().unwrap().cameras,
@@ -628,7 +649,7 @@ mod tests {
             r#"{"selected":1,"recorders":[{"id":1,"name":"A","host":"192.0.2.1","user":"u"}]}"#,
         )
         .unwrap();
-        let list = RecorderList::open(path, MemorySecrets::default()).unwrap();
+        let list = RecorderList::open(path).unwrap();
         assert_eq!(list.recorders().len(), 1);
         assert_eq!(list.recorders()[0].http_port, 80);
         assert_eq!(list.recorders()[0].rtsp_port, 554);
@@ -637,16 +658,21 @@ mod tests {
     }
 
     #[test]
-    fn updating_keeps_the_id_and_the_password_when_none_is_given() {
+    fn updating_keeps_the_id_and_hands_back_the_old_password() {
         let path = temp_path("update");
-        let mut list = RecorderList::open(path, MemorySecrets::default()).unwrap();
-        let id = list.add("A", &addr("192.0.2.1"), "u", "p").unwrap();
-        list.update(id, "B", &addr("192.0.2.2"), "v", None).unwrap();
-        assert_eq!(list.password(id).unwrap(), "p");
-        list.update(id, "B", &addr("192.0.2.2"), "v", Some("q"))
-            .unwrap();
-        assert_eq!(list.password(id).unwrap(), "q");
+        let secrets = MemorySecrets::default();
+        let mut list = RecorderList::open(path).unwrap();
+        let id = list.reserve_id();
+        assert_eq!(put_password(&secrets, id, "p").unwrap(), Previous::Nothing);
+        list.store(id, "A", &addr("192.0.2.1"), "u").unwrap();
+        list.store(id, "B", &addr("192.0.2.2"), "v").unwrap();
+        assert_eq!(secrets.get(id).unwrap(), "p");
+        assert_eq!(
+            put_password(&secrets, id, "q").unwrap(),
+            Previous::Password("p".to_owned())
+        );
         let recorder = &list.recorders()[0];
+        assert_eq!(list.recorders().len(), 1);
         assert_eq!(recorder.id, id);
         assert_eq!(recorder.name, "B");
         assert_eq!(recorder.host, "192.0.2.2");
@@ -656,22 +682,25 @@ mod tests {
     #[test]
     fn failing_to_save_undoes_the_update() {
         let path = temp_path("update-unsaved");
-        let mut list = RecorderList::open(path.clone(), MemorySecrets::default()).unwrap();
-        let id = list.add("A", &addr("192.0.2.1"), "u", "p").unwrap();
+        let secrets = MemorySecrets::default();
+        let mut list = RecorderList::open(path.clone()).unwrap();
+        let id = add(&mut list, "A", &addr("192.0.2.1"));
+        put_password(&secrets, id, "p").unwrap();
         fs::create_dir(path.with_extension("json.tmp")).unwrap();
-        assert!(list
-            .update(id, "B", &addr("192.0.2.2"), "v", Some("q"))
-            .is_err());
+        let previous = put_password(&secrets, id, "q").unwrap();
+        assert!(list.store(id, "B", &addr("192.0.2.2"), "v").is_err());
+        restore_password(&secrets, id, &previous);
         assert_eq!(list.recorders()[0].name, "A");
-        assert_eq!(list.password(id).unwrap(), "p");
+        assert_eq!(secrets.get(id).unwrap(), "p");
     }
 
     #[test]
     fn removing_works_without_the_keyring_and_tells_the_password_stayed() {
-        let path = temp_path("no-keyring");
-        let mut list = RecorderList::open(path, UndeletableSecrets).unwrap();
-        let id = list.add("A", &addr("192.0.2.1"), "u", "p").unwrap();
-        assert!(!list.remove(id).unwrap());
+        let path = temp_path("undeletable");
+        let mut list = RecorderList::open(path).unwrap();
+        let id = add(&mut list, "A", &addr("192.0.2.1"));
+        assert!(!take_password(&UndeletableSecrets, id).1);
+        list.forget(id).unwrap();
         assert!(list.recorders().is_empty());
     }
 
@@ -722,13 +751,12 @@ mod tests {
     #[test]
     fn ports_survive_reopening_and_stay_out_of_the_file_when_they_are_the_default() {
         let path = temp_path("ports");
-        let secrets = MemorySecrets::default();
-        let mut list = RecorderList::open(path.clone(), secrets.clone()).unwrap();
-        list.add("A", &addr("192.0.2.1"), "u", "p").unwrap();
+        let mut list = RecorderList::open(path.clone()).unwrap();
+        add(&mut list, "A", &addr("192.0.2.1"));
         assert!(!fs::read_to_string(&path).unwrap().contains("port"));
         let custom = Address::parse("192.0.2.2:8080", None, Some(8554)).unwrap();
-        list.add("B", &custom, "u", "p").unwrap();
-        let reopened = RecorderList::open(path, secrets).unwrap();
+        add(&mut list, "B", &custom);
+        let reopened = RecorderList::open(path).unwrap();
         assert_eq!(reopened.recorders()[1].http_port, 8080);
         assert_eq!(reopened.recorders()[1].rtsp_port, 8554);
     }
@@ -738,30 +766,53 @@ mod tests {
         let path = temp_path("start-over");
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, "not json").unwrap();
-        let (list, copy) =
-            RecorderList::start_over(path.clone(), MemorySecrets::default()).unwrap();
+        let (list, copy) = RecorderList::start_over(path.clone()).unwrap();
         assert!(copy.exists());
         assert!(list.saved.next_id > 1);
         assert!(list.recorders().is_empty());
-        assert!(!path.exists());
-        let kept: Vec<_> = fs::read_dir(path.parent().unwrap())
-            .unwrap()
-            .map(|entry| entry.unwrap().path())
-            .collect();
-        assert_eq!(kept.len(), 1);
-        assert!(kept[0]
-            .to_string_lossy()
-            .contains("recorders.json.corrupted-"));
-        assert_eq!(fs::read_to_string(&kept[0]).unwrap(), "not json");
+        assert!(copy.to_string_lossy().contains("recorders.json.corrupted-"));
+        assert_eq!(fs::read_to_string(&copy).unwrap(), "not json");
+        // Without saving anything else, so the passwords of the old ids stay safe from new ones.
+        let reopened = RecorderList::open(path).unwrap();
+        assert_eq!(reopened.saved.next_id, list.saved.next_id);
+    }
+
+    #[test]
+    fn stores_a_reserved_id_without_touching_passwords() {
+        let path = temp_path("store");
+        let secrets = MemorySecrets::default();
+        let mut list = RecorderList::open(path.clone()).unwrap();
+        let id = list.reserve_id();
+        assert_ne!(list.reserve_id(), id);
+        list.store(id, "Altermed", &addr("10.0.0.1"), "admin")
+            .unwrap();
+        list.store(id, "Conferencia", &addr("10.0.0.1"), "admin")
+            .unwrap();
+        assert!(secrets.0.borrow().is_empty());
+        let reopened = RecorderList::open(path).unwrap();
+        assert_eq!(reopened.recorders().len(), 1);
+        assert_eq!(reopened.recorders()[0].name, "Conferencia");
+    }
+
+    #[test]
+    fn forgets_a_recorder_without_touching_passwords() {
+        let path = temp_path("forget");
+        let secrets = MemorySecrets::default();
+        let mut list = RecorderList::open(path).unwrap();
+        let id = add(&mut list, "Altermed", &addr("10.0.0.1"));
+        put_password(&secrets, id, "pw").unwrap();
+        list.forget(id).unwrap();
+        assert!(list.recorders().is_empty());
+        assert_eq!(secrets.get(id).unwrap(), "pw");
     }
 
     #[test]
     fn ids_never_come_back() {
         let path = temp_path("ids");
-        let mut list = RecorderList::open(path, MemorySecrets::default()).unwrap();
-        let first = list.add("A", &addr("192.0.2.1"), "u", "p").unwrap();
-        list.remove(first).unwrap();
-        assert_ne!(list.add("B", &addr("192.0.2.2"), "u", "p").unwrap(), first);
+        let mut list = RecorderList::open(path).unwrap();
+        let first = add(&mut list, "A", &addr("192.0.2.1"));
+        list.forget(first).unwrap();
+        assert_ne!(add(&mut list, "B", &addr("192.0.2.2")), first);
     }
 
     #[test]
@@ -773,25 +824,31 @@ mod tests {
             r#"{"recorders":[{"id":5,"name":"A","host":"192.0.2.1","user":"u"}]}"#,
         )
         .unwrap();
-        let mut list = RecorderList::open(path, MemorySecrets::default()).unwrap();
-        list.remove(5).unwrap();
-        assert_eq!(list.add("B", &addr("192.0.2.2"), "u", "p").unwrap(), 6);
+        let mut list = RecorderList::open(path).unwrap();
+        list.forget(5).unwrap();
+        assert_eq!(list.reserve_id(), 6);
     }
 
     #[test]
     fn failing_to_save_undoes_adding_and_removing() {
         let path = temp_path("unsaved");
         let secrets = MemorySecrets::default();
-        let mut list = RecorderList::open(path.clone(), secrets.clone()).unwrap();
-        let id = list.add("A", &addr("192.0.2.1"), "u", "p").unwrap();
+        let mut list = RecorderList::open(path.clone()).unwrap();
+        let id = add(&mut list, "A", &addr("192.0.2.1"));
+        put_password(&secrets, id, "p").unwrap();
         // A folder in the way of the temporary file makes every save fail.
         fs::create_dir(path.with_extension("json.tmp")).unwrap();
-        assert!(list.add("B", &addr("192.0.2.2"), "u", "p").is_err());
+        let new = list.reserve_id();
+        let previous = put_password(&secrets, new, "p2").unwrap();
+        assert!(list.store(new, "B", &addr("192.0.2.2"), "u").is_err());
+        restore_password(&secrets, new, &previous);
         assert_eq!(list.recorders().len(), 1);
-        assert!(secrets.get(id + 1).is_err());
-        assert!(list.remove(id).is_err());
+        assert!(secrets.get(new).is_err());
+        let (password, _) = take_password(&secrets, id);
+        assert!(list.forget(id).is_err());
+        restore_password(&secrets, id, &password);
         assert_eq!(list.recorders().len(), 1);
-        assert_eq!(list.password(id).unwrap(), "p");
+        assert_eq!(secrets.get(id).unwrap(), "p");
     }
 
     #[test]
@@ -803,7 +860,7 @@ mod tests {
             r#"{"recorders":[],"layout":{"columns":1000,"cameras":[]}}"#,
         )
         .unwrap();
-        let list = RecorderList::open(path, MemorySecrets::default()).unwrap();
+        let list = RecorderList::open(path).unwrap();
         let layout = list.layout().unwrap();
         assert_eq!((layout.columns, layout.cameras.len()), (6, 36));
     }
@@ -813,19 +870,42 @@ mod tests {
     fn saved_list_is_private() {
         use std::os::unix::fs::PermissionsExt;
         let path = temp_path("private");
-        let mut list = RecorderList::open(path.clone(), MemorySecrets::default()).unwrap();
-        list.add("A", &addr("192.0.2.1"), "u", "p").unwrap();
+        let mut list = RecorderList::open(path.clone()).unwrap();
+        add(&mut list, "A", &addr("192.0.2.1"));
         let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode(&path), 0o600);
         assert_eq!(mode(path.parent().unwrap()), 0o700);
     }
 
+    /// Reads fail as if the keyring were locked, while writes work.
+    #[derive(Clone, Default)]
+    struct UnreadableSecrets(MemorySecrets);
+
+    impl Secrets for UnreadableSecrets {
+        fn set(&self, id: u64, password: &str) -> Result<(), Error> {
+            self.0.set(id, password)
+        }
+        fn get(&self, _: u64) -> Result<String, Error> {
+            Err(Error::Keyring("locked".to_owned()))
+        }
+        fn delete(&self, id: u64) -> Result<(), Error> {
+            self.0.delete(id)
+        }
+    }
+
+    #[test]
+    fn undoing_after_an_unreadable_keyring_keeps_the_new_password() {
+        let secrets = UnreadableSecrets::default();
+        let previous = put_password(&secrets, 1, "new").unwrap();
+        assert_eq!(previous, Previous::Unknown);
+        restore_password(&secrets, 1, &previous);
+        assert_eq!(secrets.0.get(1).unwrap(), "new");
+    }
+
     #[test]
     fn keyring_failure_adds_nothing() {
         let path = temp_path("keyring");
-        let mut list = RecorderList::open(path.clone(), FailingSecrets).unwrap();
-        assert!(list.add("A", &addr("192.0.2.1"), "u", "p").is_err());
-        assert!(list.recorders().is_empty());
+        assert!(put_password(&FailingSecrets, 1, "p").is_err());
         assert!(!path.exists());
     }
 
@@ -835,7 +915,7 @@ mod tests {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, "not json").unwrap();
         assert!(matches!(
-            RecorderList::open(path.clone(), MemorySecrets::default()),
+            RecorderList::open(path.clone()),
             Err(Error::Format(_))
         ));
         assert_eq!(fs::read_to_string(&path).unwrap(), "not json");

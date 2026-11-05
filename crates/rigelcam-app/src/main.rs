@@ -20,10 +20,10 @@ extern "C" {
 }
 
 fn main() {
-    // Recorders sit on the local network, and rtspsrc would otherwise use the proxy of the system.
     // Scanning the plugins in a process of its own would flash a console on Windows.
     #[cfg(windows)]
     std::env::set_var("GST_REGISTRY_FORK", "no");
+    // Recorders sit on the local network, and rtspsrc would otherwise use the proxy of the system.
     if std::env::var_os("GIO_USE_PROXY_RESOLVER").is_none() {
         std::env::set_var("GIO_USE_PROXY_RESOLVER", "dummy");
     }

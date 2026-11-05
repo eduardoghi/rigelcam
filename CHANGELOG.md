@@ -4,6 +4,43 @@ User-visible changes, newest first.
 
 ## [Unreleased]
 
+### Fixed
+
+- A camera open alone stops using the network and the decoder 20 seconds after the window is
+  minimized, like the cameras of the grid. Entering the recordings stops the live cameras at once.
+- A minimized window frees the video memory of its stopped cameras, instead of holding it until
+  the window comes back. With 31 cameras it went from about 760 MB to 260 MB.
+- A camera without signal shows its state instead of the last picture, and frees the memory of the
+  video while it waits to reconnect.
+- The window no longer freezes while a slow recorder answers a login check.
+- A day sent by the recorder only goes into file names and URLs when it is a plain date.
+- A cancel that arrives just after an export ends no longer cancels the next one.
+- A wrong password found by the permission check of an export isn't tried again by the download.
+- Saving or removing a recorder no longer freezes the window while the keyring is locked.
+- The calendar only asks the recorder for days that exist.
+- An export checks the permission of the camera first, also for a camera that was never played.
+  The answer holds for 10 minutes, so exporting the same camera again adds no login to the recorder.
+- A download stops 60 seconds after the recorder goes silent, instead of holding its connection.
+- Starting over after a damaged list of recorders can't reuse an id with a saved password.
+- `rigelcam-cli` cleans what the recorder sends before printing an error.
+- Recordings of cameras from different recorders follow the clock of the one that is behind, so
+  near midnight the next day and the part still to come don't follow a recorder that is ahead.
+- Cameras sending 10 bit H.265 video can be shown, without RTX on Windows.
+- The recordings of a day are read until the recorder sends an empty page, so a firmware with
+  smaller pages no longer cuts the list short.
+- Updating while a video is being exported waits for the export to end, instead of closing the app
+  and losing the video.
+- Editing a recorder no longer deletes its password when the keyring can't be read and the list
+  then fails to save.
+- An export no longer leaves out its last frames when the video happens to hold the mark the
+  recorder uses between frames.
+- "Open folder" after an export works when the path of the videos has `#` or `?`.
+- A camera an export found denied is asked again on the next one, so a permission given later on
+  the recorder counts without reopening the app.
+- Days in the calendar and in the recordings no longer depend on the digits of the system language.
+- On Windows, a graphics card that can't decode the cameras gets a message saying so, instead of
+  one about plugins that come with the app.
+
 ## [0.1.3] (2026-11-02)
 
 ### Added

@@ -207,22 +207,24 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use cxx_qt::{CxxQtThread, CxxQtType, Threading};
 use cxx_qt_lib::QString;
 use rigelcam_core::clips;
-use rigelcam_core::dahua::{Channel, Client, Error as RecorderError, LoginGate, Stream};
+use rigelcam_core::dahua::{
+    days_in_month, is_clock, is_date, Channel, Client, Error as RecorderError, LoginGate, Stream,
+};
 use rigelcam_core::layout::{CameraId, Layout};
 use rigelcam_core::recorders::{
-    list_path, lock_instance, Address, AddressError, Error as RecordersError, InstanceLock,
-    RecorderList, Secrets, SystemKeyring,
+    list_path, lock_instance, put_password, restore_password, take_password, Address, AddressError,
+    Error as RecordersError, InstanceLock, Previous, RecorderList, Secrets, SystemKeyring,
 };
 use serde_json::json;
 
 use crate::camera_stream::{
-    missing_elements, missing_h265_elements, old_gstreamer, CameraStream, Direct, DirectCameras,
-    Source, Stretch,
+    missing_elements, missing_h265_elements, old_gstreamer, recording_access, Access, CameraStream,
+    Direct, DirectCameras, Source, Stretch,
 };
 use crate::export::{self, Job};
 use crate::i18n::{self, message};
@@ -268,6 +270,10 @@ fn export_message(error: &export::Error) -> String {
     match error {
         export::Error::Recorder(error) => recorder_message(error),
         export::Error::Empty => message("There are no recordings in this stretch.", &[]),
+        export::Error::Denied => message(
+            "You don't have permission to see the recordings of this camera.",
+            &[],
+        ),
         export::Error::Stopped => message("The recorder stopped sending the video.", &[]),
         export::Error::Cancelled => String::new(),
         export::Error::Missing(element) => {
@@ -276,6 +282,10 @@ fn export_message(error: &export::Error) -> String {
         export::Error::Write(detail) => message("Could not save the video (%1).", &[detail]),
     }
 }
+
+/// How long a channel found allowed spares the next exports of it from asking again. Short, since
+/// the recorder doesn't stop a download it refused, so this check is what keeps the permission.
+const PERMISSION_MEMORY: Duration = Duration::from_secs(10 * 60);
 
 const FIRST_RETRY_DELAY: Duration = Duration::from_secs(5);
 const MAX_RETRY_DELAY: Duration = Duration::from_secs(60);
@@ -315,9 +325,9 @@ struct Connection {
     gate: Arc<LoginGate>,
     /// Channels whose recordings answer 404 over RTSP, so they stop asking.
     without_rtsp: Arc<Mutex<HashSet<u32>>>,
-    /// Channels whose last playback the recorder denied. Exporting goes by this, so saving a
-    /// video takes the same permission as watching it.
-    denied_recordings: Arc<Mutex<HashSet<u32>>>,
+    /// When an export last found each channel allowed, so the exports right after it don't open
+    /// another RTSP session, which the recorder logs as a login.
+    allowed_recordings: Arc<Mutex<HashMap<u32, Instant>>>,
     direct_cameras: Arc<DirectCameras>,
     sessions_refused: Arc<Mutex<bool>>,
 }
@@ -383,7 +393,7 @@ pub struct CameraGridRust {
     exports_waiting: i32,
     exports: VecDeque<Job>,
     export_cancel: Arc<AtomicBool>,
-    list: Option<RecorderList<SystemKeyring>>,
+    list: Option<RecorderList>,
     connections: HashMap<u64, Connection>,
     channels: HashMap<u64, Vec<Channel>>,
     failures: HashMap<u64, String>,
@@ -484,7 +494,7 @@ impl qobject::CameraGrid {
         self.update_started();
     }
 
-    fn adopt_list(mut self: Pin<&mut Self>, list: RecorderList<SystemKeyring>) {
+    fn adopt_list(mut self: Pin<&mut Self>, list: RecorderList) {
         self.as_mut().set_ready(true);
         if list.checks_for_updates() {
             self.as_mut().check_for_update();
@@ -531,6 +541,12 @@ impl qobject::CameraGrid {
             message(
                 "GStreamer 1.24 or newer is needed to show video, and this system has %1.",
                 &[version],
+            )
+        } else if !missing.is_empty() && cfg!(windows) {
+            // The plugins come with the app on Windows, so only a decoder the GPU lacks is missing.
+            message(
+                "This computer can't decode the video of the cameras on its graphics card (%1).",
+                &[&missing.join(", ")],
             )
         } else if !missing.is_empty() {
             message(
@@ -634,7 +650,7 @@ impl qobject::CameraGrid {
                         password,
                         gate: Arc::new(LoginGate::new(gate)),
                         without_rtsp: Arc::default(),
-                        denied_recordings: Arc::default(),
+                        allowed_recordings: Arc::default(),
                         direct_cameras: Arc::default(),
                         sessions_refused: Arc::default(),
                     };
@@ -785,6 +801,12 @@ impl qobject::CameraGrid {
         std::thread::spawn(move || {
             let result = connection.allowed_client().and_then(|client| {
                 let now = client.clock()?;
+                if !is_clock(&now) {
+                    return Err(RecorderError::Unexpected(format!("clock {now}")));
+                }
+                if !date.is_empty() && !is_date(&date) {
+                    return Err(RecorderError::Unexpected(format!("day {date}")));
+                }
                 let day = if date.is_empty() {
                     now.split(' ').next().unwrap_or_default().to_owned()
                 } else {
@@ -838,6 +860,10 @@ impl qobject::CameraGrid {
         start: i32,
         end: i32,
     ) {
+        // Only days that came from a checked search get here, and this keeps it that way.
+        if !is_date(&date.to_string()) {
+            return;
+        }
         let job = Job {
             recorder,
             channel: channel as u32,
@@ -871,17 +897,10 @@ impl qobject::CameraGrid {
         let waiting = self.exports.len() as i32;
         self.as_mut().set_exports_waiting(waiting);
         let connection = self.connections.get(&(job.recorder as u64)).cloned();
+        // A channel denied before is asked again by the check below, since the permission can
+        // change on the recorder.
         let refusal = match &connection {
             None => Some("The recorder is not connected."),
-            Some(connection)
-                if connection
-                    .denied_recordings
-                    .lock()
-                    .unwrap()
-                    .contains(&job.channel) =>
-            {
-                Some("You don't have permission to see the recordings of this camera.")
-            }
             Some(_) => None,
         };
         let (Some(connection), None) = (connection, refusal) else {
@@ -892,6 +911,8 @@ impl qobject::CameraGrid {
             self.start_next_export();
             return;
         };
+        // A cancel that came after the last export ended would stop this one before it starts.
+        self.export_cancel.store(false, Ordering::Relaxed);
         self.as_mut().set_export_progress(0.0);
         self.as_mut()
             .set_exporting(QString::from(job.name.as_str()));
@@ -904,10 +925,58 @@ impl qobject::CameraGrid {
                     grid.set_export_progress(fraction);
                 });
             };
-            let result = connection
-                .allowed_client()
-                .map_err(export::Error::from)
-                .and_then(|client| export::run(Arc::new(client), &job, &cancel, &mut progress));
+            // Checked between the steps before the download too, since closing the app waits for
+            // a cancelled export. A login that is already waiting for the recorder can't be cut.
+            let cancelled = || {
+                if cancel.load(Ordering::Relaxed) {
+                    Err(export::Error::Cancelled)
+                } else {
+                    Ok(())
+                }
+            };
+            let result = cancelled()
+                .and_then(|()| connection.allowed_client().map_err(export::Error::from))
+                .and_then(|client| cancelled().map(|()| client))
+                .and_then(|client| {
+                    let url = client.playback_url(job.channel, &job.date, job.start);
+                    let user = &connection.user;
+                    let allowed = connection.allowed_recordings.clone();
+                    let recent = allowed
+                        .lock()
+                        .unwrap()
+                        .get(&job.channel)
+                        .is_some_and(|checked| checked.elapsed() < PERMISSION_MEMORY);
+                    // RTSP answers 404 for the recordings of these, so asking can't tell anything.
+                    let without_rtsp = connection
+                        .without_rtsp
+                        .lock()
+                        .unwrap()
+                        .contains(&job.channel);
+                    if !recent && !without_rtsp {
+                        match recording_access(&url, user, &connection.password, &cancel) {
+                            Access::Denied => {
+                                allowed.lock().unwrap().remove(&job.channel);
+                                return Err(export::Error::Denied);
+                            }
+                            // Downloading would send the same wrong password again.
+                            Access::Refused => {
+                                return Err(RecorderError::Unauthorized.into());
+                            }
+                            // Only what showed video is remembered, since a timeout or a cancel
+                            // says nothing about the permission.
+                            Access::Allowed => {
+                                allowed.lock().unwrap().insert(job.channel, Instant::now());
+                            }
+                            Access::NotOnRtsp => {
+                                let mut without = connection.without_rtsp.lock().unwrap();
+                                without.insert(job.channel);
+                            }
+                            Access::Unknown => {}
+                        }
+                    }
+                    cancelled()?;
+                    export::run(Arc::new(client), &job, &cancel, &mut progress)
+                });
             if let Err(export::Error::Recorder(error)) = &result {
                 connection.refuse_after(error);
             }
@@ -949,6 +1018,9 @@ impl qobject::CameraGrid {
             return;
         };
         let month = month.to_string();
+        if !is_date(&format!("{month}-01")) {
+            return;
+        }
         let latest = self.days_search.clone();
         let search = latest.fetch_add(1, Ordering::Relaxed) + 1;
         let thread = self.qt_thread();
@@ -967,7 +1039,7 @@ impl qobject::CameraGrid {
                 Err(_) => String::new(),
             };
             // From the end, which is what someone looking for a recent event wants first.
-            let dates: Vec<String> = (1..=31)
+            let dates: Vec<String> = (1..=days_in_month(&month))
                 .rev()
                 .map(|day| format!("{month}-{day:02}"))
                 .filter(|date| today.is_empty() || *date <= today)
@@ -1012,7 +1084,7 @@ impl qobject::CameraGrid {
         seconds: i32,
         rate: i32,
     ) -> i32 {
-        if self.video_unavailable {
+        if self.video_unavailable || !is_date(&date.to_string()) {
             return 0;
         }
         let attempt = self.playbacks + 1;
@@ -1020,9 +1092,6 @@ impl qobject::CameraGrid {
         let Some(connection) = self.connections.get(&(recorder as u64)) else {
             return 0;
         };
-        // Each opening asks again, since a permission can change on the recorder.
-        let denied = connection.denied_recordings.clone();
-        denied.lock().unwrap().remove(&(channel as u32));
         let client = connection.client();
         let date = date.to_string();
         let url = client.playback_url(channel as u32, &date, seconds as u32);
@@ -1040,7 +1109,7 @@ impl qobject::CameraGrid {
                 date,
                 start: seconds as u32,
                 without_rtsp: connection.without_rtsp.clone(),
-                denied,
+                allowed: connection.allowed_recordings.clone(),
             })),
             direct: None,
         };
@@ -1193,6 +1262,17 @@ impl qobject::CameraGrid {
             self.set_form_error(QString::from("Enter the password for the new address."));
             return;
         }
+        let Some(target) = (match id {
+            Some(id) => Some(id),
+            None => self
+                .as_mut()
+                .rust_mut()
+                .list
+                .as_mut()
+                .map(|list| list.reserve_id()),
+        }) else {
+            return;
+        };
         self.as_mut().set_form_busy(true);
         let thread = self.qt_thread();
         std::thread::spawn(move || {
@@ -1206,10 +1286,19 @@ impl qobject::CameraGrid {
                     client_for(&address, &user, &tested)
                         .device_type()
                         .map_err(|error| recorder_message(&error))
+                })
+                // Off the interface thread, since a locked keyring waits for the user to unlock it.
+                .and_then(|model| {
+                    if id.is_some() && password.is_empty() {
+                        return Ok((model, None));
+                    }
+                    put_password(&SystemKeyring, target, &password)
+                        .map(|previous| (model, Some(previous)))
+                        .map_err(|error| error.to_string())
                 });
             let _ = thread.queue(move |mut grid: Pin<&mut qobject::CameraGrid>| {
-                let model = match result {
-                    Ok(model) => model,
+                let (model, previous) = match result {
+                    Ok(saved) => saved,
                     Err(message) => {
                         grid.as_mut()
                             .set_form_error(QString::from(message.as_str()));
@@ -1218,26 +1307,32 @@ impl qobject::CameraGrid {
                     }
                 };
                 let label = if name.trim().is_empty() { model } else { name };
-                let new_password = Some(password.as_str()).filter(|p| !p.is_empty());
-                let saved = grid.as_mut().rust_mut().list.as_mut().map(|list| match id {
-                    Some(id) => list
-                        .update(id, label.trim(), &address, &user, new_password)
-                        .map(|()| id),
-                    None => list.add(label.trim(), &address, &user, &password),
-                });
+                let saved = grid
+                    .as_mut()
+                    .rust_mut()
+                    .list
+                    .as_mut()
+                    .map(|list| list.store(target, label.trim(), &address, &user));
                 let Some(saved) = saved else {
                     return;
                 };
                 match saved {
-                    Ok(saved_id) => {
+                    Ok(()) => {
                         if id.is_some() {
-                            grid.as_mut().forget_recorder(saved_id);
+                            grid.as_mut().forget_recorder(target);
                         }
-                        grid.as_mut().connect_recorder(saved_id, id.is_none());
+                        grid.as_mut().connect_recorder(target, id.is_none());
                     }
-                    Err(error) => grid
-                        .as_mut()
-                        .set_form_error(QString::from(error.to_string().as_str())),
+                    Err(error) => {
+                        // None when the password wasn't touched, which leaves nothing to undo.
+                        if let Some(previous) = previous {
+                            std::thread::spawn(move || {
+                                restore_password(&SystemKeyring, target, &previous);
+                            });
+                        }
+                        grid.as_mut()
+                            .set_form_error(QString::from(error.to_string().as_str()));
+                    }
                 }
                 grid.as_mut().set_form_busy(false);
             });
@@ -1272,24 +1367,42 @@ impl qobject::CameraGrid {
         self.publish_tree();
     }
 
-    fn remove_recorder(mut self: Pin<&mut Self>, id: i32) {
+    fn remove_recorder(self: Pin<&mut Self>, id: i32) {
         let id = id as u64;
+        let thread = self.qt_thread();
+        // Off the interface thread, since a locked keyring waits for the user to unlock it.
+        std::thread::spawn(move || {
+            let (password, password_removed) = take_password(&SystemKeyring, id);
+            let _ = thread.queue(move |grid: Pin<&mut qobject::CameraGrid>| {
+                grid.finish_removing(id, password, password_removed);
+            });
+        });
+    }
+
+    fn finish_removing(
+        mut self: Pin<&mut Self>,
+        id: u64,
+        password: Previous,
+        password_removed: bool,
+    ) {
         let Some(result) = self
             .as_mut()
             .rust_mut()
             .list
             .as_mut()
-            .map(|list| list.remove(id))
+            .map(|list| list.forget(id))
         else {
             return;
         };
-        let password_removed = match result {
-            Ok(password_removed) => password_removed,
-            Err(error) => {
-                self.set_error(QString::from(error.to_string().as_str()));
-                return;
+        if let Err(error) = result {
+            if matches!(password, Previous::Password(_)) {
+                std::thread::spawn(move || {
+                    restore_password(&SystemKeyring, id, &password);
+                });
             }
-        };
+            self.set_error(QString::from(error.to_string().as_str()));
+            return;
+        }
         let notice = if password_removed {
             ""
         } else {
