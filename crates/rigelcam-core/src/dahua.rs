@@ -176,8 +176,9 @@ pub struct Client {
     challenge: Mutex<Option<WwwAuthenticateHeader>>,
     /// The recorder refused the password, so this client stops talking to it.
     refused: AtomicBool,
-    /// The session login failed on this recorder, for this and for later clients. Each try would
-    /// count as a wrong password, even where the CGI login works.
+    /// The session login failed on this recorder, or the recorder doesn't offer it, for this and
+    /// for later clients. Each try would count as a wrong password, even where the CGI login works,
+    /// or cost a request that can't work.
     /// Its lock stays held during a login, so streams asking together spend one wrong password.
     sessions_refused: Arc<Mutex<bool>>,
 }
@@ -502,11 +503,24 @@ impl<'a> Session<'a> {
                 &json!({"method": "global.login", "params": params, "id": 1, "session": session}),
             )
         };
-        let challenge = login("", &Value::Null).ok()?;
-        let params = challenge.get("params")?;
-        if params.get("encryption")?.as_str()? != "Default" {
+        let challenge = match login("", &Value::Null) {
+            Ok(challenge) => challenge,
+            // The network can come back, and a busy recorder can answer later.
+            Err(Error::Http(_) | Error::Status(500..)) => return None,
+            // Not found, not JSON or any other refusal of the first step, which asks for nothing
+            // yet, so the recorder doesn't offer this.
+            Err(_) => {
+                *sessions_refused = true;
+                return None;
+            }
+        };
+        let Some(params) = challenge
+            .get("params")
+            .filter(|params| params.get("encryption").and_then(Value::as_str) == Some("Default"))
+        else {
+            *sessions_refused = true;
             return None;
-        }
+        };
         let realm = params.get("realm")?.as_str()?;
         let random = params.get("random")?.as_str()?;
         let hash = login_hash(&client.user, &client.password, realm, random);
@@ -1107,6 +1121,36 @@ mod tests {
             assert!(Session::open(&client).is_none());
         }
         assert_eq!(logins.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn a_recorder_without_sessions_is_not_asked_again() {
+        let (port, requests) = fake_recorder(
+            b"HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+        );
+        let memory: Arc<Mutex<bool>> = Arc::default();
+        for _ in 0..3 {
+            let client = Client::new("127.0.0.1", "admin", "secret")
+                .with_ports(port, 554)
+                .with_session_memory(memory.clone());
+            assert!(Session::open(&client).is_none());
+        }
+        assert_eq!(requests.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn a_recorder_out_of_reach_is_asked_again_later() {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let memory: Arc<Mutex<bool>> = Arc::default();
+        let client = Client::new("127.0.0.1", "admin", "secret")
+            .with_ports(port, 554)
+            .with_session_memory(memory.clone());
+        assert!(Session::open(&client).is_none());
+        assert!(!*memory.lock().unwrap());
     }
 
     #[test]

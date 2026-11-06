@@ -18,6 +18,8 @@ User-visible changes, newest first.
 
 ### Fixed
 
+- A recorder that doesn't offer the login session searches try first is no longer asked for it
+  again on every search.
 - A camera moved, or a theme or language changed, just before saving a recorder that fails to save
   is no longer lost.
 - A camera open alone stops using the network and the decoder 20 seconds after the window is
