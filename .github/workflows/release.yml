@@ -16,7 +16,6 @@ env:
   GSTREAMER_VERSION: 1.28.8
   GSTREAMER_SHA256: e4c41ee6ee9c6c32a45d198463ec08d79bac3bd5fa58adc93d13fe4a08abc9d9
   QT_VERSION: 6.10.3
-  AQTINSTALL_VERSION: 3.3.0
   INNO_VERSION: 7.1.0
   INNO_SHA256: 0362a383ed217d4c4239b5933866dd96d3eb2102737da92f80f6057a4b40df2f
 
@@ -101,7 +100,9 @@ jobs:
       - name: install Qt
         shell: pwsh
         run: |
-          python -m pip install "aqtinstall==$env:AQTINSTALL_VERSION"
+          # Every package with its hash, so a file changed on PyPI stops the install.
+          python -m pip install --require-hashes -r packaging\windows\aqtinstall.txt
+          if ($LASTEXITCODE -ne 0) { throw 'pip failed' }
           python -m aqt install-qt windows desktop $env:QT_VERSION win64_msvc2022_64 --outputdir C:\Qt
           if ($LASTEXITCODE -ne 0) { throw 'aqt failed' }
       - name: install Inno Setup
