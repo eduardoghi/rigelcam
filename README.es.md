@@ -93,7 +93,7 @@ a agregar los grabadores.
 
 ## Compilación
 
-Se necesita Rust 1.96 o superior, Qt 6 con Qt Quick y las herramientas de Linguist, y GStreamer 1.24
+Se necesita Rust 1.99 o superior, Qt 6 con Qt Quick y las herramientas de Linguist, y GStreamer 1.24
 o superior con los plugins base, good y bad.
 
 ```sh

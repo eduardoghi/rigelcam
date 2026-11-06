@@ -86,7 +86,7 @@ the same way. Its data is apart from a build made from source, so add the record
 
 ## Building
 
-You need Rust 1.96 or newer, Qt 6 with Qt Quick and the Linguist tools, and GStreamer 1.24 or newer
+You need Rust 1.99 or newer, Qt 6 with Qt Quick and the Linguist tools, and GStreamer 1.24 or newer
 with its base, good and bad plugins.
 
 ```sh
