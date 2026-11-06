@@ -434,12 +434,25 @@ fn run(shared: Arc<Shared>) {
                 let guard = shared.control.lock().unwrap();
                 let _ = shared
                     .changed
-                    .wait_timeout_while(guard, retry_delay, |c| !c.stop && c.revision == revision)
+                    .wait_timeout_while(guard, spread(retry_delay), |c| {
+                        !c.stop && c.revision == revision
+                    })
                     .unwrap();
                 retry_delay = (retry_delay * 2).min(MAX_RETRY_DELAY);
             }
         }
     }
+}
+
+/// `delay` give or take a fifth, at random. The cameras of a recorder that comes back after a cut
+/// would otherwise all try again at the same moment, with a burst of logins on it.
+fn spread(delay: Duration) -> Duration {
+    use std::hash::{BuildHasher, Hasher};
+    // A new RandomState is seeded apart from the ones before, which is random enough here.
+    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+    hasher.write_u8(0);
+    let thousandths = hasher.finish() % 401;
+    delay * (800 + thousandths as u32) / 1000
 }
 
 enum Outcome {
@@ -1431,6 +1444,14 @@ mod tests {
         shared.wake();
         let ended = outcome.recv_timeout(Duration::from_secs(1));
         assert!(matches!(ended, Ok(Outcome::Changed)));
+    }
+
+    #[test]
+    fn retries_spread_around_their_delay() {
+        let delays: Vec<_> = (0..200).map(|_| spread(Duration::from_secs(10))).collect();
+        let (low, high) = (Duration::from_secs(8), Duration::from_secs(12));
+        assert!(delays.iter().all(|delay| (low..=high).contains(delay)));
+        assert!(delays.iter().min() != delays.iter().max());
     }
 
     #[test]
