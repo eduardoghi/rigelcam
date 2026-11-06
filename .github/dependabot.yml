@@ -1,0 +1,48 @@
+version: 2
+
+# Minor and patch bumps come as one PR per ecosystem a week, and a major gets a PR of its own, since
+# that is the one with breaking changes to read. The cooldown waits out the first days of a release
+# before proposing it, so a compromised version has time to be pulled.
+updates:
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 5
+    commit-message:
+      prefix: "build"
+    groups:
+      cargo-minor-and-patch:
+        patterns:
+          - "*"
+        # Below 1.0 a minor bump can break the API, as 0.25 to 0.26 does in gstreamer-rs, and one
+        # of these in the group would hold the other bumps back with it.
+        exclude-patterns:
+          - "cxx-qt*"
+          - "gstreamer*"
+          - "digest_auth"
+          - "md-5"
+          - "minisign-verify"
+          - "oo7"
+          - "pkg-config"
+        update-types:
+          - "minor"
+          - "patch"
+
+  # The actions are pinned by SHA, which never moves by itself.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 5
+    commit-message:
+      prefix: "ci"
+    groups:
+      actions-minor-and-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
