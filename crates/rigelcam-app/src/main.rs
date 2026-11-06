@@ -27,7 +27,6 @@ fn main() {
     if std::env::var_os("GIO_USE_PROXY_RESOLVER").is_none() {
         std::env::set_var("GIO_USE_PROXY_RESOLVER", "dummy");
     }
-    gstreamer::init().expect("could not start GStreamer");
     #[cfg(windows)]
     std::env::set_var("QSG_RHI_BACKEND", "d3d11");
     #[cfg(not(windows))]
@@ -38,6 +37,8 @@ fn main() {
     }
     // Always, since the interface customizes controls that other styles don't let it change.
     std::env::set_var("QT_QUICK_CONTROLS_STYLE", "Basic");
+    // After every change to the environment, which isn't safe once GLib has threads running.
+    gstreamer::init().expect("could not start GStreamer");
 
     // Linux needs OpenGL ES for external textures, and Windows a device shared with the decoders.
     unsafe { rigel_prepare_graphics() };
