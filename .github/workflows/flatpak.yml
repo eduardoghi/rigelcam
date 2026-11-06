@@ -1,0 +1,56 @@
+name: Flatpak
+
+# Without this, the bundle is built for the first time by the release, when a version is about to go
+# out. Only changes to what goes into it start it.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/**"
+      - "assets/branding/**"
+      - "packaging/linux/**"
+      - "LICENSE"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/flatpak.yml"
+  pull_request:
+    paths:
+      - "crates/**"
+      - "assets/branding/**"
+      - "packaging/linux/**"
+      - "LICENSE"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/flatpak.yml"
+
+permissions:
+  contents: read
+
+# A newer push makes the build of an older one pointless.
+concurrency:
+  group: flatpak-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  bundle:
+    name: Flatpak bundle
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: install Flatpak
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends flatpak flatpak-builder elfutils
+          flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+          echo "week=$(date -u +%G-%V)" >> "$GITHUB_ENV"
+      # The KDE runtime and the Rust SDK are a few GB. They come back from the cache for a week,
+      # keyed by the manifest that names them, and the release always installs them fresh.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.local/share/flatpak
+          key: flatpak-${{ hashFiles('packaging/linux/io.github.eduardoghi.rigelcam.yml') }}-${{ env.week }}
+      - name: build the bundle
+        run: packaging/linux/build-flatpak.sh rigelcam.flatpak
