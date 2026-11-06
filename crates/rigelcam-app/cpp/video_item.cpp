@@ -201,13 +201,16 @@ void VideoItem::releaseVideo() {
 
 void VideoItem::setFrame(const RigelFrame &frame) {
     bool queued;
+    RigelFrame dropped;
     {
         QMutexLocker lock(&m_mutex);
         // A frame the scene graph didn't get to is dropped, so nothing queues up here.
-        release(m_pending);
-        m_pending = frame;
+        dropped = std::exchange(m_pending, frame);
         queued = std::exchange(m_hasPending, true);
     }
+    // Outside the lock, which the scene graph takes to draw, since giving the last reference back
+    // to the decoder can take a while.
+    release(dropped);
     // A frame still pending already has an update on its way, which draws this one instead.
     if (!queued) QMetaObject::invokeMethod(this, [this] { update(); }, Qt::QueuedConnection);
 }
