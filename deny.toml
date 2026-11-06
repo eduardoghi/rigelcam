@@ -1,0 +1,39 @@
+# Checked by `cargo deny check` in .github/workflows/audit.yml.
+
+[licenses]
+# The licenses in the tree today, all permissive except MPL-2.0, whose obligation is to publish the
+# source of the files it covers, which an open source app does anyway. It comes from option-ext,
+# through dirs. A crate under another license, such as the GPL, fails the check before it ships.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unlicense",
+    "Unicode-3.0",
+    "CDLA-Permissive-2.0",
+    "MPL-2.0",
+]
+confidence-threshold = 0.9
+
+[bans]
+# Two versions of a crate only cost build time, so they are listed and don't fail.
+multiple-versions = "warn"
+# A "*" requirement would let any major in without review. The path dependency between the two
+# crates of the workspace is the exception.
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+# Only crates.io.
+unknown-registry = "deny"
+unknown-git = "deny"
+
+[advisories]
+# Vulnerabilities and unsound code fail by default. An unmaintained notice only counts for a crate
+# the workspace depends on directly, since one deep in the tree is out of reach here.
+unmaintained = "workspace"
+yanked = "deny"
