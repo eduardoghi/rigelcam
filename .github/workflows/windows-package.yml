@@ -83,11 +83,7 @@ jobs:
       - name: install Qt
         shell: pwsh
         run: |
-          # Every package with its hash, so a file changed on PyPI stops the install.
-          python -m pip install --require-hashes -r packaging\windows\aqtinstall.txt
-          if ($LASTEXITCODE -ne 0) { throw 'pip failed' }
-          python -m aqt install-qt windows desktop $env:QT_VERSION win64_msvc2022_64 --outputdir C:\Qt
-          if ($LASTEXITCODE -ne 0) { throw 'aqt failed' }
+          packaging\windows\install-qt.ps1 -Version $env:QT_VERSION
       - name: install Inno Setup
         shell: pwsh
         run: |

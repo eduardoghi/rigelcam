@@ -1,0 +1,11 @@
+# SHA-256 of each archive of Qt that install-qt.ps1 takes, for the version in QT_VERSION of the
+# workflows. aqtinstall checks them against sums from the same mirror, so this pins them to what
+# they were when the version was chosen. For another version, run aqt with --keep and
+# --archive-dest on any system and list the archives with sha256sum.
+8cd62856944ba5748b4279d2180b5bbf088f8f01fab254909107001b9a7c9341  d3dcompiler_47-x64.7z
+0b1e41da5ee1bd3957236e34abe684ef46f97f7cdfb42abb00b17b53f096f97c  opengl32sw-64-mesa_11_2_2-signed_sha256.7z
+4db84dee7fe3c558f242bef0a88852613af76580dc6d2b24596479f47004dad7  qtbase-Windows-Windows_11_24H2-MSVC2022-Windows-Windows_11_24H2-X86_64.7z
+7dad584e12dc7641d9940e0ab30fa86092eda3f1c59ee7b5e4a02550986be35c  qtdeclarative-Windows-Windows_11_24H2-MSVC2022-Windows-Windows_11_24H2-X86_64.7z
+fa5bb334b6b95582f87481a9f54819dc066e8cefed7f4fe9a21a77719630ba04  qtsvg-Windows-Windows_11_24H2-MSVC2022-Windows-Windows_11_24H2-X86_64.7z
+4d51cd446ff438845c706600aef6bf7349490c358bf7bb27abd32cb5ea3afcb8  qttools-Windows-Windows_11_24H2-MSVC2022-Windows-Windows_11_24H2-X86_64.7z
+5002080668c89bc8749a790f0136f12c15a8f6a407649ef0820c7dc555da0bb2  qttranslations-Windows-Windows_11_24H2-MSVC2022-Windows-Windows_11_24H2-X86_64.7z

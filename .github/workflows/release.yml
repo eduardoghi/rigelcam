@@ -67,7 +67,8 @@ jobs:
             return 1
           }
           passed_since_change windows.yml crates Cargo.toml Cargo.lock \
-            packaging/windows/aqtinstall.txt assets/branding .github/workflows/windows.yml
+            packaging/windows/aqtinstall.txt packaging/windows/qt-archives.sha256 \
+            packaging/windows/install-qt.ps1 assets/branding .github/workflows/windows.yml
           passed_since_change flatpak.yml crates assets/branding packaging/linux LICENSE Cargo.toml \
             Cargo.lock about.toml about.hbs .github/workflows/flatpak.yml
           # Only a release that doesn't exist counts as a draft, so a failing call stops here.
