@@ -88,3 +88,6 @@ jobs:
       # The arithmetic of the player, in qml/playback.js.
       - name: QML tests
         run: QT_QPA_PLATFORM=offscreen /usr/lib/qt6/bin/qmltestrunner -input crates/rigelcam-app/tests/qml
+      # After the build, whose QML module it reads.
+      - name: qmllint
+        run: crates/rigelcam-app/qmllint.sh
