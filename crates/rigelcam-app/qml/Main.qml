@@ -747,8 +747,8 @@ ApplicationWindow {
 
             Rectangle {
                 visible: win.recorderList.length > 0 && !win.inRecordings
-                width: 7
-                height: 7
+                implicitWidth: 7
+                implicitHeight: 7
                 radius: 4
                 color: win.liveCount > 0 ? colors.live : colors.muted
                 Layout.leftMargin: 4
@@ -1450,8 +1450,8 @@ ApplicationWindow {
                                         anchors.rightMargin: 8
                                         spacing: 9
                                         Rectangle {
-                                            width: 8
-                                            height: 8
+                                            implicitWidth: 8
+                                            implicitHeight: 8
                                             radius: 4
                                             color: cameraRow.isPlayback ? colors.accent
                                                  : cameraRow.status === "live" ? colors.live
@@ -2718,11 +2718,11 @@ ApplicationWindow {
                 // The part of the day on screen, in seconds, which the wheel changes.
                 property real viewStart: 0
                 property real viewEnd: 86400
-                readonly property real scale: width / (viewEnd - viewStart)
+                readonly property real pixelsPerSecond: width / (viewEnd - viewStart)
                 // Marks sit on round times of the clock, so they slide with the bar when it moves.
                 readonly property int tickStep: {
                     for (const step of [60, 120, 300, 600, 900, 1800, 3600, 7200, 10800]) {
-                        if (step * scale >= 70)
+                        if (step * pixelsPerSecond >= 70)
                             return step
                     }
                     return 21600
@@ -2731,11 +2731,11 @@ ApplicationWindow {
                 readonly property int tickCount: Math.max(0, Math.floor((viewEnd - firstTick) / tickStep) + 1)
 
                 function xOf(seconds) {
-                    return (seconds - viewStart) * scale
+                    return (seconds - viewStart) * pixelsPerSecond
                 }
 
                 function timeAt(x) {
-                    return viewStart + x / scale
+                    return viewStart + x / pixelsPerSecond
                 }
 
                 function panTo(start) {
@@ -2773,7 +2773,7 @@ ApplicationWindow {
                         Rectangle {
                             required property var modelData
                             x: timeline.xOf(modelData.start)
-                            width: Math.max(1, (modelData.end - modelData.start) * timeline.scale)
+                            width: Math.max(1, (modelData.end - modelData.start) * timeline.pixelsPerSecond)
                             height: track.height
                             color: modelData.event ? colors.waiting : colors.accent
                             opacity: 0.75
@@ -2840,7 +2840,7 @@ ApplicationWindow {
                             panning = true
                         if (panning) {
                             timeline.following = false
-                            timeline.panTo(pressStart - (mouse.x - pressX) / timeline.scale)
+                            timeline.panTo(pressStart - (mouse.x - pressX) / timeline.pixelsPerSecond)
                         }
                     }
                     // Dragging only moves the bar, so it never changes what is playing by accident.
