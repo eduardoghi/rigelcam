@@ -58,4 +58,12 @@ while ($pending.Count -gt 0) {
 Copy-Item (Join-Path $PSScriptRoot '..\..\LICENSE') $Output
 Copy-Item (Join-Path $PSScriptRoot 'THIRD-PARTY.txt') $Output
 # The LGPL asks for its text next to the DLLs it covers, and version 3 also for the GPL it extends.
+# The other files have the notices of the code Qt bundles and of what Qt deploys next to it.
 Copy-Item -Recurse (Join-Path $PSScriptRoot 'licenses') $Output
+# The libraries GStreamer brings along, with the notices its installer keeps for each of them. The
+# GStreamer libraries themselves are under the LGPL already in the folder.
+foreach ($name in 'glib', 'proxy-libintl', 'libffi', 'orc', 'pcre2', 'zlib') {
+    $notice = Join-Path $Gstreamer "share\licenses\$name"
+    if (-not (Test-Path $notice)) { throw "GStreamer came without the notice of $name" }
+    Copy-Item -Recurse $notice (Join-Path $Output "licenses\gstreamer\$name")
+}
