@@ -38,6 +38,11 @@ jobs:
         run: |
           version=$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/rigelcam-app/Cargo.toml | head -1)
           test -n "$version"
+          # Software centers show the versions of the Flatpak from here, so the new one has to be listed.
+          if ! grep -q "<release version=\"$version\"" packaging/linux/io.github.eduardoghi.rigelcam.metainfo.xml; then
+            echo "the metainfo of the Flatpak has no <release> for $version" >&2
+            exit 1
+          fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
       # Published versions can't change, so one that exists has to be bumped first. The Windows check
       # and the Flatpak build only run on commits that change what they build, so each has to have
