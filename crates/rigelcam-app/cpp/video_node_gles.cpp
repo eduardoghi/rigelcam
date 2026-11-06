@@ -81,6 +81,9 @@ Program &program(QOpenGLFunctions *f) {
         p.gamma = f->glGetUniformLocation(p.id, "gamma");
         p.view = f->glGetUniformLocation(p.id, "view");
         p.corner = f->glGetAttribLocation(p.id, "corner");
+        // The texture always goes in unit 0, so the sampler is set once with the program.
+        f->glUseProgram(p.id);
+        f->glUniform1i(p.tex, 0);
         f->glGenBuffers(1, &p.vbo);
         f->glBindBuffer(GL_ARRAY_BUFFER, p.vbo);
         f->glBufferData(GL_ARRAY_BUFFER, sizeof kSquare, kSquare, GL_STATIC_DRAW);
@@ -220,7 +223,6 @@ private:
         f->glUseProgram(p.id);
         f->glUniformMatrix4fv(p.mvp, 1, GL_FALSE, mvp.constData());
         f->glUniform4f(p.view, float(m_view.x()), float(m_view.y()), float(m_view.width()), float(m_view.height()));
-        f->glUniform1i(p.tex, 0);
         f->glUniform1f(p.gamma, m_gamma);
         f->glActiveTexture(GL_TEXTURE0);
         f->glBindTexture(GL_TEXTURE_EXTERNAL_OES, texture);
