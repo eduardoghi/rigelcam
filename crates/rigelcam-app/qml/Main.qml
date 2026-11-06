@@ -4,6 +4,7 @@ import QtQuick.Layouts
 import QtQuick.Window
 import rigelcam.video 1.0
 import rigelcam
+import "playback.js" as Playback
 
 ApplicationWindow {
     id: win
@@ -419,10 +420,8 @@ ApplicationWindow {
     // Not saved, so nobody ends up watching rebuilt detail without having asked for it.
     property bool superResolution: false
     property bool rtxHdr: false
-    // A day as the recorder takes it, with Latin digits whatever the locale.
     function isoDay(date) {
-        const pad = n => String(n).padStart(2, "0")
-        return date.getFullYear() + "-" + pad(date.getMonth() + 1) + "-" + pad(date.getDate())
+        return Playback.isoDay(date)
     }
     property var zoomedCamera: null
     readonly property bool fullScreen: visibility === Window.FullScreen
@@ -469,12 +468,8 @@ ApplicationWindow {
         return translated
     }
 
-    // The seconds after midnight of a time like 07:30:00, or -1 if it isn't one.
     function secondsOf(text) {
-        const parts = /^(\d\d):(\d\d):(\d\d)$/.exec(text)
-        if (!parts || parts[1] > 23 || parts[2] > 59 || parts[3] > 59)
-            return -1
-        return parts[1] * 3600 + parts[2] * 60 + Number(parts[3])
+        return Playback.secondsOf(text)
     }
 
     function clamp(value, low, high) {
@@ -1933,37 +1928,9 @@ ApplicationWindow {
         property var clocks: ({})
         // The bar is shared, so the recorder that is behind decides, and no day shows as over while
         // one of them is still in it.
-        readonly property string today: earliestDay(clocks, win.playbackCameras)
-        readonly property int nowSeconds: secondsOn(date, clocks, win.playbackCameras)
-
-        function playbackRecorders(cameras) {
-            return [...new Set(cameras.filter(camera => camera).map(camera => camera.recorder))]
-        }
-
-        function earliestDay(known, cameras) {
-            let day = ""
-            for (const recorder of playbackRecorders(cameras)) {
-                const clock = known[recorder]
-                if (clock && (day === "" || clock.today < day))
-                    day = clock.today
-            }
-            return day
-        }
-
-        // Seconds of `day` already past on every recorder, which is all of it when none is in it.
-        function secondsOn(day, known, cameras) {
-            let seconds = 86400
-            for (const recorder of playbackRecorders(cameras)) {
-                const clock = known[recorder]
-                if (!clock)
-                    continue
-                if (clock.today === day)
-                    seconds = Math.min(seconds, clock.seconds)
-                else if (clock.today < day)
-                    seconds = 0
-            }
-            return seconds
-        }
+        readonly property string today: Playback.earliestDay(clocks, win.playbackCameras)
+        // Seconds of the day shown already past on every recorder, all of it when none is in it.
+        readonly property int nowSeconds: Playback.secondsOn(date, clocks, win.playbackCameras)
         property int rate: 1
         property bool playing: false
         // Cameras waiting for their search, and the ones that only bring the day up to date.
@@ -2012,8 +1979,7 @@ ApplicationWindow {
         }
 
         function updateSpans() {
-            spans = Object.values(spansOf).reduce((all, list) => all.concat(list), [])
-                .sort((a, b) => a.start - b.start)
+            spans = Playback.allSpans(spansOf)
         }
 
         // A search that nobody waits for anymore would leave `loading` on for good.
@@ -2035,7 +2001,7 @@ ApplicationWindow {
         }
 
         function lastRecordedSecond() {
-            return Math.max(...spans.map(span => span.end))
+            return Playback.lastRecordedSecond(spans)
         }
 
         // With every answer in, so the cameras of a day open together.
@@ -2043,8 +2009,7 @@ ApplicationWindow {
             if (started || loading || spans.length === 0)
                 return
             started = true
-            const end = lastRecordedSecond()
-            seek(date === today ? Math.max(spans[spans.length - 1].start, end - 60) : spans[0].start)
+            seek(Playback.startOfDay(spans, date === today))
         }
 
         onRecordingsChanged: {
@@ -2160,24 +2125,12 @@ ApplicationWindow {
             }
         }
 
-        // A time inside a gap goes to the next recording, and one after the last does nothing.
         function recordedTime(seconds) {
-            for (const span of spans) {
-                if (seconds < span.end)
-                    return Math.max(seconds, span.start)
-            }
-            return -1
+            return Playback.recordedTime(spans, seconds)
         }
 
-        // seek moves forward over a gap, which would land on the start of this same recording.
         function skipBack() {
-            const wanted = position - 10
-            let target = -1
-            for (const span of spans) {
-                if (span.start <= wanted)
-                    target = Math.max(target, Math.min(wanted, span.end - 1))
-            }
-            seek(target < 0 ? 0 : target)
+            seek(Playback.skipBackTarget(spans, position))
         }
 
         function seek(seconds) {
@@ -2250,8 +2203,7 @@ ApplicationWindow {
         }
 
         function clockText(seconds) {
-            const pad = n => String(Math.floor(n)).padStart(2, "0")
-            return pad(seconds / 3600) + ":" + pad(seconds / 60 % 60) + ":" + pad(seconds % 60)
+            return Playback.clockText(seconds)
         }
 
         onVisibleChanged: {
@@ -2326,7 +2278,7 @@ ApplicationWindow {
                     height: videoArea.height / videoArea.rows
 
                     function recordedAt(seconds) {
-                        return spans.some(span => seconds >= span.start && seconds < span.end)
+                        return Playback.recordedAt(spans, seconds)
                     }
 
                     function open(seconds) {
@@ -2374,21 +2326,8 @@ ApplicationWindow {
                         return streamOpen && reported && Math.abs(position - seconds) > 3 * playback.rate
                     }
 
-                    // The stream counts only recorded time, so its elapsed seconds walk the
-                    // recordings of the day to find the time on the clock, jumping over the gaps.
                     function timeAfter(elapsed) {
-                        let time = openedAt
-                        let left = elapsed
-                        for (const span of spans) {
-                            if (span.end <= time)
-                                continue
-                            time = Math.max(time, span.start)
-                            if (left <= span.end - time)
-                                return time + left
-                            left -= span.end - time
-                            time = span.end
-                        }
-                        return time
+                        return Playback.timeAfter(spans, openedAt, elapsed)
                     }
 
                     VideoItem {

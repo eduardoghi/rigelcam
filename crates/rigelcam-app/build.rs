@@ -80,11 +80,15 @@ fn main() {
     // until the QML changes again. Without the file every build works like a clean one.
     let types = "qt-build-utils/qml_modules/rigelcam/plugin.qmltypes";
     let _ = std::fs::remove_file(Path::new(&std::env::var("OUT_DIR").unwrap()).join(types));
-    let builder = CxxQtBuilder::new_qml_module(QmlModule::new("rigelcam").qml_file("qml/Main.qml"))
-        .qt_module("Quick")
-        .qrc("resources.qrc")
-        .files(["src/grid.rs"])
-        .cpp_files(["cpp/video_item.h", "cpp/video_item.cpp", node]);
+    let builder = CxxQtBuilder::new_qml_module(
+        QmlModule::new("rigelcam")
+            .qml_file("qml/Main.qml")
+            .qml_file("qml/playback.js"),
+    )
+    .qt_module("Quick")
+    .qrc("resources.qrc")
+    .files(["src/grid.rs"])
+    .cpp_files(["cpp/video_item.h", "cpp/video_item.cpp", node]);
     // Only adds the headers of the GStreamer library that the Windows node uses.
     let builder = unsafe {
         builder.cc_builder(|cc| {
