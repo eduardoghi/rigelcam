@@ -18,6 +18,8 @@ User-visible changes, newest first.
 
 ### Fixed
 
+- A camera moved, or a theme or language changed, just before saving a recorder that fails to save
+  is no longer lost.
 - A camera open alone stops using the network and the decoder 20 seconds after the window is
   minimized, like the cameras of the grid. Entering the recordings stops the live cameras at once.
 - A minimized window frees the video memory of its stopped cameras, instead of holding it until

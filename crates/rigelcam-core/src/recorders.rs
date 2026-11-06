@@ -553,13 +553,13 @@ impl RecorderList {
         }
     }
 
-    /// Saves now, for the changes that have to be undone when saving fails. A save still waiting
-    /// is dropped, since this one has everything it had, and one already running ends first, so
-    /// an older copy can't land after this one.
+    /// Saves now, for the changes that have to be undone when saving fails. One already running
+    /// ends first, so an older copy can't land after this one. A save still waiting is dropped
+    /// once this one is on disk, since it has everything that one had. When this one fails, the
+    /// waiting one stays, as the change it holds is still wanted after the undo.
     fn write(&self) -> Result<(), Error> {
         let queue = &self.saver.queue;
         let mut state = queue.lock();
-        state.pending = None;
         while state.saving {
             state = queue.wait(state);
         }
@@ -567,6 +567,9 @@ impl RecorderList {
         let result = serde_json::to_vec_pretty(&self.saved)
             .map_err(Error::from)
             .and_then(|bytes| save(&self.path, &bytes));
+        if result.is_ok() {
+            state.pending = None;
+        }
         drop(state);
         result
     }
@@ -748,6 +751,21 @@ mod tests {
         assert_eq!(reopened.recorders().len(), 50);
         assert_eq!(reopened.theme(), Some("light"));
         assert_eq!(reopened.language(), Some("en"));
+    }
+
+    #[test]
+    fn a_failed_save_keeps_the_setting_still_waiting() {
+        let path = temp_path("keeps-pending");
+        let mut list = RecorderList::open(path.clone()).unwrap();
+        // A layout waiting for the thread, which hasn't taken it yet.
+        list.saver.queue.lock().pending = Some(b"{}".to_vec());
+        fs::create_dir_all(path.with_extension("json.tmp")).unwrap();
+        assert!(list.store(1, "A", &addr("192.0.2.1"), "u").is_err());
+        assert!(list.saver.queue.lock().pending.is_some());
+        fs::remove_dir(path.with_extension("json.tmp")).unwrap();
+        list.store(1, "A", &addr("192.0.2.1"), "u").unwrap();
+        // Once a save lands it has everything, so the older copy can't land after it.
+        assert!(list.saver.queue.lock().pending.is_none());
     }
 
     #[test]
