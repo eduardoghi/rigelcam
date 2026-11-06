@@ -296,6 +296,16 @@ fn report_refused(thread: &CxxQtThread<qobject::CameraGrid>, recorder: i32) {
     });
 }
 
+/// A second of the day as QML sends it, which a recording request takes as is.
+fn second_of_day(value: i32) -> Option<u32> {
+    (0..86_400).contains(&value).then_some(value as u32)
+}
+
+/// A channel as QML sends it. Recorders number them from 1.
+fn channel_number(value: i32) -> Option<u32> {
+    (value >= 1).then_some(value as u32)
+}
+
 fn camera_id(recorder: i32, channel: i32) -> CameraId {
     CameraId {
         recorder: recorder as u64,
@@ -907,13 +917,25 @@ impl qobject::CameraGrid {
         if !is_date(&date.to_string()) {
             return;
         }
+        // QML checks these too. A stretch that ends before it starts would ask the recorder for
+        // nearly a whole day once the subtraction wraps.
+        let (Some(channel), Some(start), Some(end)) = (
+            channel_number(channel),
+            second_of_day(start),
+            second_of_day(end),
+        ) else {
+            return;
+        };
+        if end <= start {
+            return;
+        }
         let job = Job {
             recorder,
-            channel: channel as u32,
+            channel,
             name: name.to_string(),
             date: date.to_string(),
-            start: start as u32,
-            end: end as u32,
+            start,
+            end,
         };
         self.as_mut().rust_mut().exports.push_back(job);
         self.start_next_export();
@@ -1098,6 +1120,13 @@ impl qobject::CameraGrid {
         if self.video_unavailable || !is_date(&date.to_string()) {
             return 0;
         }
+        let (Some(channel), Some(seconds)) = (channel_number(channel), second_of_day(seconds))
+        else {
+            return 0;
+        };
+        if rate < 1 {
+            return 0;
+        }
         let attempt = self.playbacks + 1;
         self.as_mut().rust_mut().playbacks = attempt;
         let Some(connection) = self.connections.get(&(recorder as u64)) else {
@@ -1105,7 +1134,7 @@ impl qobject::CameraGrid {
         };
         let client = connection.client();
         let date = date.to_string();
-        let url = client.playback_url(channel as u32, &date, seconds as u32);
+        let url = client.playback_url(channel, &date, seconds);
         let source = Source {
             url,
             user: connection.user.clone(),
@@ -1116,9 +1145,9 @@ impl qobject::CameraGrid {
             gate: connection.gate.clone(),
             stretch: Some(Arc::new(Stretch {
                 client: Arc::new(client),
-                channel: channel as u32,
+                channel,
                 date,
-                start: seconds as u32,
+                start: seconds,
                 without_rtsp: connection.without_rtsp.clone(),
                 allowed: connection.allowed_recordings.clone(),
             })),
@@ -1582,6 +1611,17 @@ mod tests {
             check(&connection, Access::Unknown),
             (Ok(()), true)
         ));
+    }
+
+    #[test]
+    fn values_from_qml_outside_a_day_or_a_channel_are_refused() {
+        assert_eq!(second_of_day(0), Some(0));
+        assert_eq!(second_of_day(86_399), Some(86_399));
+        assert_eq!(second_of_day(86_400), None);
+        assert_eq!(second_of_day(-1), None);
+        assert_eq!(channel_number(1), Some(1));
+        assert_eq!(channel_number(0), None);
+        assert_eq!(channel_number(-5), None);
     }
 
     #[test]
