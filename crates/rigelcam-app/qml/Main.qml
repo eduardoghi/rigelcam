@@ -363,7 +363,8 @@ ApplicationWindow {
     CameraGrid {
         id: grid
         Component.onCompleted: load()
-        onTreeChanged: win.syncTiles()
+        onTreeChanged: win.syncTree()
+        onLayoutChanged: win.syncTiles(JSON.parse(grid.tree || "[]"))
         onLanguageChanged: retranslator.run()
     }
 
@@ -498,17 +499,59 @@ ApplicationWindow {
         foldedRecorders = folded ? others.concat(id) : others
     }
 
-    // A model changed item by item, so a recorder answering doesn't restart the others' cameras.
-    function syncTiles() {
-        const cameras = new Map()
+    // Each recorder of the side bar as text, so a row is only rebuilt when that recorder changed,
+    // and not all of them whenever one connects.
+    ListModel { id: recorderModel }
+
+    function syncRecorders(recorders) {
+        recorders.forEach((recorder, i) => {
+            const json = JSON.stringify(recorder)
+            let at = i
+            while (at < recorderModel.count && recorderModel.get(at).recorderId !== recorder.id)
+                at++
+            if (at === recorderModel.count) {
+                recorderModel.insert(i, { recorderId: recorder.id, json: json })
+                return
+            }
+            if (at !== i)
+                recorderModel.move(at, i, 1)
+            if (recorderModel.get(i).json !== json)
+                recorderModel.setProperty(i, "json", json)
+        })
+        if (recorderModel.count > recorders.length)
+            recorderModel.remove(recorders.length, recorderModel.count - recorders.length)
+    }
+
+    function syncTree() {
         const recorders = JSON.parse(grid.tree || "[]")
         // The button to leave the recordings goes away with the last recorder.
         if (recorders.length === 0)
             setMode("live")
+        syncRecorders(recorders)
+        const keys = new Set()
+        for (const recorder of recorders) {
+            for (const camera of recorder.cameras)
+                keys.add(cameraKey(recorder.id, camera.number))
+        }
+        // The recorder was removed, edited or refused the password, so these streams are out of date.
+        playbackCameras.forEach((camera, slot) => {
+            if (camera && !keys.has(cameraKey(camera.recorder, camera.number)))
+                playback.removeCamera(slot)
+        })
+        syncTiles(recorders)
+    }
+
+    // A model changed item by item, so a recorder answering doesn't restart the others' cameras.
+    // It reads the layout and not gridKeys, which may not have followed it yet when this runs.
+    function syncTiles(recorders) {
+        const layout = grid.layout ? JSON.parse(grid.layout) : { cameras: [] }
+        const onGrid = new Set(layout.cameras.filter(c => c).map(c => cameraKey(c.recorder, c.channel)))
+        const cameras = new Map()
         for (const recorder of recorders) {
             for (const camera of recorder.cameras) {
                 const key = cameraKey(recorder.id, camera.number)
-                cameras.set(key, { key: key, recorder: recorder.id, number: camera.number, pictureAspect: camera.aspect, label: camera.name })
+                if (onGrid.has(key))
+                    cameras.set(key, { key: key, recorder: recorder.id, number: camera.number, pictureAspect: camera.aspect, label: camera.name })
             }
         }
         const keys = new Set(cameras.keys())
@@ -523,11 +566,6 @@ ApplicationWindow {
             tileModel.append(camera)
         if (!keys.has(zoomed))
             zoomed = ""
-        // The recorder was removed, edited or refused the password, so these streams are out of date.
-        playbackCameras.forEach((camera, slot) => {
-            if (camera && !keys.has(cameraKey(camera.recorder, camera.number)))
-                playback.removeCamera(slot)
-        })
         updateLiveCount()
     }
 
@@ -1262,11 +1300,12 @@ ApplicationWindow {
                     width: tree.width
 
                     Repeater {
-                        model: win.recorderList
+                        model: recorderModel
 
                         Column {
                             id: recorderGroup
-                            required property var modelData
+                            required property string json
+                            readonly property var modelData: JSON.parse(json)
                             readonly property var matches: modelData.cameras.filter(c => c.name.toLowerCase().includes(sidebar.search))
                             readonly property bool folded: sidebar.search === "" && win.foldedRecorders.includes(modelData.id)
                             visible: sidebar.search === "" || matches.length > 0
@@ -1478,7 +1517,8 @@ ApplicationWindow {
 
         ListModel { id: tileModel }
 
-        // One tile per camera and not per square, so moving a camera doesn't reopen its stream.
+        // One tile per camera and not per square, so moving a camera doesn't reopen its stream. Only
+        // cameras on the grid get one, since a large recorder can list many more than it shows.
         Repeater {
             id: cameraTiles
             model: tileModel
