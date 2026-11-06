@@ -13,15 +13,9 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  GSTREAMER_VERSION: 1.28.8
-  GSTREAMER_SHA256: e4c41ee6ee9c6c32a45d198463ec08d79bac3bd5fa58adc93d13fe4a08abc9d9
-  QT_VERSION: 6.10.3
-  INNO_VERSION: 7.1.0
-  INNO_SHA256: 0362a383ed217d4c4239b5933866dd96d3eb2102737da92f80f6057a4b40df2f
   # Writes the notices of the crates in the packages, with about.toml and about.hbs.
   CARGO_ABOUT_VERSION: 0.9.3
   CARGO_ABOUT_LINUX_SHA256: 3ad1e94ea1e63d69d1961f4fb15ccbbe9575d906111f96d2cb4dce6df48f71b4
-  CARGO_ABOUT_WINDOWS_SHA256: 9e2942533ef1c592c4a70bdb384cae1550a3f5fc9ae40379b6662e3d2f16fe02
 
 jobs:
   checks:
@@ -76,107 +70,11 @@ jobs:
           fi
 
   windows:
-    name: build for Windows
     needs: checks
-    runs-on: windows-2025
-    timeout-minutes: 90
-    env:
-      VERSION: ${{ needs.checks.outputs.version }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-      - name: install GStreamer
-        shell: pwsh
-        run: |
-          $installer = "gstreamer-1.0-msvc-x86_64-$env:GSTREAMER_VERSION.exe"
-          Invoke-WebRequest -OutFile $installer `
-            "https://gstreamer.freedesktop.org/data/pkg/windows/$env:GSTREAMER_VERSION/msvc/$installer"
-          if ((Get-FileHash $installer -Algorithm SHA256).Hash -ne $env:GSTREAMER_SHA256) {
-            throw 'the GStreamer installer does not match its hash'
-          }
-          $process = Start-Process ".\$installer" -Wait -PassThru -ArgumentList `
-            '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/DIR=C:\gstreamer'
-          if ($process.ExitCode -ne 0) { throw "the GStreamer installer failed ($($process.ExitCode))" }
-          foreach ($file in 'bin\pkg-config.exe', 'lib\pkgconfig\gstreamer-d3d11-1.0.pc') {
-            if (-not (Test-Path "C:\gstreamer\$file")) { throw "GStreamer came without $file" }
-          }
-      - name: install Qt
-        shell: pwsh
-        run: |
-          # Every package with its hash, so a file changed on PyPI stops the install.
-          python -m pip install --require-hashes -r packaging\windows\aqtinstall.txt
-          if ($LASTEXITCODE -ne 0) { throw 'pip failed' }
-          python -m aqt install-qt windows desktop $env:QT_VERSION win64_msvc2022_64 --outputdir C:\Qt
-          if ($LASTEXITCODE -ne 0) { throw 'aqt failed' }
-      - name: install Inno Setup
-        shell: pwsh
-        run: |
-          $installer = "innosetup-$env:INNO_VERSION-x64.exe"
-          $tag = 'is-' + $env:INNO_VERSION.Replace('.', '_')
-          Invoke-WebRequest -OutFile $installer `
-            "https://github.com/jrsoftware/issrc/releases/download/$tag/$installer"
-          if ((Get-FileHash $installer -Algorithm SHA256).Hash -ne $env:INNO_SHA256) {
-            throw 'the Inno Setup installer does not match its hash'
-          }
-          $process = Start-Process ".\$installer" -Wait -PassThru -ArgumentList `
-            '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/DIR=C:\innosetup'
-          if ($process.ExitCode -ne 0) { throw "the Inno Setup installer failed ($($process.ExitCode))" }
-      # The licenses of most crates ask for their notice next to the program they are compiled into.
-      - name: write the notices of the crates
-        shell: pwsh
-        run: |
-          $name = "cargo-about-$env:CARGO_ABOUT_VERSION-x86_64-pc-windows-msvc"
-          Invoke-WebRequest -OutFile "$name.tar.gz" `
-            "https://github.com/EmbarkStudios/cargo-about/releases/download/$env:CARGO_ABOUT_VERSION/$name.tar.gz"
-          if ((Get-FileHash "$name.tar.gz" -Algorithm SHA256).Hash -ne $env:CARGO_ABOUT_WINDOWS_SHA256) {
-            throw 'cargo-about does not match its hash'
-          }
-          tar xzf "$name.tar.gz"
-          & ".\$name\cargo-about.exe" generate --locked --fail --target x86_64-pc-windows-msvc `
-            -o packaging\windows\licenses\Rust-crates.txt about.hbs
-          if ($LASTEXITCODE -ne 0) { throw 'cargo about failed' }
-      - name: build and bundle
-        shell: pwsh
-        env:
-          QMAKE: C:\Qt\${{ env.QT_VERSION }}\msvc2022_64\bin\qmake.exe
-          PKG_CONFIG: C:\gstreamer\bin\pkg-config.exe
-          PKG_CONFIG_PATH: C:\gstreamer\lib\pkgconfig
-          GSTREAMER_ROOT: C:\gstreamer
-        run: |
-          $qt = "C:\Qt\$env:QT_VERSION\msvc2022_64"
-          $env:PATH = "$qt\bin;C:\gstreamer\bin;$env:PATH"
-          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          $vcvars = Join-Path (& $vswhere -latest -property installationPath) 'VC\Auxiliary\Build\vcvars64.bat'
-          $bundle = "powershell -NoProfile -ExecutionPolicy Bypass -File packaging\windows\bundle.ps1 " +
-            "-Executable target\release\rigelcam.exe -Qt $qt -Gstreamer C:\gstreamer -Output rigelcam"
-          cmd /c "`"$vcvars`" && cargo build --release --locked -p rigelcam-app && $bundle"
-          if ($LASTEXITCODE -ne 0) { throw 'the build failed' }
-          Compress-Archive rigelcam "rigelcam-$env:VERSION-windows-x64.zip"
-          & C:\innosetup\ISCC.exe "/DVersion=$env:VERSION" packaging\windows\rigelcam.iss
-          if ($LASTEXITCODE -ne 0) { throw 'the installer failed' }
-      # A published version can't be replaced, so a broken way to update has to stop the next one.
-      - name: reach the published release as the app does
-        shell: pwsh
-        env:
-          QMAKE: C:\Qt\${{ env.QT_VERSION }}\msvc2022_64\bin\qmake.exe
-          PKG_CONFIG: C:\gstreamer\bin\pkg-config.exe
-          PKG_CONFIG_PATH: C:\gstreamer\lib\pkgconfig
-          GSTREAMER_ROOT: C:\gstreamer
-        run: |
-          $qt = "C:\Qt\$env:QT_VERSION\msvc2022_64"
-          $env:PATH = "$qt\bin;C:\gstreamer\bin;$env:PATH"
-          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          $vcvars = Join-Path (& $vswhere -latest -property installationPath) 'VC\Auxiliary\Build\vcvars64.bat'
-          cmd /c "`"$vcvars`" && cargo test --release --locked -p rigelcam-app the_published_release -- --ignored"
-          if ($LASTEXITCODE -ne 0) { throw 'the published release could not be reached' }
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: windows
-          path: |
-            rigelcam-*-windows-x64.zip
-            rigelcam-*-windows-x64-setup.exe
-          if-no-files-found: error
+    uses: ./.github/workflows/windows-package.yml
+    with:
+      version: ${{ needs.checks.outputs.version }}
+      release: true
 
   linux:
     name: build for Linux
