@@ -1,0 +1,7 @@
+# The Rust that builds and checks the app, here and in CI. CI treats every clippy warning as an
+# error, so a newer Rust with a new lint would break it without a change to the code. Moving to
+# another version is a change of its own, which Dependabot doesn't make.
+[toolchain]
+channel = "1.99.0"
+components = ["rustfmt", "clippy"]
+profile = "minimal"
