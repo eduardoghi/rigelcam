@@ -353,6 +353,50 @@ impl Connection {
             self.gate.refuse();
         }
     }
+
+    /// Whether an export of `channel` may download, asking `check` for its permission only when
+    /// nothing remembered already answers it.
+    fn check_recordings(
+        &self,
+        channel: u32,
+        check: impl FnOnce() -> Access,
+    ) -> Result<(), export::Error> {
+        let recent = self
+            .allowed_recordings
+            .lock()
+            .unwrap()
+            .get(&channel)
+            .is_some_and(|checked| checked.elapsed() < PERMISSION_MEMORY);
+        // RTSP answers 404 for the recordings of these, so asking can't tell anything.
+        if recent || self.without_rtsp.lock().unwrap().contains(&channel) {
+            return Ok(());
+        }
+        match check() {
+            Access::Denied => {
+                self.allowed_recordings.lock().unwrap().remove(&channel);
+                Err(export::Error::Denied)
+            }
+            // Downloading would send the same wrong password again.
+            Access::Refused => Err(RecorderError::Unauthorized.into()),
+            // Only what showed video is remembered, since a timeout or a cancel says nothing about
+            // the permission.
+            Access::Allowed => {
+                let mut allowed = self.allowed_recordings.lock().unwrap();
+                allowed.insert(channel, Instant::now());
+                Ok(())
+            }
+            Access::NotOnRtsp => {
+                self.without_rtsp.lock().unwrap().insert(channel);
+                Ok(())
+            }
+            Access::Unknown => Ok(()),
+        }
+    }
+}
+
+/// The wait before the next try at a recorder that didn't answer, after waiting `delay`.
+fn next_retry_delay(delay: Duration) -> Duration {
+    (delay * 2).min(MAX_RETRY_DELAY)
 }
 
 #[derive(Default)]
@@ -708,9 +752,7 @@ impl qobject::CameraGrid {
     fn schedule_retry(mut self: Pin<&mut Self>, id: u64, attempt: u64, fill_empty_grid: bool) {
         let mut state = self.as_mut().rust_mut();
         let delay = *state.retry_delays.get(&id).unwrap_or(&FIRST_RETRY_DELAY);
-        state
-            .retry_delays
-            .insert(id, (delay * 2).min(MAX_RETRY_DELAY));
+        state.retry_delays.insert(id, next_retry_delay(delay));
         let thread = self.qt_thread();
         std::thread::spawn(move || {
             std::thread::sleep(delay);
@@ -940,41 +982,9 @@ impl qobject::CameraGrid {
                 .and_then(|client| cancelled().map(|()| client))
                 .and_then(|client| {
                     let url = client.playback_url(job.channel, &job.date, job.start);
-                    let user = &connection.user;
-                    let allowed = connection.allowed_recordings.clone();
-                    let recent = allowed
-                        .lock()
-                        .unwrap()
-                        .get(&job.channel)
-                        .is_some_and(|checked| checked.elapsed() < PERMISSION_MEMORY);
-                    // RTSP answers 404 for the recordings of these, so asking can't tell anything.
-                    let without_rtsp = connection
-                        .without_rtsp
-                        .lock()
-                        .unwrap()
-                        .contains(&job.channel);
-                    if !recent && !without_rtsp {
-                        match recording_access(&url, user, &connection.password, &cancel) {
-                            Access::Denied => {
-                                allowed.lock().unwrap().remove(&job.channel);
-                                return Err(export::Error::Denied);
-                            }
-                            // Downloading would send the same wrong password again.
-                            Access::Refused => {
-                                return Err(RecorderError::Unauthorized.into());
-                            }
-                            // Only what showed video is remembered, since a timeout or a cancel
-                            // says nothing about the permission.
-                            Access::Allowed => {
-                                allowed.lock().unwrap().insert(job.channel, Instant::now());
-                            }
-                            Access::NotOnRtsp => {
-                                let mut without = connection.without_rtsp.lock().unwrap();
-                                without.insert(job.channel);
-                            }
-                            Access::Unknown => {}
-                        }
-                    }
+                    connection.check_recordings(job.channel, || {
+                        recording_access(&url, &connection.user, &connection.password, &cancel)
+                    })?;
                     cancelled()?;
                     export::run(Arc::new(client), &job, &cancel, &mut progress)
                 });
@@ -1464,4 +1474,137 @@ fn recorder_cameras(recorder: u64, numbers: &[u32]) -> Vec<CameraId> {
         .iter()
         .map(|&channel| CameraId { recorder, channel })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+
+    fn connection() -> Connection {
+        let address = Address::parse("127.0.0.1", None, None).unwrap();
+        Connection {
+            gate: Arc::new(LoginGate::new(client_for(&address, "u", "p"))),
+            address,
+            user: "u".to_owned(),
+            password: "p".to_owned(),
+            without_rtsp: Arc::default(),
+            allowed_recordings: Arc::default(),
+            direct_cameras: Arc::default(),
+            sessions_refused: Arc::default(),
+        }
+    }
+
+    /// Runs the check of channel 5 and tells whether it asked the recorder.
+    fn check(connection: &Connection, answer: Access) -> (Result<(), export::Error>, bool) {
+        let asked = Cell::new(false);
+        let result = connection.check_recordings(5, || {
+            asked.set(true);
+            answer
+        });
+        (result, asked.get())
+    }
+
+    #[test]
+    fn an_allowed_channel_is_not_asked_again_for_a_while() {
+        let connection = connection();
+        assert!(matches!(
+            check(&connection, Access::Allowed),
+            (Ok(()), true)
+        ));
+        assert!(matches!(
+            check(&connection, Access::Denied),
+            (Ok(()), false)
+        ));
+    }
+
+    #[test]
+    fn an_allowed_channel_is_asked_again_after_the_memory_runs_out() {
+        let connection = connection();
+        let long_ago = Instant::now() - PERMISSION_MEMORY - Duration::from_secs(1);
+        connection
+            .allowed_recordings
+            .lock()
+            .unwrap()
+            .insert(5, long_ago);
+        assert!(matches!(
+            check(&connection, Access::Allowed),
+            (Ok(()), true)
+        ));
+    }
+
+    #[test]
+    fn a_denied_channel_stops_the_export_and_is_asked_again_next_time() {
+        let connection = connection();
+        assert!(matches!(
+            check(&connection, Access::Denied),
+            (Err(export::Error::Denied), true)
+        ));
+        assert!(matches!(
+            check(&connection, Access::Allowed),
+            (Ok(()), true)
+        ));
+    }
+
+    #[test]
+    fn a_refused_password_stops_the_export_as_unauthorized() {
+        let connection = connection();
+        assert!(matches!(
+            check(&connection, Access::Refused),
+            (
+                Err(export::Error::Recorder(RecorderError::Unauthorized)),
+                true
+            )
+        ));
+    }
+
+    #[test]
+    fn a_channel_without_rtsp_recordings_is_not_asked_again() {
+        let connection = connection();
+        assert!(matches!(
+            check(&connection, Access::NotOnRtsp),
+            (Ok(()), true)
+        ));
+        assert!(matches!(
+            check(&connection, Access::Denied),
+            (Ok(()), false)
+        ));
+    }
+
+    #[test]
+    fn an_unknown_answer_lets_the_export_go_and_is_asked_again() {
+        let connection = connection();
+        assert!(matches!(
+            check(&connection, Access::Unknown),
+            (Ok(()), true)
+        ));
+        assert!(matches!(
+            check(&connection, Access::Unknown),
+            (Ok(()), true)
+        ));
+    }
+
+    #[test]
+    fn retries_wait_twice_as_long_up_to_a_minute() {
+        let mut delay = FIRST_RETRY_DELAY;
+        let mut waits = Vec::new();
+        for _ in 0..6 {
+            waits.push(delay.as_secs());
+            delay = next_retry_delay(delay);
+        }
+        assert_eq!(waits, [5, 10, 20, 40, 60, 60]);
+    }
+
+    #[test]
+    fn an_unexpected_answer_keeps_only_the_start_of_its_body() {
+        let body = "x".repeat(1000);
+        let text = recorder_message(&RecorderError::Unexpected(body));
+        assert!(text.starts_with("The recorder sent an unexpected answer (%1)."));
+        assert!(text.chars().count() < 300);
+    }
+
+    #[test]
+    fn a_cancelled_export_shows_no_message() {
+        assert!(export_message(&export::Error::Cancelled).is_empty());
+    }
 }

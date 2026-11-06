@@ -1356,6 +1356,83 @@ mod tests {
         (port, requests)
     }
 
+    /// A worker watching a local pipeline, with the controls it reads.
+    fn watching() -> (
+        Arc<Shared>,
+        gst::Pipeline,
+        std::sync::mpsc::Receiver<Outcome>,
+    ) {
+        gst::init().unwrap();
+        let source = Source {
+            url: "rtsp://127.0.0.1/cam".to_owned(),
+            user: "u".to_owned(),
+            password: "p".to_owned(),
+            recording: false,
+            rate: 1,
+            attempt: 0,
+            gate: Arc::new(LoginGate::new(Client::new("127.0.0.1", "u", "p"))),
+            stretch: None,
+            direct: None,
+        };
+        let shared = Arc::new(Shared {
+            control: Mutex::new(Control {
+                source: Some(source.clone()),
+                paused: false,
+                revision: 1,
+                stop: false,
+            }),
+            changed: Condvar::new(),
+            item: Mutex::new(0),
+            bus: Mutex::default(),
+        });
+        let pipeline = gst::parse::launch("videotestsrc is-live=true ! fakesink")
+            .unwrap()
+            .downcast::<gst::Pipeline>()
+            .unwrap();
+        let (sender, outcome) = std::sync::mpsc::channel();
+        let (worker, watched) = (shared.clone(), pipeline.clone());
+        std::thread::spawn(move || {
+            let _ = sender.send(watch(&worker, &source, &watched, 1, &Progress::new(), true));
+        });
+        (shared, pipeline, outcome)
+    }
+
+    fn reaches(pipeline: &gst::Pipeline, state: gst::State) -> bool {
+        (0..50).any(|_| {
+            std::thread::sleep(Duration::from_millis(20));
+            pipeline.current_state() == state
+        })
+    }
+
+    #[test]
+    fn the_worker_wakes_only_when_told() {
+        let (shared, pipeline, outcome) = watching();
+        assert!(reaches(&pipeline, gst::State::Playing));
+        shared.control.lock().unwrap().revision += 1;
+        // A worker that looked at the controls on a timer would have seen this by now.
+        assert!(outcome.recv_timeout(Duration::from_millis(600)).is_err());
+        shared.wake();
+        let ended = outcome.recv_timeout(Duration::from_secs(1));
+        assert!(matches!(ended, Ok(Outcome::Changed)));
+        assert!(shared.bus.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn a_pause_and_a_resume_reach_the_pipeline() {
+        let (shared, pipeline, outcome) = watching();
+        assert!(reaches(&pipeline, gst::State::Playing));
+        shared.control.lock().unwrap().paused = true;
+        shared.wake();
+        assert!(reaches(&pipeline, gst::State::Paused));
+        shared.control.lock().unwrap().paused = false;
+        shared.wake();
+        assert!(reaches(&pipeline, gst::State::Playing));
+        shared.control.lock().unwrap().stop = true;
+        shared.wake();
+        let ended = outcome.recv_timeout(Duration::from_secs(1));
+        assert!(matches!(ended, Ok(Outcome::Changed)));
+    }
+
     #[test]
     fn tells_the_status_of_a_refused_stream() {
         gst::init().unwrap();

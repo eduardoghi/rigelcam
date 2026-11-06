@@ -361,6 +361,119 @@ mod tests {
         assert!(matches!(result, Err(Error::Write(_))), "{result:?}");
     }
 
+    /// A recorder that answers each request with what `answer` gives for its window, as
+    /// "HH:MM:SS-HH:MM:SS", and returns the windows asked for, in order.
+    fn recorder(
+        answer: impl Fn(&str) -> Vec<u8> + Send + 'static,
+    ) -> (Arc<Client>, Arc<std::sync::Mutex<Vec<String>>>) {
+        use std::io::Write;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let windows = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let asked = windows.clone();
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let mut request = Vec::new();
+                let mut byte = [0; 1];
+                while !request.ends_with(b"\r\n\r\n") && stream.read(&mut byte).unwrap_or(0) == 1 {
+                    request.push(byte[0]);
+                }
+                let request = String::from_utf8_lossy(&request);
+                let time = |name: &str| {
+                    let rest = &request[request.find(name).unwrap() + name.len()..];
+                    rest[rest.find("%20").unwrap() + 3..][..8].to_owned()
+                };
+                let window = format!("{}-{}", time("startTime="), time("endTime="));
+                asked.lock().unwrap().push(window.clone());
+                let _ = stream.write_all(&answer(&window));
+            }
+        });
+        let client = Client::new("127.0.0.1", "admin", "secret").with_ports(port, 554);
+        (Arc::new(client), windows)
+    }
+
+    fn ok(body: &str) -> Vec<u8> {
+        format!(
+            "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+        .into_bytes()
+    }
+
+    fn status(code: u16) -> Vec<u8> {
+        format!("HTTP/1.1 {code} Error\r\nConnection: close\r\nContent-Length: 0\r\n\r\n")
+            .into_bytes()
+    }
+
+    /// Everything the download sent, and the error it ended with.
+    fn collect(pieces: Receiver<Result<Vec<u8>, Error>>) -> (String, Option<Error>) {
+        let mut video = Vec::new();
+        for piece in pieces {
+            match piece {
+                Ok(bytes) => video.extend(bytes),
+                Err(error) => return (String::from_utf8(video).unwrap(), Some(error)),
+            }
+        }
+        (String::from_utf8(video).unwrap(), None)
+    }
+
+    #[test]
+    fn a_long_stretch_goes_in_windows_that_overlap() {
+        let (client, windows) = recorder(|window| ok(&window[..8]));
+        let (video, error) = collect(download(client, 1, "2026-11-06".into(), 0, 7200, false));
+        assert!(error.is_none(), "{error:?}");
+        assert_eq!(
+            *windows.lock().unwrap(),
+            [
+                "00:00:00-01:00:00",
+                "00:59:45-01:59:45",
+                "01:59:30-02:00:00"
+            ]
+        );
+        assert_eq!(video, "00:00:0000:59:4501:59:30");
+    }
+
+    #[test]
+    fn a_window_without_recordings_is_skipped_only_through_gaps() {
+        let answer = |window: &str| {
+            if window.starts_with("00:00:00") {
+                status(400)
+            } else {
+                ok("v")
+            }
+        };
+        let (client, windows) = recorder(answer);
+        let (video, error) = collect(download(client, 1, "2026-11-06".into(), 0, 7200, true));
+        assert!(error.is_none(), "{error:?}");
+        assert_eq!((video.as_str(), windows.lock().unwrap().len()), ("vv", 3));
+
+        let (client, windows) = recorder(answer);
+        let (video, error) = collect(download(client, 1, "2026-11-06".into(), 0, 7200, false));
+        assert!(error.is_none(), "{error:?}");
+        assert_eq!((video.as_str(), windows.lock().unwrap().len()), ("", 1));
+    }
+
+    #[test]
+    fn another_error_of_the_recorder_ends_the_download_with_it() {
+        let (client, windows) = recorder(|_| status(500));
+        let (_, error) = collect(download(client, 1, "2026-11-06".into(), 0, 7200, true));
+        assert!(
+            matches!(error, Some(Error::Recorder(RecorderError::Status(500)))),
+            "{error:?}"
+        );
+        assert_eq!(windows.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_body_cut_short_ends_the_download_as_stopped() {
+        let (client, _) = recorder(|_| {
+            b"HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 100\r\n\r\nvideo".to_vec()
+        });
+        let (video, error) = collect(download(client, 1, "2026-11-06".into(), 0, 60, false));
+        assert!(matches!(error, Some(Error::Stopped)), "{error:?}");
+        assert_eq!(video, "video");
+    }
+
     #[test]
     fn a_cancellation_gets_out_of_a_full_queue() {
         // Each buffer takes 1 second, so the queue fills and stays full.
