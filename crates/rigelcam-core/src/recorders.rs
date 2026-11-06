@@ -280,11 +280,11 @@ struct Saved {
     check_updates: Option<bool>,
 }
 
-/// The saved recorders without their passwords, which can wait for the keyring to be unlocked and
-/// so go through `put_password`, `restore_password` and `take_password` on another thread.
 /// 2026-01-01 in seconds since 1970, where ids of a list started over count from.
 const ID_EPOCH: u64 = 1_767_225_600;
 
+/// The saved recorders without their passwords, which can wait for the keyring to be unlocked and
+/// so go through `put_password`, `restore_password` and `take_password` on another thread.
 pub struct RecorderList {
     path: PathBuf,
     saved: Saved,
