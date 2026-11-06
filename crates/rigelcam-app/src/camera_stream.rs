@@ -188,6 +188,19 @@ struct Shared {
     /// Address of the video item, or 0 once it is gone. Calls into the item hold this lock, so the
     /// item can't be destroyed in the middle of one.
     item: Mutex<usize>,
+    /// The bus of the pipeline playing now, where `wake` reaches the worker waiting on it.
+    bus: Mutex<Option<gst::Bus>>,
+}
+
+impl Shared {
+    /// Wakes the worker while it watches a pipeline, after a change it has to look at.
+    fn wake(&self) {
+        if let Some(bus) = &*self.bus.lock().unwrap() {
+            let _ = bus.post(gst::message::Application::new(gst::Structure::new_empty(
+                "wake",
+            )));
+        }
+    }
 }
 
 impl Shared {
@@ -275,6 +288,7 @@ impl CameraStream {
             control: Mutex::default(),
             changed: Condvar::new(),
             item: Mutex::new(item as usize),
+            bus: Mutex::default(),
         });
         let worker_shared = shared.clone();
         std::thread::Builder::new()
@@ -294,13 +308,16 @@ impl CameraStream {
         }
         control.source = source;
         control.revision += 1;
+        drop(control);
         self.shared.changed.notify_all();
+        self.shared.wake();
     }
 }
 
 impl CameraStream {
     pub fn set_paused(&self, paused: bool) {
         self.shared.control.lock().unwrap().paused = paused;
+        self.shared.wake();
     }
 }
 
@@ -311,6 +328,7 @@ impl Drop for CameraStream {
         *self.shared.item.lock().unwrap() = 0;
         self.shared.control.lock().unwrap().stop = true;
         self.shared.changed.notify_all();
+        self.shared.wake();
     }
 }
 
@@ -582,6 +600,8 @@ fn watch(
         ..
     } = progress;
     let bus = pipeline.bus().unwrap();
+    // Before the first look at the controls, so a change made after it also posts to this bus.
+    *shared.bus.lock().unwrap() = Some(bus.clone());
     let mut paused = false;
     let outcome = if pipeline.set_state(gst::State::Playing).is_err() {
         lost("could not start the pipeline")
@@ -603,8 +623,7 @@ fn watch(
                     gst::State::Playing
                 };
                 let _ = pipeline.set_state(state);
-            }
-            if paused {
+                // A pause isn't a stall, so the limit counts again from when it ends.
                 progress.saw_frame();
             }
             // Only once frames flow, because rtspsrc can't seek before it is playing.
@@ -625,7 +644,22 @@ fn watch(
                 // The seek flushed the decoder, and buffers may have passed before it did.
                 waiting_keyframe.store(true, Ordering::Relaxed);
             }
-            if let Some(message) = bus.timed_pop(gst::ClockTime::from_mseconds(200)) {
+            // Only messages wake this, including the ones `wake` posts after a change of the
+            // controls or the first frame, so it waits up to the limit without frames, or with no
+            // limit while paused.
+            let on_video = received_video.load(Ordering::Relaxed);
+            let limit = if on_video {
+                STALL_TIMEOUT
+            } else {
+                FIRST_FRAME_TIMEOUT
+            };
+            let timeout = if paused {
+                gst::ClockTime::NONE
+            } else {
+                let left = limit.saturating_sub(progress.since_last_frame());
+                Some(gst::ClockTime::from_mseconds(left.as_millis() as u64 + 1))
+            };
+            if let Some(message) = bus.timed_pop(timeout) {
                 match message.view() {
                     gst::MessageView::Error(error) => {
                         if error.error().matches(gst::ResourceError::NotAuthorized) {
@@ -654,13 +688,7 @@ fn watch(
                     _ => {}
                 }
             }
-            let on_video = received_video.load(Ordering::Relaxed);
-            let limit = if on_video {
-                STALL_TIMEOUT
-            } else {
-                FIRST_FRAME_TIMEOUT
-            };
-            if progress.since_last_frame() > limit {
+            if !paused && progress.since_last_frame() > limit {
                 break Outcome::Lost {
                     received_video: on_video,
                     reason: format!("no frames for {} s", limit.as_secs()),
@@ -668,6 +696,7 @@ fn watch(
             }
         }
     };
+    *shared.bus.lock().unwrap() = None;
     let _ = pipeline.set_state(gst::State::Null);
     // Only the recorder sets this, since the stream that opens a camera has no `direct`.
     if let Some(direct) = source
@@ -893,6 +922,8 @@ fn attach_sink(
                     progress.saw_frame();
                     if !progress.received_video.swap(true, Ordering::Relaxed) {
                         shared.set_status(true, false);
+                        // The worker applies the speed and the shorter stall limit from now on.
+                        shared.wake();
                     }
                 }
                 Ok(gst::FlowSuccess::Ok)
