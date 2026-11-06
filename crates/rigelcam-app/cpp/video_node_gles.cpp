@@ -22,10 +22,13 @@
 
 namespace {
 
+// A square from 0 to 1 that never changes, so no draw uploads vertices. The matrix places it, and
+// `view` picks the part of the frame shown, as left, top, width and height.
 const char *kVertex =
     "#version 100\n"
-    "attribute vec2 pos; attribute vec2 uv; uniform mat4 mvp; varying vec2 v;\n"
-    "void main() { v = uv; gl_Position = mvp * vec4(pos, 0.0, 1.0); }\n";
+    "attribute vec2 corner; uniform mat4 mvp; uniform vec4 view; varying vec2 v;\n"
+    "void main() { v = view.xy + corner * view.zw; gl_Position = mvp * vec4(corner, 0.0, 1.0); }\n";
+const float kSquare[] = {0, 0, 1, 0, 0, 1, 1, 1};
 const char *kFragment =
     "#version 100\n"
     "#extension GL_OES_EGL_image_external : require\n"
@@ -37,7 +40,7 @@ const char *kFragment =
 
 struct Program {
     GLuint id = 0;
-    GLint mvp = -1, tex = -1, gamma = -1, pos = -1, uv = -1;
+    GLint mvp = -1, view = -1, tex = -1, gamma = -1, corner = -1;
     GLuint vbo = 0;
     QOpenGLContext *context = nullptr;
 };
@@ -76,9 +79,11 @@ Program &program(QOpenGLFunctions *f) {
         p.mvp = f->glGetUniformLocation(p.id, "mvp");
         p.tex = f->glGetUniformLocation(p.id, "tex");
         p.gamma = f->glGetUniformLocation(p.id, "gamma");
-        p.pos = f->glGetAttribLocation(p.id, "pos");
-        p.uv = f->glGetAttribLocation(p.id, "uv");
+        p.view = f->glGetUniformLocation(p.id, "view");
+        p.corner = f->glGetAttribLocation(p.id, "corner");
         f->glGenBuffers(1, &p.vbo);
+        f->glBindBuffer(GL_ARRAY_BUFFER, p.vbo);
+        f->glBufferData(GL_ARRAY_BUFFER, sizeof kSquare, kSquare, GL_STATIC_DRAW);
     }
     return p;
 }
@@ -190,12 +195,9 @@ public:
         }
         m_picture.shown(*m_link);
 
-        const float w = float(m_rect.width()), h = float(m_rect.height());
-        const float u0 = float(m_view.left()), u1 = float(m_view.right());
-        const float v0 = float(m_view.top()), v1 = float(m_view.bottom());
-        const float quad[] = {0, 0, u0, v0, w, 0, u1, v0, 0, h, u0, v1, w, h, u1, v1};
         QMatrix4x4 mvp = *state->projectionMatrix() * *matrix();
         mvp.translate(float(m_rect.x()), float(m_rect.y()));
+        mvp.scale(float(m_rect.width()), float(m_rect.height()));
 
         f->glDisable(GL_BLEND);
         f->glDisable(GL_DEPTH_TEST);
@@ -209,27 +211,24 @@ public:
         } else {
             f->glDisable(GL_SCISSOR_TEST);
         }
-        draw(f, texture, mvp, quad);
+        draw(f, texture, mvp);
     }
 
 private:
-    void draw(QOpenGLFunctions *f, GLuint texture, const QMatrix4x4 &mvp, const float (&quad)[16]) {
+    void draw(QOpenGLFunctions *f, GLuint texture, const QMatrix4x4 &mvp) {
         Program &p = program(f);
         f->glUseProgram(p.id);
         f->glUniformMatrix4fv(p.mvp, 1, GL_FALSE, mvp.constData());
+        f->glUniform4f(p.view, float(m_view.x()), float(m_view.y()), float(m_view.width()), float(m_view.height()));
         f->glUniform1i(p.tex, 0);
         f->glUniform1f(p.gamma, m_gamma);
         f->glActiveTexture(GL_TEXTURE0);
         f->glBindTexture(GL_TEXTURE_EXTERNAL_OES, texture);
         f->glBindBuffer(GL_ARRAY_BUFFER, p.vbo);
-        f->glBufferData(GL_ARRAY_BUFFER, sizeof quad, quad, GL_STREAM_DRAW);
-        f->glEnableVertexAttribArray(p.pos);
-        f->glEnableVertexAttribArray(p.uv);
-        f->glVertexAttribPointer(p.pos, 2, GL_FLOAT, GL_FALSE, 16, nullptr);
-        f->glVertexAttribPointer(p.uv, 2, GL_FLOAT, GL_FALSE, 16, reinterpret_cast<void *>(8));
+        f->glEnableVertexAttribArray(p.corner);
+        f->glVertexAttribPointer(p.corner, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
         f->glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-        f->glDisableVertexAttribArray(p.pos);
-        f->glDisableVertexAttribArray(p.uv);
+        f->glDisableVertexAttribArray(p.corner);
         f->glBindTexture(GL_TEXTURE_EXTERNAL_OES, 0);
     }
 
@@ -254,14 +253,14 @@ private:
         f->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, color, 0);
         const bool ready = !image.isNull() && f->glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
         if (ready) {
-            const float u0 = float(m_view.left()), u1 = float(m_view.right());
-            const float v0 = float(m_view.top()), v1 = float(m_view.bottom());
-            // The first row glReadPixels returns is the bottom of the target, so the top of the
-            // video goes there and the image comes out upright.
-            const float quad[] = {-1, -1, u0, v0, 1, -1, u1, v0, -1, 1, u0, v1, 1, 1, u1, v1};
+            // The square fills the target. The first row glReadPixels returns is the bottom of the
+            // target, so the top of the video goes there and the image comes out upright.
+            QMatrix4x4 fill;
+            fill.translate(-1, -1);
+            fill.scale(2, 2);
             f->glViewport(0, 0, width, height);
             f->glDisable(GL_SCISSOR_TEST);
-            draw(f, texture, QMatrix4x4(), quad);
+            draw(f, texture, fill);
             f->glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, image.bits());
         }
         f->glBindFramebuffer(GL_FRAMEBUFFER, GLuint(target));
