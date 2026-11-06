@@ -1,0 +1,5 @@
+# Images of GitHub newer than the list built into actionlint, which would take them for unknown
+# labels. Remove one once actionlint knows it.
+self-hosted-runner:
+  labels:
+    - ubuntu-26.04
