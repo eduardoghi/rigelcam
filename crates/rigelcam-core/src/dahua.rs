@@ -3,7 +3,7 @@
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::io::Read;
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr, ToSocketAddrs};
 use std::time::{Duration, Instant};
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -244,7 +244,7 @@ impl Client {
         {
             let disabled = parse_disabled_cameras(&devices);
             channels.retain(|channel| !disabled.contains(&channel.number));
-            let cameras = parse_cameras(&devices);
+            let cameras = parse_cameras(&devices, &self.addresses());
             for channel in &mut channels {
                 channel.camera = cameras.get(&channel.number).cloned();
             }
@@ -256,6 +256,21 @@ impl Client {
             }
         }
         Ok(channels)
+    }
+
+    /// The IPv4 addresses the host of the recorder stands for, as the system resolves it.
+    fn addresses(&self) -> Vec<Ipv4Addr> {
+        (self.host.as_str(), self.http_port)
+            .to_socket_addrs()
+            .map(|addresses| {
+                addresses
+                    .filter_map(|address| match address.ip() {
+                        IpAddr::V4(ip) => Some(ip),
+                        IpAddr::V6(_) => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// Current time of the recorder as `YYYY-MM-DD HH:MM:SS`, which can differ from this computer
@@ -884,8 +899,15 @@ fn parse_main_sizes(body: &str) -> HashMap<u32, (u32, u32)> {
 }
 
 /// The address of each channel that has one, from the fields of its entry. It ends up in a URL that
-/// gets the password of the recorder, so only a private IP address counts.
-fn parse_cameras(body: &str) -> HashMap<u32, Camera> {
+/// gets the password of the recorder, so only a private address in the /24 of the recorder counts,
+/// and a recorder that names another host can't send the password away from its network.
+fn parse_cameras(body: &str, recorder: &[Ipv4Addr]) -> HashMap<u32, Camera> {
+    let near = |ip: Ipv4Addr| {
+        ip.is_private()
+            && recorder
+                .iter()
+                .any(|recorder| recorder.octets()[..3] == ip.octets()[..3])
+    };
     let mut hosts = HashMap::new();
     let mut ports = HashMap::new();
     for line in body.lines() {
@@ -902,7 +924,7 @@ fn parse_cameras(body: &str) -> HashMap<u32, Camera> {
             continue;
         };
         if let Some(host) = field.strip_prefix("Address=") {
-            if host.parse::<Ipv4Addr>().is_ok_and(|ip| ip.is_private()) {
+            if host.parse::<Ipv4Addr>().is_ok_and(near) {
                 hosts.insert(channel, host.to_owned());
             }
         } else if let Some(port) = field.strip_prefix("RtspPort=") {
@@ -1205,14 +1227,18 @@ mod tests {
                     table.RemoteDevice.uuid:System_CONFIG_NETCAMERA_INFO_2.Address=0.0.0.0\r\n\
                     table.RemoteDevice.uuid:System_CONFIG_NETCAMERA_INFO_3.Address=\r\n\
                     table.RemoteDevice.uuid:System_CONFIG_NETCAMERA_INFO_4.Address=8.8.8.8\r\n\
-                    table.RemoteDevice.uuid:System_CONFIG_NETCAMERA_INFO_5.Address=a@b/c\r\n";
-        let cameras = parse_cameras(body);
+                    table.RemoteDevice.uuid:System_CONFIG_NETCAMERA_INFO_5.Address=a@b/c\r\n\
+                    table.RemoteDevice.uuid:System_CONFIG_NETCAMERA_INFO_6.Address=192.168.0.11\r\n\
+                    table.RemoteDevice.uuid:System_CONFIG_NETCAMERA_INFO_7.Address=192.168.3.10\r\n";
+        let cameras = parse_cameras(body, &[Ipv4Addr::new(192, 168, 0, 4)]);
         assert_eq!(cameras.len(), 2);
         assert_eq!(
             cameras[&1].live_url(Stream::Sub),
             "rtsp://192.168.0.10:8554/cam/realmonitor?channel=1&subtype=1"
         );
-        assert_eq!(cameras[&2].rtsp_port, 554);
+        assert_eq!(cameras[&7].rtsp_port, 554);
+        // Without an address of the recorder, no camera can be checked against it.
+        assert!(parse_cameras(body, &[]).is_empty());
     }
 
     #[test]

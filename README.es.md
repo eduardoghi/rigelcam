@@ -53,7 +53,8 @@ sin decodificador por software como alternativa. El núcleo está escrito en Rus
 
 Algunos grabadores responden 404 por RTSP para cámaras con firmware reciente, que siguen grabando
 con normalidad. En esos canales, la grabación se reproduce por HTTP y el video en vivo se abre
-directamente en la cámara, en la dirección que indica el grabador y con su mismo acceso.
+directamente en la cámara, en la dirección que indica el grabador y con su mismo acceso. Solo se
+usa una dirección en la misma red /24 del grabador, para que la contraseña no salga de ella.
 
 Probado con los Intelbras NVD 1308 y NVD 7132. Otros grabadores basados en Dahua
 deberían funcionar igual, y los informes son bienvenidos.

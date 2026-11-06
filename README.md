@@ -49,7 +49,8 @@ Windows, with no software decoder to fall back on. The core is written in Rust a
 
 Some recorders answer 404 over RTSP for cameras with recent firmware, which still record normally.
 Those channels play their recordings over HTTP and open live video directly from the camera, at the
-address the recorder lists and with the login of the recorder.
+address the recorder lists and with the login of the recorder. Only an address in the same /24
+network as the recorder is used, so the password doesn't leave it.
 
 Tested with the Intelbras NVD 1308 and NVD 7132. Other Dahua based recorders should work
 the same way, reports are welcome.

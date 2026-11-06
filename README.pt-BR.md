@@ -49,7 +49,8 @@ Windows, sem decodificador por software como alternativa. O núcleo é escrito e
 
 Alguns gravadores respondem 404 por RTSP para câmeras com firmware recente, que continuam gravando
 normalmente. Nesses canais, a gravação toca por HTTP e o vídeo ao vivo abre direto na câmera, no
-endereço informado pelo gravador e com o login dele.
+endereço informado pelo gravador e com o login dele. Só vale um endereço na mesma rede /24 do
+gravador, para a senha não sair dela.
 
 Testado com os NVRs Intelbras NVD 1308 e NVD 7132. Outros gravadores com base Dahua devem
 funcionar do mesmo jeito, e relatos são bem-vindos.
