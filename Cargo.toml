@@ -1,3 +1,11 @@
 [workspace]
 resolver = "2"
 members = ["crates/rigelcam-core", "crates/rigelcam-app"]
+
+# The app is shipped from this profile. LTO and one codegen unit let the compiler work across
+# crates, and stripping leaves out the symbol table. A panic still prints its message and the line
+# it came from, but a backtrace loses the names of the functions.
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
