@@ -39,9 +39,9 @@ jobs:
           version=$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/rigelcam-app/Cargo.toml | head -1)
           test -n "$version"
           echo "version=$version" >> "$GITHUB_OUTPUT"
-      # Published versions can't change, so one that exists has to be bumped first. The Windows
-      # check only runs on commits that change what it builds, so it has to have passed since the
-      # last of those.
+      # Published versions can't change, so one that exists has to be bumped first. The Windows check
+      # and the Flatpak build only run on commits that change what they build, so each has to have
+      # passed since the last of those.
       - name: require a new version on main with CI passing
         env:
           GH_TOKEN: ${{ github.token }}
@@ -51,16 +51,25 @@ jobs:
           passed=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml --commit "$GITHUB_SHA" \
             --status success --json databaseId --jq length)
           test "$passed" -ge 1
-          # A push of several commits runs it only on the newest, which also holds that change.
-          built=$(git log -1 --first-parent --format=%H -- crates Cargo.toml Cargo.lock .github/workflows/windows.yml)
-          checked=false
-          # Only runs on main itself, since a run of a pull request checked another tree.
-          for commit in $(git rev-list --first-parent "$built^..$GITHUB_SHA"); do
-            passed=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow windows.yml --commit "$commit" \
-              --event push --branch main --status success --json databaseId --jq length)
-            if [ "$passed" -ge 1 ]; then checked=true; break; fi
-          done
-          test "$checked" = true
+          # Takes the workflow and the paths that start it, which have to match its `on.push.paths`.
+          # A push of several commits runs it only on the newest, which also holds that change, and
+          # only runs on main itself count, since a run of a pull request checked another tree.
+          passed_since_change() {
+            local workflow=$1 commit runs built
+            shift
+            built=$(git log -1 --first-parent --format=%H -- "$@")
+            for commit in $(git rev-list --first-parent "$built^..$GITHUB_SHA"); do
+              runs=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow "$workflow" --commit "$commit" \
+                --event push --branch main --status success --json databaseId --jq length)
+              if [ "$runs" -ge 1 ]; then return 0; fi
+            done
+            echo "$workflow hasn't passed on main since $built" >&2
+            return 1
+          }
+          passed_since_change windows.yml crates Cargo.toml Cargo.lock \
+            packaging/windows/aqtinstall.txt assets/branding .github/workflows/windows.yml
+          passed_since_change flatpak.yml crates assets/branding packaging/linux LICENSE Cargo.toml \
+            Cargo.lock about.toml about.hbs .github/workflows/flatpak.yml
           # Only a release that doesn't exist counts as a draft, so a failing call stops here.
           if answer=$(gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" --json isDraft \
             --jq .isDraft 2>&1); then
