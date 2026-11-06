@@ -25,6 +25,27 @@ jobs:
             ghcr.io/gitleaks/gitleaks@sha256:691af3c7c5a48b16f187ce3446d5f194838f91238f27270ed36eef6359a574d9 \
             git --no-banner --redact .
 
+  # The workflows, with the shell of each step through shellcheck, which nothing else runs before
+  # they do. The labels it doesn't know yet are in .github/actionlint.yaml.
+  workflows:
+    name: workflows
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      ACTIONLINT_VERSION: 1.7.12
+      ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: actionlint
+        run: |
+          archive="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          curl -fsSLO "https://github.com/rhysd/actionlint/releases/download/v$ACTIONLINT_VERSION/$archive"
+          echo "$ACTIONLINT_SHA256  $archive" | sha256sum --check
+          tar xzf "$archive" actionlint
+          SHELLCHECK_OPTS="-S warning" ./actionlint -no-color
+
   core:
     name: format, lint and test
     runs-on: ubuntu-latest
