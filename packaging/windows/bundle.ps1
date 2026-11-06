@@ -57,3 +57,5 @@ while ($pending.Count -gt 0) {
 
 Copy-Item (Join-Path $PSScriptRoot '..\..\LICENSE') $Output
 Copy-Item (Join-Path $PSScriptRoot 'THIRD-PARTY.txt') $Output
+# The LGPL asks for its text next to the DLLs it covers, and version 3 also for the GPL it extends.
+Copy-Item -Recurse (Join-Path $PSScriptRoot 'licenses') $Output
