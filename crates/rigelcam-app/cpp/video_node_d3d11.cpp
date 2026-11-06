@@ -196,6 +196,9 @@ struct D3d11Resources : VideoResources {
     ComPtr<ID3D11Texture2D> texture;
     ComPtr<ID3D11ShaderResourceView> y, uv;
     ComPtr<ID3D11Buffer> constants;
+    // What `constants` holds, since a grid that doesn't move draws with the same values every time.
+    Constants sent{};
+    bool sentValid = false;
     UINT textureWidth = 0, textureHeight = 0;
     DXGI_FORMAT textureFormat = DXGI_FORMAT_UNKNOWN;
     int width = 0, height = 0, fullRange = 0, matrix = 0;
@@ -529,6 +532,7 @@ private:
             desc.Usage = D3D11_USAGE_DEFAULT;
             desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
             g_device->CreateBuffer(&desc, nullptr, &m_res->constants);
+            m_res->sentValid = false;
         }
         Constants c{};
         memcpy(c.mvp, mvp.constData(), sizeof c.mvp);
@@ -544,7 +548,11 @@ private:
         // Weights of red, green and blue, which define BT.601, BT.709 and BT.2020.
         const float weights[3][3] = {{0.299f, 0.587f, 0.114f}, {0.2126f, 0.7152f, 0.0722f}, {0.2627f, 0.678f, 0.0593f}};
         memcpy(c.luma, weights[qBound(0, m_res->matrix, 2)], sizeof c.luma);
-        g_context->UpdateSubresource(m_res->constants.Get(), 0, nullptr, &c, 0, 0);
+        if (!m_res->sentValid || memcmp(&c, &m_res->sent, sizeof c) != 0) {
+            g_context->UpdateSubresource(m_res->constants.Get(), 0, nullptr, &c, 0, 0);
+            m_res->sent = c;
+            m_res->sentValid = true;
+        }
 
         g_context->OMSetBlendState(p.opaque.Get(), nullptr, 0xffffffff);
         g_context->OMSetDepthStencilState(p.noDepth.Get(), 0);
