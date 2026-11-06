@@ -18,6 +18,8 @@ User-visible changes, newest first.
 
 ### Fixed
 
+- Exports and photos of a camera with a long name in a script such as Chinese no longer fail to
+  save because the file name is too long.
 - A recorder that doesn't offer the login session searches try first is no longer asked for it
   again on every search.
 - A camera moved, or a theme or language changed, just before saving a recorder that fails to save

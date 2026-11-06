@@ -2,7 +2,9 @@
 
 use std::path::{Path, PathBuf};
 
-const MAX_NAME_CHARS: usize = 150;
+/// Room for the camera in a file name. File systems count names in bytes, 255 on ext4, and the
+/// day, the times and the `.part` of an export still have to fit.
+const MAX_NAME_BYTES: usize = 150;
 
 pub fn folder() -> PathBuf {
     dirs::video_dir()
@@ -27,17 +29,22 @@ pub fn file_stem(camera: &str, date: &str, start: u32, end: u32) -> String {
             c => c,
         })
         .collect();
-    let safe: String = safe
-        .trim_start_matches('.')
-        .chars()
-        .take(MAX_NAME_CHARS)
-        .collect();
+    let safe = cut_to_bytes(safe.trim_start_matches('.'), MAX_NAME_BYTES);
     // The day is checked when it comes from the recorder, and only digits and dashes go anyway.
     let date: String = date
         .chars()
         .filter(|c| c.is_ascii_digit() || *c == '-')
         .collect();
     format!("{safe} {date} {} {}", clock(start), clock(end))
+}
+
+/// The longest start of `text` that fits in `max` bytes without splitting a character.
+fn cut_to_bytes(text: &str, max: usize) -> &str {
+    let mut end = text.len().min(max);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
 }
 
 /// Removes videos left unfinished by a process that was killed, which only its `Drop` would clean
@@ -116,5 +123,16 @@ mod tests {
         std::fs::write(folder.join("a (2).mp4"), b"").unwrap();
         assert_eq!(free_path(&folder, "a"), folder.join("a (3).mp4"));
         std::fs::remove_dir_all(&folder).unwrap();
+    }
+
+    #[test]
+    fn a_long_name_fits_the_file_system_in_bytes() {
+        // 200 characters of 3 bytes each, 600 bytes in all.
+        let stem = file_stem(&"監".repeat(200), "2026-10-31", 0, 1);
+        let name = stem.split(' ').next().unwrap();
+        assert_eq!(name.len(), 150);
+        assert!(format!(".{stem}.4194304.part").len() <= 255);
+        // A cut in the middle of a character steps back to the one before.
+        assert_eq!(cut_to_bytes("aé", 2), "a");
     }
 }

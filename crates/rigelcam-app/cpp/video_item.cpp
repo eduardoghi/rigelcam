@@ -31,7 +31,9 @@ QString writePhoto(const QImage &image, QString name) {
     static const QRegularExpression notAllowed(QStringLiteral("[<>:\"/\\\\|?*\\x00-\\x1f\\x7f]"));
     name.replace(notAllowed, QStringLiteral("_"));
     while (name.startsWith(u'.')) name.remove(0, 1);
-    name.truncate(150);
+    // File systems count names in bytes, so a name in a script of 3 bytes a character is cut
+    // earlier, never in the middle of one.
+    while (name.toUtf8().size() > 150) name.chop(name.size() > 1 && name.back().isLowSurrogate() ? 2 : 1);
     for (int copy = 1; copy < 100; copy++) {
         const QString suffix = copy == 1 ? QString() : QStringLiteral(" (%1)").arg(copy);
         QFile file(folder + u'/' + name + suffix + QStringLiteral(".jpg"));
