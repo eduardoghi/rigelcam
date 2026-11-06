@@ -95,8 +95,17 @@ extern "C" {
     fn rigel_item_failed(item: *mut c_void, attempt: i32);
 }
 
+/// Gives back the reference that `hand_over` passed to the item.
 extern "C" fn release_sample(owner: *mut c_void) {
-    drop(unsafe { Box::from_raw(owner as *mut gst::Sample) });
+    unsafe { gst::ffi::gst_mini_object_unref(owner as *mut gst::ffi::GstMiniObject) };
+}
+
+/// Passes the item the reference of the sample itself, which `release_sample` gives back, since the
+/// sample already counts its references and a box around it would be one allocation per frame.
+fn hand_over(sample: gst::Sample) -> *mut c_void {
+    use gst::glib::translate::IntoGlibPtr;
+    let raw: *mut gst::ffi::GstSample = sample.into_glib_ptr();
+    raw as *mut c_void
 }
 
 /// A recording as a stretch of the HTTP API, for channels that answer 404 to it over RTSP while
@@ -1210,9 +1219,7 @@ fn push_sample(
     generation: u64,
     format: &mut FrameFormat,
 ) -> Option<()> {
-    use gst::glib::translate::ToGlibPtr;
     let format = format.of(&sample)?;
-    let raw: *const gst::ffi::GstSample = sample.to_glib_none().0;
     let mut frame = RigelFrame {
         width: format.width,
         height: format.height,
@@ -1225,7 +1232,7 @@ fn push_sample(
         fds: [-1; 4],
         offsets: [0; 4],
         strides: [0; 4],
-        sample: raw as *mut c_void,
+        sample: std::ptr::null_mut(),
         owner: std::ptr::null_mut(),
         release: release_sample,
     };
@@ -1233,7 +1240,8 @@ fn push_sample(
     if *item == 0 {
         return None;
     }
-    frame.owner = Box::into_raw(Box::new(sample)) as *mut c_void;
+    frame.owner = hand_over(sample);
+    frame.sample = frame.owner;
     unsafe { rigel_item_set_frame(*item as *mut c_void, &frame) };
     Some(())
 }
@@ -1274,7 +1282,7 @@ fn push_sample(
     if *item == 0 {
         return None;
     }
-    frame.owner = Box::into_raw(Box::new(sample)) as *mut c_void;
+    frame.owner = hand_over(sample);
     unsafe { rigel_item_set_frame(*item as *mut c_void, &frame) };
     Some(())
 }
