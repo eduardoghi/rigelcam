@@ -21,6 +21,9 @@ const MAX_FRAME_SIZE: usize = 16 * 1024 * 1024;
 /// which measured 5 frames, and they can't be told apart until the numbering breaks. It counts
 /// time and not frames, or a camera at few frames per second would lose whole events.
 const TIME_TO_TRUST_MS: u64 = 2_000;
+/// Video held before a stretch is trusted. Its 2 s take a few MB even on the main stream, and frames
+/// that each claim 1 ms could reach 2,000 of up to 16 MB. Past this the stretch counts as trusted.
+const MAX_HELD_BYTES: usize = 64 * 1024 * 1024;
 /// Time a frame takes when the one before it can't say, such as after a gap.
 const DEFAULT_STEP_MS: u64 = 50;
 /// A longer step is a pause in the recording, which the video skips.
@@ -66,8 +69,9 @@ struct Position {
 pub struct Reader {
     buffer: Vec<u8>,
     previous: Option<Position>,
-    /// Frames held until they are known not to be leftovers.
+    /// Frames held until they are known not to be leftovers, and the size of their video.
     held: Vec<Frame>,
+    held_bytes: usize,
     trusted: bool,
     /// A key frame was seen since the numbering broke, so the next frames can be decoded.
     decodable: bool,
@@ -154,6 +158,7 @@ impl Reader {
         // one pass, since the stretch left can hold many of them.
         let mut frames = self.read(true);
         frames.extend(std::mem::take(&mut self.held));
+        self.held_bytes = 0;
         frames
     }
 
@@ -180,6 +185,7 @@ impl Reader {
             self.decodable = false;
             if !self.trusted {
                 self.held.clear();
+                self.held_bytes = 0;
                 self.newest_date = 0;
             }
         }
@@ -206,9 +212,11 @@ impl Reader {
             frames.push(frame);
             return;
         }
+        self.held_bytes += frame.data.len();
         self.held.push(frame);
-        if self.elapsed_ms >= TIME_TO_TRUST_MS {
+        if self.elapsed_ms >= TIME_TO_TRUST_MS || self.held_bytes > MAX_HELD_BYTES {
             self.trusted = true;
+            self.held_bytes = 0;
             frames.append(&mut self.held);
         }
     }
@@ -440,6 +448,25 @@ mod tests {
         let mut reader = Reader::new();
         assert!(reader.push(&bytes).is_empty());
         assert_eq!(reader.finish().len(), 1);
+    }
+
+    #[test]
+    fn frames_too_short_to_add_up_are_let_go_past_the_size_limit() {
+        // Each one claims 1 ms, so 2 s would take 2,000 of them.
+        let payload = vec![0u8; 1024 * 1024];
+        let mut reader = Reader::new();
+        let mut first = None;
+        for i in 0..100u16 {
+            let kind = if i == 0 { KEY_FRAME } else { DELTA_FRAME };
+            let frames = reader.push(&frame(kind, u32::from(i) + 1, NOON, i, &payload));
+            if !frames.is_empty() {
+                first = Some((i, frames.len()));
+                break;
+            }
+        }
+        // Released once the held video passes 64 MB, all of it and in order.
+        assert_eq!(first, Some((64, 65)));
+        assert_eq!(reader.held_bytes, 0);
     }
 
     #[test]
