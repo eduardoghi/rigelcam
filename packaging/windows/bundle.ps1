@@ -55,6 +55,11 @@ while ($pending.Count -gt 0) {
     }
 }
 
+# Written by cargo about, as the release does, since the crates inside the executable change with
+# every update of Cargo.lock.
+if (-not (Test-Path (Join-Path $PSScriptRoot 'licenses\Rust-crates.txt'))) {
+    throw 'licenses\Rust-crates.txt is missing, run cargo about generate first'
+}
 Copy-Item (Join-Path $PSScriptRoot '..\..\LICENSE') $Output
 Copy-Item (Join-Path $PSScriptRoot 'THIRD-PARTY.txt') $Output
 # The LGPL asks for its text next to the DLLs it covers, and version 3 also for the GPL it extends.

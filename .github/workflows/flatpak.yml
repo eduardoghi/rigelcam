@@ -12,6 +12,8 @@ on:
       - "LICENSE"
       - "Cargo.toml"
       - "Cargo.lock"
+      - "about.toml"
+      - "about.hbs"
       - ".github/workflows/flatpak.yml"
   pull_request:
     paths:
@@ -21,10 +23,17 @@ on:
       - "LICENSE"
       - "Cargo.toml"
       - "Cargo.lock"
+      - "about.toml"
+      - "about.hbs"
       - ".github/workflows/flatpak.yml"
 
 permissions:
   contents: read
+
+env:
+  # Writes the notices of the crates in the packages, with about.toml and about.hbs.
+  CARGO_ABOUT_VERSION: 0.9.3
+  CARGO_ABOUT_LINUX_SHA256: 3ad1e94ea1e63d69d1961f4fb15ccbbe9575d906111f96d2cb4dce6df48f71b4
 
 # A newer push makes the build of an older one pointless.
 concurrency:
@@ -52,5 +61,12 @@ jobs:
         with:
           path: ~/.local/share/flatpak
           key: flatpak-${{ hashFiles('packaging/linux/io.github.eduardoghi.rigelcam.yml') }}-${{ env.week }}
+      - name: install cargo-about
+        run: |
+          archive="cargo-about-$CARGO_ABOUT_VERSION-x86_64-unknown-linux-musl.tar.gz"
+          curl -fsSLO "https://github.com/EmbarkStudios/cargo-about/releases/download/$CARGO_ABOUT_VERSION/$archive"
+          echo "$CARGO_ABOUT_LINUX_SHA256  $archive" | sha256sum --check
+          tar xzf "$archive" --strip-components=1 -C ~/.cargo/bin \
+            "cargo-about-$CARGO_ABOUT_VERSION-x86_64-unknown-linux-musl/cargo-about"
       - name: build the bundle
         run: packaging/linux/build-flatpak.sh rigelcam.flatpak

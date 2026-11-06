@@ -18,6 +18,10 @@ env:
   QT_VERSION: 6.10.3
   INNO_VERSION: 7.1.0
   INNO_SHA256: 0362a383ed217d4c4239b5933866dd96d3eb2102737da92f80f6057a4b40df2f
+  # Writes the notices of the crates in the packages, with about.toml and about.hbs.
+  CARGO_ABOUT_VERSION: 0.9.3
+  CARGO_ABOUT_LINUX_SHA256: 3ad1e94ea1e63d69d1961f4fb15ccbbe9575d906111f96d2cb4dce6df48f71b4
+  CARGO_ABOUT_WINDOWS_SHA256: 9e2942533ef1c592c4a70bdb384cae1550a3f5fc9ae40379b6662e3d2f16fe02
 
 jobs:
   checks:
@@ -118,6 +122,20 @@ jobs:
           $process = Start-Process ".\$installer" -Wait -PassThru -ArgumentList `
             '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/DIR=C:\innosetup'
           if ($process.ExitCode -ne 0) { throw "the Inno Setup installer failed ($($process.ExitCode))" }
+      # The licenses of most crates ask for their notice next to the program they are compiled into.
+      - name: write the notices of the crates
+        shell: pwsh
+        run: |
+          $name = "cargo-about-$env:CARGO_ABOUT_VERSION-x86_64-pc-windows-msvc"
+          Invoke-WebRequest -OutFile "$name.tar.gz" `
+            "https://github.com/EmbarkStudios/cargo-about/releases/download/$env:CARGO_ABOUT_VERSION/$name.tar.gz"
+          if ((Get-FileHash "$name.tar.gz" -Algorithm SHA256).Hash -ne $env:CARGO_ABOUT_WINDOWS_SHA256) {
+            throw 'cargo-about does not match its hash'
+          }
+          tar xzf "$name.tar.gz"
+          & ".\$name\cargo-about.exe" generate --locked --fail --target x86_64-pc-windows-msvc `
+            -o packaging\windows\licenses\Rust-crates.txt about.hbs
+          if ($LASTEXITCODE -ne 0) { throw 'cargo about failed' }
       - name: build and bundle
         shell: pwsh
         env:
@@ -176,6 +194,13 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends flatpak flatpak-builder elfutils
           flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+      - name: install cargo-about
+        run: |
+          archive="cargo-about-$CARGO_ABOUT_VERSION-x86_64-unknown-linux-musl.tar.gz"
+          curl -fsSLO "https://github.com/EmbarkStudios/cargo-about/releases/download/$CARGO_ABOUT_VERSION/$archive"
+          echo "$CARGO_ABOUT_LINUX_SHA256  $archive" | sha256sum --check
+          tar xzf "$archive" --strip-components=1 -C ~/.cargo/bin \
+            "cargo-about-$CARGO_ABOUT_VERSION-x86_64-unknown-linux-musl/cargo-about"
       - name: build the bundle
         run: packaging/linux/build-flatpak.sh "rigelcam-$VERSION-linux-x86_64.flatpak"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

@@ -11,4 +11,5 @@ The code Qt includes from other projects, such as zlib, PCRE2, HarfBuzz, FreeTyp
 libjpeg, has its notices in licenses\Qt-third-party.txt. The libraries GStreamer brings along,
 which are GLib, libintl, libffi, Orc, PCRE2 and zlib, have theirs in licenses\gstreamer. ICU and the
 DirectX Shader Compiler, which Qt deploys next to its libraries, are in
-licenses\Windows-third-party.txt.
+licenses\Windows-third-party.txt. The Rust crates compiled into rigelcam.exe have theirs in
+licenses\Rust-crates.txt.

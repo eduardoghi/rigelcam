@@ -4,6 +4,11 @@ User-visible changes, newest first.
 
 ## [Unreleased]
 
+### Added
+
+- The Windows package and the Flatpak carry the license notices of the code they bundle, from
+  the Rust crates compiled into the app and, on Windows, from Qt, GStreamer and what comes with them.
+
 ### Fixed
 
 - A camera open alone stops using the network and the decoder 20 seconds after the window is

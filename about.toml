@@ -1,0 +1,22 @@
+# Settings of `cargo about generate about.hbs`, which writes the notices of the crates compiled into
+# the app for the release packages. The licenses are the ones deny.toml accepts.
+accepted = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unlicense",
+    "Unicode-3.0",
+    "CDLA-Permissive-2.0",
+    "MPL-2.0",
+]
+# The systems there are packages for. Crates only used elsewhere don't go into them.
+targets = ["x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu"]
+# Build scripts and tests run on the machine that compiles, and nothing of them ships.
+ignore-build-dependencies = true
+ignore-dev-dependencies = true
+# The crates of this workspace are under the LICENSE of the repository, which ships on its own.
+private = { ignore = true }

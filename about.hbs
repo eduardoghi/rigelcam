@@ -1,0 +1,11 @@
+Notices of the Rust crates compiled into Rigelcam, grouped by license.
+{{#each licenses}}
+
+====================================================================================================
+{{{name}}}, for
+{{#each used_by}}
+  {{crate.name}} {{crate.version}}
+{{/each}}
+
+{{{text}}}
+{{/each}}

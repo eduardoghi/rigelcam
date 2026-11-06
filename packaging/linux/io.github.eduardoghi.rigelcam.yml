@@ -29,6 +29,8 @@ modules:
       - desktop-file-edit --set-icon="$FLATPAK_ID" "$FLATPAK_DEST/share/applications/$FLATPAK_ID.desktop"
       - install -Dm644 packaging/linux/$FLATPAK_ID.metainfo.xml "$FLATPAK_DEST/share/metainfo/$FLATPAK_ID.metainfo.xml"
       - install -Dm644 LICENSE "$FLATPAK_DEST/share/licenses/$FLATPAK_ID/LICENSE"
+      # Written by build-flatpak.sh, with the notices of the crates compiled into the app.
+      - install -Dm644 packaging/linux/rust-crates.txt "$FLATPAK_DEST/share/licenses/$FLATPAK_ID/rust-crates.txt"
     sources:
       - type: dir
         path: ../..
