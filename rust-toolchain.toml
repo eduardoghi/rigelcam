@@ -1,7 +1,8 @@
 # The Rust that builds and checks the app, here and in CI. CI treats every clippy warning as an
 # error, so a newer Rust with a new lint would break it without a change to the code. Moving to
-# another version is a change of its own, which Dependabot doesn't make.
+# another version is a change of its own, which Dependabot doesn't make. It is the version of the
+# Rust extension of the Flatpak SDK, which builds the Flatpak and can't be newer than that.
 [toolchain]
-channel = "1.99.0"
+channel = "1.98.1"
 components = ["rustfmt", "clippy"]
 profile = "minimal"
