@@ -462,10 +462,9 @@ ApplicationWindow {
         if (!text || !grid.language)
             return text
         const parts = text.split("\u001f")
-        let translated = qsTranslate("Main", parts[0])
-        for (let i = 1; i < parts.length; i++)
-            translated = translated.arg(parts[i])
-        return translated
+        // In one pass, unlike chained arg(), so a %2 inside an error of the recorder stays as it is.
+        return qsTranslate("Main", parts[0]).replace(/%(\d+)/g,
+                                                     (mark, n) => n >= 1 && n < parts.length ? parts[n] : mark)
     }
 
     function secondsOf(text) {
