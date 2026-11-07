@@ -11,8 +11,8 @@ User-visible changes, newest first.
 
 ### Security
 
-- Reading a recording over HTTP, as exports do, holds at most 64 MB of video while it checks the
-  start of each stretch, so a recorder that sends frames of 1 ms each can't fill the memory.
+- Reading a recording over HTTP, as exports do, holds about 64 MB of video at most while it checks
+  the start of each stretch, so a recorder that sends frames of 1 ms each can't fill the memory.
 - A camera the app opens directly, for a channel the recorder doesn't stream over RTSP, has to be
   in the same /24 network as the recorder, so a recorder can't hand its password to another host.
 
