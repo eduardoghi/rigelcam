@@ -6,6 +6,8 @@ User-visible changes, newest first.
 
 ### Added
 
+- Buttons next to -10 and +10, and Ctrl+Left and Ctrl+Right, jump to the previous or the next
+  motion event of the recordings.
 - The Windows package and the Flatpak carry the license notices of the code they bundle, from
   the Rust crates compiled into the app and, on Windows, from Qt, GStreamer and what comes with them.
 

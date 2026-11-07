@@ -312,6 +312,14 @@
         <translation>Retroceder 10 s</translation>
     </message>
     <message>
+        <source>Previous motion event</source>
+        <translation>Evento de movimiento anterior</translation>
+    </message>
+    <message>
+        <source>Next motion event</source>
+        <translation>Siguiente evento de movimiento</translation>
+    </message>
+    <message>
         <source>Forward 10 s</source>
         <translation>Avanzar 10 s</translation>
     </message>

@@ -111,3 +111,32 @@ function timeAfter(spans, openedAt, elapsed) {
     }
     return time
 }
+
+// The motion events of the day as { start, end }. The recorder splits a long event into files, so
+// one that starts where the last ended, give or take a second, is the same event.
+function eventRuns(spans) {
+    const runs = []
+    for (const span of spans) {
+        if (!span.event)
+            continue
+        const last = runs[runs.length - 1]
+        if (last && span.start <= last.end + 1)
+            last.end = Math.max(last.end, span.end)
+        else
+            runs.push({ start: span.start, end: span.end })
+    }
+    return runs
+}
+
+// The start of the first event after `position`, or -1.
+function nextEvent(spans, position) {
+    const run = eventRuns(spans).find(run => run.start > position)
+    return run ? run.start : -1
+}
+
+// The start of the event before. Within 3 s of the start of one, it goes to the one before that,
+// so pressing it again right after a jump keeps going back.
+function previousEvent(spans, position) {
+    const runs = eventRuns(spans).filter(run => run.start < position - 3)
+    return runs.length > 0 ? runs[runs.length - 1].start : -1
+}

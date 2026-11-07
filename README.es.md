@@ -32,6 +32,7 @@ nativa en Linux.
   grabación continua
 - Calendario con los días que tienen grabación
 - Clic en cualquier punto de la línea de tiempo para reproducir desde ese momento, hasta 8x
+- Salto al siguiente evento de movimiento o al anterior, también con Ctrl+Derecha y Ctrl+Izquierda
 - Hasta 4 canales reproducidos en sincronía, cada uno con su zoom digital
 - Exportar un fragmento a MP4, sin recomprimir, solo de las grabaciones que el usuario puede
   reproducir

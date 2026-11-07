@@ -82,4 +82,23 @@ TestCase {
         // Past everything recorded it stays at the end.
         compare(Playback.timeAfter(spans, 3600, 99999), 9000)
     }
+
+    function test_events_are_reached_one_after_another() {
+        // Two files of one event from 01:00 to 01:02, continuous video, and an event at 02:00.
+        const day = [
+            { start: 3600, end: 3660, event: true },
+            { start: 3661, end: 3720, event: true },
+            { start: 3720, end: 7200, event: false },
+            { start: 7200, end: 7260, event: true },
+        ]
+        compare(Playback.eventRuns(day), [{ start: 3600, end: 3720 }, { start: 7200, end: 7260 }])
+        compare(Playback.nextEvent(day, 0), 3600)
+        compare(Playback.nextEvent(day, 3600), 7200)
+        compare(Playback.nextEvent(day, 7200), -1)
+        compare(Playback.previousEvent(day, 8000), 7200)
+        // Right after a jump to an event, the one before it.
+        compare(Playback.previousEvent(day, 7201), 3600)
+        compare(Playback.previousEvent(day, 3602), -1)
+        compare(Playback.nextEvent(spans, 0), -1)
+    }
 }

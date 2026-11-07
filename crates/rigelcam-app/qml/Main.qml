@@ -674,6 +674,18 @@ ApplicationWindow {
     }
 
     Shortcut {
+        sequence: "Ctrl+Left"
+        enabled: win.playerKeys
+        onActivated: playback.previousEvent()
+    }
+
+    Shortcut {
+        sequence: "Ctrl+Right"
+        enabled: win.playerKeys
+        onActivated: playback.nextEvent()
+    }
+
+    Shortcut {
         sequence: "Ctrl+S"
         enabled: win.zoomed !== "" || win.inRecordings
         onActivated: {
@@ -2138,6 +2150,18 @@ ApplicationWindow {
             seek(Playback.skipBackTarget(spans, position))
         }
 
+        function previousEvent() {
+            const target = Playback.previousEvent(spans, position)
+            if (target >= 0)
+                seek(target)
+        }
+
+        function nextEvent() {
+            const target = Playback.nextEvent(spans, position)
+            if (target >= 0)
+                seek(target)
+        }
+
         function seek(seconds) {
             const target = recordedTime(seconds)
             if (target < 0 || !win.playbackCamera)
@@ -2636,6 +2660,18 @@ ApplicationWindow {
                 Item { Layout.fillWidth: true }
 
                 AppButton {
+                    enabled: Playback.previousEvent(playback.spans, playback.position) >= 0
+                    display: AbstractButton.IconOnly
+                    icon.source: "qrc:/rigelcam/icons/previous-event.svg"
+                    text: qsTr("Previous motion event")
+                    contentColor: colors.waiting
+                    implicitWidth: 40
+                    leftPadding: 12
+                    rightPadding: 12
+                    onClicked: playback.previousEvent()
+                    AppToolTip { visible: parent.hovered; text: parent.text }
+                }
+                AppButton {
                     enabled: playback.spans.length > 0
                     text: "-10"
                     implicitWidth: 40
@@ -2662,6 +2698,18 @@ ApplicationWindow {
                     rightPadding: 4
                     onClicked: playback.seek(playback.position + 10)
                     AppToolTip { visible: parent.hovered; text: qsTr("Forward 10 s") }
+                }
+                AppButton {
+                    enabled: Playback.nextEvent(playback.spans, playback.position) >= 0
+                    display: AbstractButton.IconOnly
+                    icon.source: "qrc:/rigelcam/icons/next-event.svg"
+                    text: qsTr("Next motion event")
+                    contentColor: colors.waiting
+                    implicitWidth: 40
+                    leftPadding: 12
+                    rightPadding: 12
+                    onClicked: playback.nextEvent()
+                    AppToolTip { visible: parent.hovered; text: parent.text }
                 }
                 Text {
                     Layout.leftMargin: 8

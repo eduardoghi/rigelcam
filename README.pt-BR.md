@@ -29,6 +29,8 @@ API HTTP da Dahua para o resto. Por isso não precisa do SDK do fabricante e rod
 - Linha do tempo por canal em qualquer dia, com os eventos de movimento separados da gravação contínua
 - Calendário com os dias que têm gravação
 - Clique em qualquer ponto da linha do tempo para reproduzir a partir dali, em até 8x
+- Pule para o próximo evento de movimento ou para o anterior, também com Ctrl+Direita e
+  Ctrl+Esquerda
 - Até 4 canais reproduzidos em sincronia, cada um com seu zoom digital
 - Exportação de trechos em MP4, sem recompressão, só das gravações que o usuário pode reproduzir
 
