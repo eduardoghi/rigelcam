@@ -112,7 +112,7 @@ function timeAfter(spans, openedAt, elapsed) {
     return time
 }
 
-// The motion events of the day as { start, end }. The recorder splits a long event into files, so
+// The events of the day, any recording that isn't continuous, as { start, end }. The recorder splits a long event into files, so
 // one that starts where the last ended, give or take a second, is the same event.
 function eventRuns(spans) {
     const runs = []

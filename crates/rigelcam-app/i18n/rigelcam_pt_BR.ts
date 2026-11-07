@@ -312,12 +312,12 @@
         <translation>Voltar 10 s</translation>
     </message>
     <message>
-        <source>Previous motion event</source>
-        <translation>Evento de movimento anterior</translation>
+        <source>Previous event</source>
+        <translation>Evento anterior</translation>
     </message>
     <message>
-        <source>Next motion event</source>
-        <translation>Próximo evento de movimento</translation>
+        <source>Next event</source>
+        <translation>Próximo evento</translation>
     </message>
     <message>
         <source>Forward 10 s</source>

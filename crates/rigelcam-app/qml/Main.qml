@@ -2862,7 +2862,7 @@ ApplicationWindow {
                     enabled: Playback.previousEvent(playback.spans, playback.position, playback.rate) >= 0
                     display: AbstractButton.IconOnly
                     icon.source: "qrc:/rigelcam/icons/previous-event.svg"
-                    text: qsTr("Previous motion event")
+                    text: qsTr("Previous event")
                     contentColor: colors.waiting
                     implicitWidth: 40
                     leftPadding: 12
@@ -2902,7 +2902,7 @@ ApplicationWindow {
                     enabled: Playback.nextEvent(playback.spans, playback.position) >= 0
                     display: AbstractButton.IconOnly
                     icon.source: "qrc:/rigelcam/icons/next-event.svg"
-                    text: qsTr("Next motion event")
+                    text: qsTr("Next event")
                     contentColor: colors.waiting
                     implicitWidth: 40
                     leftPadding: 12

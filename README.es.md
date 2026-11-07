@@ -30,11 +30,11 @@ nativa en Linux.
 
 **Grabaciones**
 
-- Línea de tiempo por canal para cualquier día, con los eventos de movimiento marcados aparte de la
+- Línea de tiempo por canal para cualquier día, con los eventos, como el movimiento, marcados aparte de la
   grabación continua
 - Calendario con los días que tienen grabación
 - Clic en cualquier punto de la línea de tiempo para reproducir desde ese momento, hasta 8x
-- Salto al siguiente evento de movimiento o al anterior, también con Ctrl+Derecha y Ctrl+Izquierda
+- Salto al siguiente evento o al anterior, también con Ctrl+Derecha y Ctrl+Izquierda
 - Hasta 4 canales reproducidos en sincronía, cada uno con su zoom digital
 - Exportar un fragmento a MP4, sin recomprimir, solo de las grabaciones que el usuario puede
   reproducir
