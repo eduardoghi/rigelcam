@@ -1749,48 +1749,54 @@ ApplicationWindow {
                 width: cameraArea.cellWidth
                 height: cameraArea.cellHeight
 
-                Rectangle {
+                // Only for an empty square. Under a camera nothing of it shows, and a grid of 36 would
+                // build 30 or so buttons that never appear.
+                Loader {
                     anchors.fill: parent
-                    visible: !square.hasTile
-                    color: colors.surface
+                    active: !square.hasTile
+                    sourceComponent: Component {
+                        Rectangle {
+                            color: colors.surface
 
-                    // A camera the recorder stopped listing can be gone for good, and only the
-                    // user knows that.
-                    AppButton {
-                        id: clearSquare
-                        anchors.right: parent.right
-                        anchors.top: parent.top
-                        anchors.margins: 6
-                        visible: square.key !== null && squareHover.hovered
-                        display: AbstractButton.IconOnly
-                        icon.source: "qrc:/rigelcam/icons/close.svg"
-                        icon.width: 14
-                        icon.height: 14
-                        text: qsTr("Remove from the grid")
-                        implicitWidth: 26
-                        implicitHeight: 26
-                        leftPadding: 6
-                        rightPadding: 6
-                        fill: colors.overVideo
-                        contentColor: colors.overVideoText
-                        onClicked: {
-                            const camera = win.gridLayout.cameras[square.index]
-                            grid.removeCamera(camera.recorder, camera.channel)
+                            // A camera the recorder stopped listing can be gone for good, and only the
+                            // user knows that.
+                            AppButton {
+                                id: clearSquare
+                                anchors.right: parent.right
+                                anchors.top: parent.top
+                                anchors.margins: 6
+                                visible: square.key !== null && squareHover.hovered
+                                display: AbstractButton.IconOnly
+                                icon.source: "qrc:/rigelcam/icons/close.svg"
+                                icon.width: 14
+                                icon.height: 14
+                                text: qsTr("Remove from the grid")
+                                implicitWidth: 26
+                                implicitHeight: 26
+                                leftPadding: 6
+                                rightPadding: 6
+                                fill: colors.overVideo
+                                contentColor: colors.overVideoText
+                                onClicked: {
+                                    const camera = win.gridLayout.cameras[square.index]
+                                    grid.removeCamera(camera.recorder, camera.channel)
+                                }
+                                AppToolTip {
+                                    visible: clearSquare.hovered
+                                    text: clearSquare.text
+                                }
+                            }
+                            Text {
+                                anchors.centerIn: parent
+                                width: Math.min(implicitWidth, parent.width - 12)
+                                elide: Text.ElideRight
+                                horizontalAlignment: Text.AlignHCenter
+                                // A camera of a recorder that is offline or hasn't answered keeps its square.
+                                text: square.key === null ? qsTr("Drag a camera here") : qsTr("Waiting for the recorder")
+                                font.pixelSize: 12
+                                color: colors.faint
+                            }
                         }
-                        AppToolTip {
-                            visible: clearSquare.hovered
-                            text: clearSquare.text
-                        }
-                    }
-                    Text {
-                        anchors.centerIn: parent
-                        width: Math.min(implicitWidth, parent.width - 12)
-                        elide: Text.ElideRight
-                        horizontalAlignment: Text.AlignHCenter
-                        // A camera of a recorder that is offline or hasn't answered keeps its square.
-                        text: square.key === null ? qsTr("Drag a camera here") : qsTr("Waiting for the recorder")
-                        font.pixelSize: 12
-                        color: colors.faint
                     }
                 }
 
