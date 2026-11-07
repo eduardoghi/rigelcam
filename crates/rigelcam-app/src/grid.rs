@@ -433,8 +433,6 @@ pub struct CameraGridRust {
     form_error: QString,
     form_busy: bool,
     ready: bool,
-    /// Held for as long as the app runs.
-    instance: Option<InstanceLock>,
     exporting: QString,
     export_running: bool,
     update_version: QString,
@@ -448,6 +446,9 @@ pub struct CameraGridRust {
     exports: VecDeque<Job>,
     export_cancel: Arc<AtomicBool>,
     list: Option<RecorderList>,
+    /// Held for as long as the app runs. Fields drop in order, so it comes after `list`, whose
+    /// drop waits for the last save. Another instance can't read the file before that save ends.
+    instance: Option<InstanceLock>,
     connections: HashMap<u64, Connection>,
     channels: HashMap<u64, Vec<Channel>>,
     failures: HashMap<u64, String>,
