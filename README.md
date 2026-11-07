@@ -18,6 +18,8 @@ Dahua HTTP API for everything else, so it does not need the vendor SDK and runs 
 **Live view**
 
 - Grid of cameras from one or more NVRs, using the substream so a full grid stays light
+- Several named grids, switched from the toolbar or with Ctrl+PgUp and Ctrl+PgDown, and shown in
+  turn on their own every 10 s, 30 s or minute if you want
 - Double click to open a single camera on the main stream, with digital zoom and gamma
 - RTX Super Resolution and RTX HDR on Windows with an NVIDIA RTX card, off by default
 - Save a photo at the resolution of the video

@@ -376,6 +376,10 @@ ApplicationWindow {
     readonly property var gridKeys: gridLayout.cameras.map(c => c ? cameraKey(c.recorder, c.channel) : null)
     readonly property var tileKeys: recorderList.reduce((keys, r) => keys.concat(r.cameras.map(c => cameraKey(r.id, c.number))), [])
     readonly property int cols: gridLayout.columns
+    // The saved grids as { name }, the one on screen at grid.currentLayout.
+    readonly property var layoutNames: grid.layouts ? JSON.parse(grid.layouts) : []
+    readonly property bool layoutKeys: !inRecordings && layoutNames.length > 1 && !addDialog.visible
+        && !removeDialog.visible && !layoutDialog.visible && !removeLayoutDialog.visible && !comboOpen
     readonly property int includedCount: gridKeys.filter(k => k !== null).length
     property int liveCount: 0
     // State of each camera in the grid, by key, as "live", "denied", "lost" or "connecting".
@@ -465,6 +469,19 @@ ApplicationWindow {
         // In one pass, unlike chained arg(), so a %2 inside an error of the recorder stays as it is.
         return qsTranslate("Main", parts[0]).replace(/%(\d+)/g,
                                                      (mark, n) => n >= 1 && n < parts.length ? parts[n] : mark)
+    }
+
+    // A grid without a name is called by its place in the list. Reading the language makes bindings
+    // to this follow a change of it, as in msg().
+    function layoutLabel(index, name) {
+        if (name || !grid.language)
+            return name
+        return qsTr("Grid %1").arg(index + 1)
+    }
+
+    function stepLayout(step) {
+        const count = layoutNames.length
+        grid.selectLayout((grid.currentLayout + step + count) % count)
     }
 
     function secondsOf(text) {
@@ -696,6 +713,27 @@ ApplicationWindow {
         }
     }
     Shortcut {
+        sequence: "Ctrl+PgDown"
+        enabled: win.layoutKeys
+        onActivated: win.stepLayout(1)
+    }
+    Shortcut {
+        sequence: "Ctrl+PgUp"
+        enabled: win.layoutKeys
+        onActivated: win.stepLayout(-1)
+    }
+
+    // Shows the next grid on its own, for a screen that only watches. It waits while a camera is
+    // shown alone, the recordings are open or something else has the keys.
+    Timer {
+        interval: Math.max(grid.cycleSeconds, 1) * 1000
+        repeat: true
+        running: grid.cycleSeconds > 0 && win.layoutKeys && win.zoomed === ""
+            && win.visibility !== Window.Minimized
+        onTriggered: win.stepLayout(1)
+    }
+
+    Shortcut {
         sequence: "F11"
         onActivated: win.toggleFullScreen()
     }
@@ -786,6 +824,47 @@ ApplicationWindow {
             Item {
                 visible: win.recorderList.length === 0 || (grid.error === "" && grid.missing === "" && grid.notice === "")
                 Layout.fillWidth: true
+            }
+
+            AppComboBox {
+                id: layoutBox
+                Layout.preferredWidth: 170
+                visible: win.recorderList.length > 0 && !win.inRecordings && win.layoutNames.length > 0
+                // The row after the last grid adds one.
+                model: win.layoutNames.map((item, index) => ({ index: index, name: item.name }))
+                    .concat([{ index: -1, name: "" }])
+                labelOf: item => item.index < 0 ? qsTr("+ New grid") : win.layoutLabel(item.index, item.name)
+                // Set by hand, since a new list of grids would move the row back to the first one.
+                onModelChanged: currentIndex = grid.currentLayout
+                Connections {
+                    target: grid
+                    function onCurrentLayoutChanged() {
+                        layoutBox.currentIndex = grid.currentLayout
+                    }
+                }
+                onActivated: index => {
+                    if (model[index].index < 0)
+                        grid.addLayout()
+                    else
+                        grid.selectLayout(index)
+                    currentIndex = grid.currentLayout
+                }
+            }
+
+            AppButton {
+                id: layoutButton
+                visible: layoutBox.visible
+                display: AbstractButton.IconOnly
+                icon.source: "qrc:/rigelcam/icons/edit.svg"
+                text: qsTr("Edit grid")
+                implicitWidth: 34
+                leftPadding: 9
+                rightPadding: 9
+                onClicked: layoutDialog.openFor(grid.currentLayout)
+                AppToolTip {
+                    visible: layoutButton.hovered
+                    text: layoutButton.text
+                }
             }
 
             AppComboBox {
@@ -1131,6 +1210,105 @@ ApplicationWindow {
                     enabled: exportDialog.valid
                     text: qsTr("Export")
                     onClicked: exportDialog.submit()
+                }
+            }
+        }
+    }
+
+    AppDialog {
+        id: layoutDialog
+        property int index: 0
+        title: qsTr("Grid")
+        width: Math.min(400, parent.width - 32)
+
+        function openFor(index) {
+            layoutDialog.index = index
+            layoutNameField.text = win.layoutNames[index]?.name ?? ""
+            cycleBox.currentIndex = Math.max(0, cycleBox.model.findIndex(c => c.seconds === grid.cycleSeconds))
+            open()
+        }
+
+        function submit() {
+            grid.renameLayout(index, layoutNameField.text)
+            grid.saveCycleSeconds(cycleBox.currentValue)
+            close()
+        }
+
+        ColumnLayout {
+            anchors.fill: parent
+            spacing: 4
+            FormLabel { text: qsTr("Name") }
+            FormField {
+                id: layoutNameField
+                placeholderText: win.layoutLabel(layoutDialog.index, "")
+                maximumLength: 60
+                onAccepted: layoutDialog.submit()
+            }
+            FormLabel { text: qsTr("Show the next grid") }
+            AppComboBox {
+                id: cycleBox
+                Layout.fillWidth: true
+                model: [0, 10, 30, 60].map(seconds => ({ seconds: seconds }))
+                valueRole: "seconds"
+                labelOf: item => item.seconds === 0 ? qsTr("Never")
+                    : item.seconds === 60 ? qsTr("Every minute") : qsTr("Every %1 seconds").arg(item.seconds)
+            }
+            RowLayout {
+                Layout.fillWidth: true
+                Layout.topMargin: 14
+                spacing: 8
+                AppButton {
+                    visible: win.layoutNames.length > 1
+                    text: qsTr("Delete grid")
+                    contentColor: colors.danger
+                    onClicked: {
+                        layoutDialog.close()
+                        removeLayoutDialog.openFor(layoutDialog.index)
+                    }
+                }
+                Item { Layout.fillWidth: true }
+                AppButton { text: qsTr("Cancel"); onClicked: layoutDialog.close() }
+                PrimaryButton { text: qsTr("Save"); onClicked: layoutDialog.submit() }
+            }
+        }
+    }
+
+    AppDialog {
+        id: removeLayoutDialog
+        property int index: 0
+        title: qsTr("Delete grid")
+        width: Math.min(400, parent.width - 32)
+
+        function openFor(index) {
+            removeLayoutDialog.index = index
+            open()
+        }
+
+        ColumnLayout {
+            anchors.fill: parent
+            spacing: 18
+            Label {
+                Layout.fillWidth: true
+                wrapMode: Text.WordWrap
+                textFormat: Text.PlainText
+                font.pixelSize: 14
+                color: colors.muted
+                text: qsTr("Really delete %1? The cameras stay in the sidebar and in the other grids.")
+                    .arg(win.layoutLabel(removeLayoutDialog.index, win.layoutNames[removeLayoutDialog.index]?.name ?? ""))
+            }
+            RowLayout {
+                Layout.alignment: Qt.AlignRight
+                spacing: 8
+                AppButton { text: qsTr("Cancel"); onClicked: removeLayoutDialog.close() }
+                AppButton {
+                    text: qsTr("Delete")
+                    fill: colors.danger
+                    hoverFill: "#F2666A"
+                    contentColor: "#FFFFFF"
+                    onClicked: {
+                        grid.removeLayout(removeLayoutDialog.index)
+                        removeLayoutDialog.close()
+                    }
                 }
             }
         }

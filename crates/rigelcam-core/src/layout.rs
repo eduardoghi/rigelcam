@@ -19,6 +19,16 @@ pub struct Layout {
     pub cameras: Vec<Option<CameraId>>,
 }
 
+/// A grid kept among others. Without a name it shows as "Grid" and its place in the list, in the
+/// language of the app.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NamedLayout {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub name: String,
+    #[serde(flatten)]
+    pub layout: Layout,
+}
+
 fn squares(columns: u32) -> usize {
     (columns * columns) as usize
 }

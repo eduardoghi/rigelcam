@@ -6,6 +6,9 @@ User-visible changes, newest first.
 
 ### Added
 
+- More than one grid, each with its name, cameras and size. They switch from the toolbar or
+  with Ctrl+PgUp and Ctrl+PgDown, and can take turns on their own every 10 s, 30 s or minute.
+  The grid saved by an older version becomes the first one.
 - Buttons next to -10 and +10, and Ctrl+Left and Ctrl+Right, jump to the previous or the next
   motion event of the recordings.
 - The Windows package and the Flatpak carry the license notices of the code they bundle, from

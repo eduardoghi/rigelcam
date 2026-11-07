@@ -18,6 +18,10 @@ pub mod qobject {
         #[qml_element]
         #[qproperty(QString, tree)]
         #[qproperty(QString, layout)]
+        /// The saved grids as a JSON list of `{ name }`, in order.
+        #[qproperty(QString, layouts)]
+        #[qproperty(i32, current_layout, cxx_name = "currentLayout")]
+        #[qproperty(i32, cycle_seconds, cxx_name = "cycleSeconds")]
         #[qproperty(QString, recordings)]
         #[qproperty(QString, recorded_days, cxx_name = "recordedDays")]
         #[qproperty(bool, sidebar_collapsed, cxx_name = "sidebarCollapsed")]
@@ -123,6 +127,26 @@ pub mod qobject {
         #[qinvokable]
         #[cxx_name = "saveSidebarCollapsed"]
         fn save_sidebar_collapsed(self: Pin<&mut Self>, collapsed: bool);
+
+        #[qinvokable]
+        #[cxx_name = "selectLayout"]
+        fn select_layout(self: Pin<&mut Self>, index: i32);
+
+        #[qinvokable]
+        #[cxx_name = "addLayout"]
+        fn add_layout(self: Pin<&mut Self>);
+
+        #[qinvokable]
+        #[cxx_name = "renameLayout"]
+        fn rename_layout(self: Pin<&mut Self>, index: i32, name: &QString);
+
+        #[qinvokable]
+        #[cxx_name = "removeLayout"]
+        fn remove_layout(self: Pin<&mut Self>, index: i32);
+
+        #[qinvokable]
+        #[cxx_name = "saveCycleSeconds"]
+        fn save_cycle_seconds(self: Pin<&mut Self>, seconds: i32);
 
         /// Asks for the recordings of a channel on a day, or on the current one of the recorder
         /// when `date` is empty. The answer goes to the `recordings` property.
@@ -413,6 +437,9 @@ fn next_retry_delay(delay: Duration) -> Duration {
 pub struct CameraGridRust {
     tree: QString,
     layout: QString,
+    layouts: QString,
+    current_layout: i32,
+    cycle_seconds: i32,
     recordings: QString,
     recorded_days: QString,
     /// Latest search of days, so an older one stops when another starts.
@@ -555,7 +582,7 @@ impl qobject::CameraGrid {
             self.as_mut().check_for_update();
         }
         let ids: Vec<u64> = list.recorders().iter().map(|r| r.id).collect();
-        let layout = list.layout().cloned();
+        let cycle_seconds = list.cycle_seconds();
         let collapsed = list.sidebar_collapsed();
         let theme = QString::from(list.theme().unwrap_or_default());
         let thread = self.qt_thread();
@@ -568,9 +595,9 @@ impl qobject::CameraGrid {
         self.as_mut().rust_mut().list = Some(list);
         self.as_mut().set_sidebar_collapsed(collapsed);
         self.as_mut().set_theme(theme);
-        if let Some(layout) = layout {
-            self.as_mut().publish_layout(&layout);
-        }
+        self.as_mut()
+            .set_cycle_seconds(i32::try_from(cycle_seconds).unwrap_or(0));
+        self.as_mut().publish_layouts();
         self.as_mut().publish_tree();
         for id in ids {
             self.as_mut().connect_recorder(id, false);
@@ -806,12 +833,81 @@ impl qobject::CameraGrid {
             list.set_layout(layout.clone());
         }
         self.as_mut().set_error(QString::default());
-        self.publish_layout(&layout);
+        self.publish_layouts();
     }
 
-    fn publish_layout(self: Pin<&mut Self>, layout: &Layout) {
-        let text = serde_json::to_string(layout).unwrap_or_default();
-        self.set_layout(QString::from(text.as_str()));
+    /// Hands the grid on screen, the names of all of them and which one is on screen to QML.
+    fn publish_layouts(mut self: Pin<&mut Self>) {
+        let Some(list) = self.list.as_ref() else {
+            return;
+        };
+        let names: Vec<_> = list
+            .layouts()
+            .iter()
+            .map(|named| json!({ "name": named.name }))
+            .collect();
+        let names = QString::from(serde_json::to_string(&names).unwrap_or_default().as_str());
+        let current = i32::try_from(list.current_layout()).unwrap_or(0);
+        let layout = list
+            .layout()
+            .map(|layout| serde_json::to_string(layout).unwrap_or_default())
+            .unwrap_or_default();
+        self.as_mut().set_layouts(names);
+        self.as_mut().set_current_layout(current);
+        self.set_layout(QString::from(layout.as_str()));
+    }
+
+    fn select_layout(mut self: Pin<&mut Self>, index: i32) {
+        let Ok(index) = usize::try_from(index) else {
+            return;
+        };
+        let selected = match self.as_mut().rust_mut().list.as_mut() {
+            Some(list) => list.select_layout(index),
+            None => false,
+        };
+        if selected {
+            self.as_mut().set_notice(QString::default());
+            self.publish_layouts();
+        }
+    }
+
+    fn add_layout(mut self: Pin<&mut Self>) {
+        let added = match self.as_mut().rust_mut().list.as_mut() {
+            Some(list) => list.add_layout(),
+            None => false,
+        };
+        if added {
+            self.as_mut().set_notice(QString::default());
+            self.publish_layouts();
+        }
+    }
+
+    fn rename_layout(mut self: Pin<&mut Self>, index: i32, name: &QString) {
+        let Ok(index) = usize::try_from(index) else {
+            return;
+        };
+        if let Some(list) = self.as_mut().rust_mut().list.as_mut() {
+            list.rename_layout(index, &name.to_string());
+        }
+        self.publish_layouts();
+    }
+
+    fn remove_layout(mut self: Pin<&mut Self>, index: i32) {
+        let Ok(index) = usize::try_from(index) else {
+            return;
+        };
+        if let Some(list) = self.as_mut().rust_mut().list.as_mut() {
+            list.remove_layout(index);
+        }
+        self.publish_layouts();
+    }
+
+    fn save_cycle_seconds(mut self: Pin<&mut Self>, seconds: i32) {
+        let seconds = seconds.max(0);
+        if let Some(list) = self.as_mut().rust_mut().list.as_mut() {
+            list.set_cycle_seconds(seconds as u32);
+        }
+        self.set_cycle_seconds(seconds);
     }
 
     fn open_recorder(mut self: Pin<&mut Self>, id: i32) {
@@ -1430,10 +1526,7 @@ impl qobject::CameraGrid {
         };
         self.as_mut().set_notice(QString::from(notice));
         self.as_mut().forget_recorder(id);
-        let layout = self.list.as_ref().and_then(|list| list.layout().cloned());
-        if let Some(layout) = layout {
-            self.as_mut().publish_layout(&layout);
-        }
+        self.as_mut().publish_layouts();
         self.publish_tree();
     }
 

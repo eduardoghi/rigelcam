@@ -18,6 +18,8 @@ API HTTP da Dahua para o resto. Por isso não precisa do SDK do fabricante e rod
 **Ao vivo**
 
 - Grade de câmeras de um ou mais NVRs, usando o substream para a grade cheia continuar leve
+- Várias grades com nome, trocadas pela barra de cima ou com Ctrl+PgUp e Ctrl+PgDown, e que
+  podem se alternar sozinhas a cada 10 s, 30 s ou minuto
 - Clique duplo para abrir uma câmera sozinha no stream principal, com zoom digital e gamma
 - RTX Super Resolution e RTX HDR no Windows com placa NVIDIA RTX, desligados por padrão
 - Foto salva na resolução do vídeo

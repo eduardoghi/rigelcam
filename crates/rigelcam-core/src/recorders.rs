@@ -9,7 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-use crate::layout::Layout;
+use crate::layout::{Layout, NamedLayout};
 #[cfg(target_os = "linux")]
 use crate::secret_portal;
 
@@ -264,9 +264,18 @@ struct Saved {
     /// taken for a new one.
     #[serde(default)]
     next_id: u64,
-    /// None until the first recorder answers with its channels.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// The single grid of files saved before there could be more, read into `layouts`.
+    #[serde(default, skip_serializing)]
     layout: Option<Layout>,
+    /// Empty until the first recorder answers with its channels.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    layouts: Vec<NamedLayout>,
+    /// The grid on screen, as a place in `layouts`.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    current_layout: usize,
+    /// Seconds each grid stays on screen before the next one, or 0 to stay on one.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    cycle_seconds: u32,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     sidebar_collapsed: bool,
     /// "pt_BR", "en" or "es", or nothing to follow the system.
@@ -279,6 +288,15 @@ struct Saved {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     check_updates: Option<bool>,
 }
+
+fn is_zero<T: Default + PartialEq>(value: &T) -> bool {
+    *value == T::default()
+}
+
+/// Longest name of a grid, in characters.
+const MAX_LAYOUT_NAME: usize = 60;
+/// Columns of a new grid, which grows as cameras come in.
+const NEW_LAYOUT_COLUMNS: u32 = 2;
 
 /// 2026-01-01 in seconds since 1970, where ids of a list started over count from.
 const ID_EPOCH: u64 = 1_767_225_600;
@@ -424,9 +442,21 @@ impl RecorderList {
             Err(e) if e.kind() == io::ErrorKind::NotFound => Saved::default(),
             Err(e) => return Err(e.into()),
         };
-        if let Some(layout) = &mut saved.layout {
-            layout.normalize();
+        if saved.layouts.is_empty() {
+            if let Some(layout) = saved.layout.take() {
+                saved.layouts.push(NamedLayout {
+                    name: String::new(),
+                    layout,
+                });
+            }
         }
+        for named in &mut saved.layouts {
+            named.layout.normalize();
+            named.name = named.name.chars().take(MAX_LAYOUT_NAME).collect();
+        }
+        saved.current_layout = saved
+            .current_layout
+            .min(saved.layouts.len().saturating_sub(1));
         Ok(Self {
             path,
             saved,
@@ -481,18 +511,100 @@ impl RecorderList {
         // A list saved before next_id existed has to remember the id going away too.
         self.saved.next_id = self.saved.next_id.max(id + 1);
         self.saved.recorders.retain(|r| r.id != id);
-        if let Some(layout) = &mut self.saved.layout {
-            layout.remove_recorder(id);
+        for named in &mut self.saved.layouts {
+            named.layout.remove_recorder(id);
         }
         self.write().inspect_err(|_| self.saved = before)
     }
 
+    /// The grid on screen.
     pub fn layout(&self) -> Option<&Layout> {
-        self.saved.layout.as_ref()
+        let saved = &self.saved;
+        saved
+            .layouts
+            .get(saved.current_layout)
+            .map(|named| &named.layout)
     }
 
+    /// Changes the grid on screen, which is the first one when there was none.
     pub fn set_layout(&mut self, layout: Layout) {
-        self.saved.layout = Some(layout);
+        let saved = &mut self.saved;
+        match saved.layouts.get_mut(saved.current_layout) {
+            Some(named) => named.layout = layout,
+            None => {
+                saved.layouts = vec![NamedLayout {
+                    name: String::new(),
+                    layout,
+                }];
+                saved.current_layout = 0;
+            }
+        }
+        self.save_later();
+    }
+
+    pub fn layouts(&self) -> &[NamedLayout] {
+        &self.saved.layouts
+    }
+
+    pub fn current_layout(&self) -> usize {
+        self.saved.current_layout
+    }
+
+    /// Puts another grid on screen. Returns false for a place that isn't in the list.
+    pub fn select_layout(&mut self, index: usize) -> bool {
+        if index >= self.saved.layouts.len() {
+            return false;
+        }
+        self.saved.current_layout = index;
+        self.save_later();
+        true
+    }
+
+    /// Adds an empty grid at the end and puts it on screen. Before the first grid there is
+    /// nothing to add to, since that one comes with the cameras of the first recorder.
+    pub fn add_layout(&mut self) -> bool {
+        if self.saved.layouts.is_empty() {
+            return false;
+        }
+        let mut layout = Layout::fitting(&[]);
+        layout.resize(NEW_LAYOUT_COLUMNS);
+        self.saved.layouts.push(NamedLayout {
+            name: String::new(),
+            layout,
+        });
+        self.saved.current_layout = self.saved.layouts.len() - 1;
+        self.save_later();
+        true
+    }
+
+    /// An empty name goes back to the one the app gives.
+    pub fn rename_layout(&mut self, index: usize, name: &str) {
+        if let Some(named) = self.saved.layouts.get_mut(index) {
+            named.name = name.trim().chars().take(MAX_LAYOUT_NAME).collect();
+            self.save_later();
+        }
+    }
+
+    /// Deletes a grid, except the last one left. The grid on screen stays on screen. When it is the
+    /// one deleted, the next one takes its place, or the one before when it was the last.
+    pub fn remove_layout(&mut self, index: usize) {
+        let saved = &mut self.saved;
+        if saved.layouts.len() < 2 || index >= saved.layouts.len() {
+            return;
+        }
+        saved.layouts.remove(index);
+        if saved.current_layout > index || saved.current_layout == saved.layouts.len() {
+            saved.current_layout -= 1;
+        }
+        self.save_later();
+    }
+
+    pub fn cycle_seconds(&self) -> u32 {
+        self.saved.cycle_seconds
+    }
+
+    pub fn set_cycle_seconds(&mut self, seconds: u32) {
+        self.saved.cycle_seconds = seconds;
         self.save_later();
     }
 
@@ -816,6 +928,109 @@ mod tests {
             list.layout().unwrap().cameras,
             vec![camera(first), None, None, None]
         );
+    }
+
+    fn camera(recorder: u64, channel: u32) -> Option<CameraId> {
+        Some(CameraId { recorder, channel })
+    }
+
+    #[test]
+    fn the_single_grid_of_an_older_file_becomes_the_first_of_the_list() {
+        let path = temp_path("one-grid");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            r#"{"recorders":[],"layout":{"columns":1,"cameras":[{"recorder":1,"channel":3}]}}"#,
+        )
+        .unwrap();
+        let mut list = RecorderList::open(path.clone()).unwrap();
+        assert_eq!(list.layouts().len(), 1);
+        assert_eq!(list.layouts()[0].name, "");
+        assert_eq!(list.layout().unwrap().cameras, vec![camera(1, 3)]);
+        list.set_theme("dark");
+        drop(list);
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.contains(r#""layouts""#) && !text.contains(r#""layout""#));
+        let reopened = RecorderList::open(path).unwrap();
+        assert_eq!(reopened.layout().unwrap().cameras, vec![camera(1, 3)]);
+    }
+
+    #[test]
+    fn grids_are_added_renamed_and_deleted_around_the_one_on_screen() {
+        let path = temp_path("grids");
+        let mut list = RecorderList::open(path.clone()).unwrap();
+        assert!(!list.add_layout());
+        list.set_layout(Layout::fitting(&[CameraId {
+            recorder: 1,
+            channel: 1,
+        }]));
+        assert!(list.add_layout());
+        assert!(list.add_layout());
+        assert_eq!(list.current_layout(), 2);
+        assert!(list.layout().unwrap().is_empty());
+        list.rename_layout(1, "  Pátio  ");
+        list.rename_layout(2, &"x".repeat(100));
+        assert_eq!(list.layouts()[1].name, "Pátio");
+        assert_eq!(list.layouts()[2].name.chars().count(), 60);
+        assert!(!list.select_layout(3));
+        assert!(list.select_layout(1));
+        // Deleting one before the grid on screen keeps that grid on screen.
+        list.remove_layout(0);
+        assert_eq!((list.layouts().len(), list.current_layout()), (2, 0));
+        assert_eq!(list.layouts()[0].name, "Pátio");
+        // The last grid on screen, deleted, gives its place to the one before.
+        list.select_layout(1);
+        list.remove_layout(1);
+        assert_eq!((list.layouts().len(), list.current_layout()), (1, 0));
+        list.remove_layout(0);
+        assert_eq!(list.layouts().len(), 1);
+        list.set_cycle_seconds(30);
+        drop(list);
+        let reopened = RecorderList::open(path).unwrap();
+        assert_eq!(reopened.layouts()[0].name, "Pátio");
+        assert_eq!(reopened.cycle_seconds(), 30);
+    }
+
+    #[test]
+    fn a_deleted_recorder_leaves_every_grid() {
+        let path = temp_path("forget-grids");
+        let mut list = RecorderList::open(path).unwrap();
+        let id = add(&mut list, "A", &addr("192.0.2.1"));
+        let other = CameraId {
+            recorder: id + 1,
+            channel: 1,
+        };
+        list.set_layout(Layout::fitting(&[CameraId {
+            recorder: id,
+            channel: 1,
+        }]));
+        list.add_layout();
+        list.set_layout(Layout::fitting(&[
+            CameraId {
+                recorder: id,
+                channel: 2,
+            },
+            other,
+        ]));
+        list.forget(id).unwrap();
+        assert!(list.layouts()[0].layout.is_empty());
+        assert_eq!(
+            list.layouts()[1].layout.cameras,
+            vec![None, Some(other), None, None]
+        );
+    }
+
+    #[test]
+    fn a_grid_out_of_the_list_is_not_put_on_screen() {
+        let path = temp_path("current-out");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            r#"{"recorders":[],"layouts":[{"columns":1,"cameras":[null]}],"current_layout":7}"#,
+        )
+        .unwrap();
+        let list = RecorderList::open(path).unwrap();
+        assert_eq!(list.current_layout(), 0);
     }
 
     #[test]

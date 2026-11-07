@@ -20,6 +20,8 @@ nativa en Linux.
 
 - Cuadrícula de cámaras de uno o más NVR, con el flujo secundario para que una cuadrícula completa
   siga siendo liviana
+- Varias cuadrículas con nombre, cambiadas desde la barra superior o con Ctrl+RePág y Ctrl+AvPág,
+  que pueden alternarse solas cada 10 s, 30 s o minuto
 - Doble clic para abrir una cámara en el flujo principal, con zoom digital y gamma
 - RTX Super Resolution y RTX HDR en Windows con tarjeta NVIDIA RTX, desactivados por defecto
 - Foto guardada con la resolución del video
