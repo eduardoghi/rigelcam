@@ -97,6 +97,8 @@ jobs:
           $process = Start-Process ".\$installer" -Wait -PassThru -ArgumentList `
             '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/DIR=C:\innosetup'
           if ($process.ExitCode -ne 0) { throw "the Inno Setup installer failed ($($process.ExitCode))" }
+      # The version and components in rust-toolchain.toml.
+      - run: rustup toolchain install
       # The licenses of most crates ask for their notice next to the program they are compiled into.
       - name: write the notices of the crates
         shell: pwsh

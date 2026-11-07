@@ -71,7 +71,7 @@ jobs:
             echo "$workflow hasn't passed on main since $built" >&2
             return 1
           }
-          passed_since_change windows.yml crates Cargo.toml Cargo.lock \
+          passed_since_change windows.yml crates Cargo.toml Cargo.lock rust-toolchain.toml \
             packaging/windows/aqtinstall.txt packaging/windows/qt-archives.sha256 \
             packaging/windows/install-qt.ps1 assets/branding .github/workflows/windows.yml
           passed_since_change flatpak.yml crates assets/branding packaging/linux LICENSE Cargo.toml \
@@ -114,6 +114,9 @@ jobs:
           echo "$CARGO_ABOUT_LINUX_SHA256  $archive" | sha256sum --check
           tar xzf "$archive" --strip-components=1 -C ~/.cargo/bin \
             "cargo-about-$CARGO_ABOUT_VERSION-x86_64-unknown-linux-musl/cargo-about"
+      # The version in rust-toolchain.toml, for `cargo vendor` and `cargo about`. The bundle itself
+      # builds with the Rust of the SDK.
+      - run: rustup toolchain install
       - name: build the bundle
         run: packaging/linux/build-flatpak.sh "rigelcam-$VERSION-linux-x86_64.flatpak"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
