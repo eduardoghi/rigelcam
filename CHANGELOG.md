@@ -4,6 +4,8 @@ User-visible changes, newest first.
 
 ## [Unreleased]
 
+## [0.1.4] (2026-11-07)
+
 ### Added
 
 - More than one grid, each with its name, cameras and size. They switch from the toolbar or
