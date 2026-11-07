@@ -135,8 +135,9 @@ function nextEvent(spans, position) {
 }
 
 // The start of the event before. Within 3 s of the start of one, it goes to the one before that,
-// so pressing it again right after a jump keeps going back.
-function previousEvent(spans, position) {
-    const runs = eventRuns(spans).filter(run => run.start < position - 3)
+// so pressing it again right after a jump keeps going back. The 3 s are of the clock on the wall,
+// which at 8x is 24 s of the recording.
+function previousEvent(spans, position, rate) {
+    const runs = eventRuns(spans).filter(run => run.start < position - 3 * (rate || 1))
     return runs.length > 0 ? runs[runs.length - 1].start : -1
 }

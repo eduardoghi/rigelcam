@@ -460,8 +460,8 @@
         <translation>Se necesita GStreamer 1.24 o superior para mostrar video, y este sistema tiene %1.</translation>
     </message>
     <message>
-        <source>+ New grid</source>
-        <translation>+ Nueva cuadrícula</translation>
+        <source>New grid</source>
+        <translation>Nueva cuadrícula</translation>
     </message>
     <message>
         <source>Edit grid</source>
@@ -504,8 +504,8 @@
         <translation>Guardar</translation>
     </message>
     <message>
-        <source>Really delete %1? The cameras stay in the sidebar and in the other grids.</source>
-        <translation>¿Eliminar %1? Las cámaras siguen en la barra lateral y en las otras cuadrículas.</translation>
+        <source>Really delete %1? Its cameras stay in the sidebar.</source>
+        <translation>¿Eliminar %1? Sus cámaras siguen en la barra lateral.</translation>
     </message>
 </context>
 </TS>

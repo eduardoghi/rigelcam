@@ -297,6 +297,8 @@ fn is_zero<T: Default + PartialEq>(value: &T) -> bool {
 const MAX_LAYOUT_NAME: usize = 60;
 /// Columns of a new grid, which grows as cameras come in.
 const NEW_LAYOUT_COLUMNS: u32 = 2;
+/// How long each grid can stay on screen when they take turns, as the interface offers it.
+const CYCLE_CHOICES: [u32; 4] = [0, 10, 30, 60];
 
 /// 2026-01-01 in seconds since 1970, where ids of a list started over count from.
 const ID_EPOCH: u64 = 1_767_225_600;
@@ -451,8 +453,12 @@ impl RecorderList {
             }
         }
         for named in &mut saved.layouts {
-            named.layout.normalize();
+            named.layout.repair();
             named.name = named.name.chars().take(MAX_LAYOUT_NAME).collect();
+        }
+        // Something else, written by hand, could switch grids every second or never.
+        if !CYCLE_CHOICES.contains(&saved.cycle_seconds) {
+            saved.cycle_seconds = 0;
         }
         saved.current_layout = saved
             .current_layout
@@ -550,13 +556,23 @@ impl RecorderList {
         self.saved.current_layout
     }
 
-    /// Puts another grid on screen. Returns false for a place that isn't in the list.
+    /// Puts another grid on screen, which the app opens with next time. Returns false for a place
+    /// that isn't in the list.
     pub fn select_layout(&mut self, index: usize) -> bool {
+        let shown = self.show_layout(index);
+        if shown {
+            self.save_later();
+        }
+        shown
+    }
+
+    /// Puts another grid on screen without saving, for the turns the grids take on their own,
+    /// which would otherwise write the file every few seconds all day.
+    pub fn show_layout(&mut self, index: usize) -> bool {
         if index >= self.saved.layouts.len() {
             return false;
         }
         self.saved.current_layout = index;
-        self.save_later();
         true
     }
 
@@ -603,8 +619,13 @@ impl RecorderList {
         self.saved.cycle_seconds
     }
 
+    /// Takes only the choices the interface offers, and 0 stops the turns.
     pub fn set_cycle_seconds(&mut self, seconds: u32) {
-        self.saved.cycle_seconds = seconds;
+        self.saved.cycle_seconds = if CYCLE_CHOICES.contains(&seconds) {
+            seconds
+        } else {
+            0
+        };
         self.save_later();
     }
 
@@ -1018,6 +1039,47 @@ mod tests {
             list.layouts()[1].layout.cameras,
             vec![None, Some(other), None, None]
         );
+    }
+
+    #[test]
+    fn grids_taking_turns_dont_write_the_file() {
+        let path = temp_path("turns");
+        let mut list = RecorderList::open(path.clone()).unwrap();
+        list.set_layout(Layout::fitting(&[]));
+        list.add_layout();
+        list.select_layout(0);
+        drop(list);
+        let mut list = RecorderList::open(path.clone()).unwrap();
+        assert!(list.show_layout(1));
+        assert!(!list.show_layout(2));
+        assert_eq!(list.current_layout(), 1);
+        drop(list);
+        assert_eq!(RecorderList::open(path).unwrap().current_layout(), 0);
+    }
+
+    #[test]
+    fn a_hand_edited_grid_file_is_fixed_when_read() {
+        let path = temp_path("hand-edited");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let repeated = r#"{"recorder":1,"channel":1}"#;
+        fs::write(
+            &path,
+            format!(
+                r#"{{"recorders":[],"layouts":[{{"columns":1,"cameras":[null]}},
+                {{"columns":2,"cameras":[{repeated},{repeated},null,null]}}],"cycle_seconds":1}}"#
+            ),
+        )
+        .unwrap();
+        let mut list = RecorderList::open(path).unwrap();
+        assert_eq!(
+            list.layouts()[1].layout.cameras,
+            vec![camera(1, 1), None, None, None]
+        );
+        assert_eq!(list.cycle_seconds(), 0);
+        list.set_cycle_seconds(30);
+        assert_eq!(list.cycle_seconds(), 30);
+        list.set_cycle_seconds(15);
+        assert_eq!(list.cycle_seconds(), 0);
     }
 
     #[test]

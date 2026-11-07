@@ -460,8 +460,8 @@
         <translation>É preciso do GStreamer 1.24 ou mais novo para mostrar vídeo, e este sistema tem o %1.</translation>
     </message>
     <message>
-        <source>+ New grid</source>
-        <translation>+ Nova grade</translation>
+        <source>New grid</source>
+        <translation>Nova grade</translation>
     </message>
     <message>
         <source>Edit grid</source>
@@ -504,8 +504,8 @@
         <translation>Salvar</translation>
     </message>
     <message>
-        <source>Really delete %1? The cameras stay in the sidebar and in the other grids.</source>
-        <translation>Quer mesmo excluir %1? As câmeras continuam na barra lateral e nas outras grades.</translation>
+        <source>Really delete %1? Its cameras stay in the sidebar.</source>
+        <translation>Quer mesmo excluir %1? As câmeras dela continuam na barra lateral.</translation>
     </message>
 </context>
 </TS>

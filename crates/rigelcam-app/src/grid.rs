@@ -132,6 +132,11 @@ pub mod qobject {
         #[cxx_name = "selectLayout"]
         fn select_layout(self: Pin<&mut Self>, index: i32);
 
+        /// Shows the next grid without saving it as the one on screen, for the turns they take.
+        #[qinvokable]
+        #[cxx_name = "turnLayout"]
+        fn turn_layout(self: Pin<&mut Self>);
+
         #[qinvokable]
         #[cxx_name = "addLayout"]
         fn add_layout(self: Pin<&mut Self>);
@@ -871,6 +876,20 @@ impl qobject::CameraGrid {
         }
     }
 
+    fn turn_layout(mut self: Pin<&mut Self>) {
+        let shown = match self.as_mut().rust_mut().list.as_mut() {
+            Some(list) => {
+                let next = (list.current_layout() + 1) % list.layouts().len().max(1);
+                list.show_layout(next)
+            }
+            None => false,
+        };
+        // Leaves a notice in place, since nobody chose to move away from it.
+        if shown {
+            self.publish_layouts();
+        }
+    }
+
     fn add_layout(mut self: Pin<&mut Self>) {
         let added = match self.as_mut().rust_mut().list.as_mut() {
             Some(list) => list.add_layout(),
@@ -903,11 +922,14 @@ impl qobject::CameraGrid {
     }
 
     fn save_cycle_seconds(mut self: Pin<&mut Self>, seconds: i32) {
-        let seconds = seconds.max(0);
-        if let Some(list) = self.as_mut().rust_mut().list.as_mut() {
-            list.set_cycle_seconds(seconds as u32);
-        }
-        self.set_cycle_seconds(seconds);
+        let saved = match self.as_mut().rust_mut().list.as_mut() {
+            Some(list) => {
+                list.set_cycle_seconds(u32::try_from(seconds).unwrap_or(0));
+                list.cycle_seconds()
+            }
+            None => return,
+        };
+        self.set_cycle_seconds(i32::try_from(saved).unwrap_or(0));
     }
 
     fn open_recorder(mut self: Pin<&mut Self>, id: i32) {

@@ -99,6 +99,9 @@ TestCase {
         // Right after a jump to an event, the one before it.
         compare(Playback.previousEvent(day, 7201), 3600)
         compare(Playback.previousEvent(day, 3602), -1)
+        // At 8x the 3 s on the wall are 24 s of the recording.
+        compare(Playback.previousEvent(day, 7220, 8), 3600)
+        compare(Playback.previousEvent(day, 7230, 8), 7200)
         compare(Playback.nextEvent(spans, 0), -1)
     }
 }

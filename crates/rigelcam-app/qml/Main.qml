@@ -151,6 +151,8 @@ ApplicationWindow {
         }
         popup.y: box.height + 4
         popup.padding: 4
+        // Keeps a long list inside the window, where it scrolls.
+        popup.margins: 8
         // The default height leaves out the padding, which would make the list scroll.
         popup.height: popup.contentItem.implicitHeight + 2 * popup.padding
         popup.background: Rectangle {
@@ -378,8 +380,9 @@ ApplicationWindow {
     readonly property int cols: gridLayout.columns
     // The saved grids as { name }, the one on screen at grid.currentLayout.
     readonly property var layoutNames: grid.layouts ? JSON.parse(grid.layouts) : []
-    readonly property bool layoutKeys: !inRecordings && layoutNames.length > 1 && !addDialog.visible
-        && !removeDialog.visible && !layoutDialog.visible && !removeLayoutDialog.visible && !comboOpen
+    readonly property bool layoutKeys: !inRecordings && layoutNames.length > 1 && zoomed === "" && dragged === null
+        && !addDialog.visible && !removeDialog.visible && !layoutDialog.visible && !removeLayoutDialog.visible
+        && !aboutDialog.visible && !comboOpen && !gammaFocused
     readonly property int includedCount: gridKeys.filter(k => k !== null).length
     property int liveCount: 0
     // State of each camera in the grid, by key, as "live", "denied", "lost" or "connecting".
@@ -724,13 +727,21 @@ ApplicationWindow {
     }
 
     // Shows the next grid on its own, for a screen that only watches. It waits while a camera is
-    // shown alone, the recordings are open or something else has the keys.
+    // shown alone, the recordings are open, a camera is being dragged or something else has the
+    // keys, and a grid chosen by hand gets the whole interval.
     Timer {
-        interval: Math.max(grid.cycleSeconds, 1) * 1000
+        id: cycleTimer
+        interval: grid.cycleSeconds * 1000
         repeat: true
-        running: grid.cycleSeconds > 0 && win.layoutKeys && win.zoomed === ""
-            && win.visibility !== Window.Minimized
-        onTriggered: win.stepLayout(1)
+        running: grid.cycleSeconds > 0 && win.layoutKeys && !win.minimized
+        onTriggered: grid.turnLayout()
+    }
+    Connections {
+        target: grid
+        function onCurrentLayoutChanged() {
+            if (cycleTimer.running)
+                cycleTimer.restart()
+        }
     }
 
     Shortcut {
@@ -830,10 +841,8 @@ ApplicationWindow {
                 id: layoutBox
                 Layout.preferredWidth: 170
                 visible: win.recorderList.length > 0 && !win.inRecordings && win.layoutNames.length > 0
-                // The row after the last grid adds one.
                 model: win.layoutNames.map((item, index) => ({ index: index, name: item.name }))
-                    .concat([{ index: -1, name: "" }])
-                labelOf: item => item.index < 0 ? qsTr("+ New grid") : win.layoutLabel(item.index, item.name)
+                labelOf: item => win.layoutLabel(item.index, item.name)
                 // Set by hand, since a new list of grids would move the row back to the first one.
                 onModelChanged: currentIndex = grid.currentLayout
                 Connections {
@@ -842,12 +851,22 @@ ApplicationWindow {
                         layoutBox.currentIndex = grid.currentLayout
                     }
                 }
-                onActivated: index => {
-                    if (model[index].index < 0)
-                        grid.addLayout()
-                    else
-                        grid.selectLayout(index)
-                    currentIndex = grid.currentLayout
+                onActivated: index => grid.selectLayout(index)
+            }
+
+            AppButton {
+                id: newLayoutButton
+                visible: layoutBox.visible
+                display: AbstractButton.IconOnly
+                icon.source: "qrc:/rigelcam/icons/plus.svg"
+                text: qsTr("New grid")
+                implicitWidth: 34
+                leftPadding: 9
+                rightPadding: 9
+                onClicked: grid.addLayout()
+                AppToolTip {
+                    visible: newLayoutButton.hovered
+                    text: newLayoutButton.text
                 }
             }
 
@@ -1221,6 +1240,8 @@ ApplicationWindow {
         title: qsTr("Grid")
         width: Math.min(400, parent.width - 32)
 
+        onOpened: layoutNameField.forceActiveFocus()
+
         function openFor(index) {
             layoutDialog.index = index
             layoutNameField.text = win.layoutNames[index]?.name ?? ""
@@ -1293,7 +1314,7 @@ ApplicationWindow {
                 textFormat: Text.PlainText
                 font.pixelSize: 14
                 color: colors.muted
-                text: qsTr("Really delete %1? The cameras stay in the sidebar and in the other grids.")
+                text: qsTr("Really delete %1? Its cameras stay in the sidebar.")
                     .arg(win.layoutLabel(removeLayoutDialog.index, win.layoutNames[removeLayoutDialog.index]?.name ?? ""))
             }
             RowLayout {
@@ -2329,7 +2350,7 @@ ApplicationWindow {
         }
 
         function previousEvent() {
-            const target = Playback.previousEvent(spans, position)
+            const target = Playback.previousEvent(spans, position, rate)
             if (target >= 0)
                 seek(target)
         }
@@ -2838,7 +2859,7 @@ ApplicationWindow {
                 Item { Layout.fillWidth: true }
 
                 AppButton {
-                    enabled: Playback.previousEvent(playback.spans, playback.position) >= 0
+                    enabled: Playback.previousEvent(playback.spans, playback.position, playback.rate) >= 0
                     display: AbstractButton.IconOnly
                     icon.source: "qrc:/rigelcam/icons/previous-event.svg"
                     text: qsTr("Previous motion event")
