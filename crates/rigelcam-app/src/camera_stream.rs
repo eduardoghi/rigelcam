@@ -947,6 +947,10 @@ fn attach_sink(
 
 /// rtspsrc answers every refusal with the same password, 8 times before it gives up. Past the few
 /// requests a good login takes, the next one is refused here and it stops.
+///
+/// rtspsrc also answers Basic, which the README tells. Refusing it here doesn't work, because the
+/// connection adds `Authorization` after this signal, so the first request with the password has
+/// already gone out when the header shows in the message, on the retry.
 fn limit_logins(src: &gst::Element) {
     let requests = Arc::new(AtomicU32::new(0));
     let logged_in = Arc::new(AtomicBool::new(false));
