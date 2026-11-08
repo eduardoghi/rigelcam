@@ -265,16 +265,19 @@ public:
     }
 
     void render(const RenderState *state) override {
-        // Before the device is locked, so leaving here can't keep the lock from the decoders.
-        Pipeline &p = pipeline();
-        if (!m_res->texture || !p.ready) {
+        // The texture first, which only exists once the device decoded a frame, so a machine
+        // without a device never builds the shaders. Both before the lock, so leaving here can't
+        // keep it from the decoders.
+        const bool ready = m_res->texture && pipeline().ready;
+        if (!ready) {
             if (!m_photoName.isEmpty()) {
                 m_photoName.clear();
                 m_link->report({});
             }
-            if (!p.ready) m_picture.failed(*m_link);
+            if (m_res->texture) m_picture.failed(*m_link);
             return;
         }
+        Pipeline &p = pipeline();
         gst_d3d11_device_lock(g_gstDevice);
         if (!m_photoName.isEmpty()) takePhoto();
 
