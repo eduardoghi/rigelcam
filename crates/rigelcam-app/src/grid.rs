@@ -25,6 +25,7 @@ pub mod qobject {
         #[qproperty(QString, recordings)]
         #[qproperty(QString, recorded_days, cxx_name = "recordedDays")]
         #[qproperty(bool, sidebar_collapsed, cxx_name = "sidebarCollapsed")]
+        #[qproperty(bool, camera_names_hidden, cxx_name = "cameraNamesHidden")]
         #[qproperty(QString, theme)]
         #[qproperty(QString, language)]
         #[qproperty(QString, app_version, cxx_name = "appVersion")]
@@ -127,6 +128,10 @@ pub mod qobject {
         #[qinvokable]
         #[cxx_name = "saveSidebarCollapsed"]
         fn save_sidebar_collapsed(self: Pin<&mut Self>, collapsed: bool);
+
+        #[qinvokable]
+        #[cxx_name = "saveCameraNamesHidden"]
+        fn save_camera_names_hidden(self: Pin<&mut Self>, hidden: bool);
 
         #[qinvokable]
         #[cxx_name = "selectLayout"]
@@ -447,6 +452,7 @@ pub struct CameraGridRust {
     cycle_seconds: i32,
     recordings: QString,
     recorded_days: QString,
+    camera_names_hidden: bool,
     /// Latest search of days, so an older one stops when another starts.
     days_search: Arc<AtomicU64>,
     /// Latest search of each channel, so an answer to an older one is ignored.
@@ -589,6 +595,7 @@ impl qobject::CameraGrid {
         let ids: Vec<u64> = list.recorders().iter().map(|r| r.id).collect();
         let cycle_seconds = list.cycle_seconds();
         let collapsed = list.sidebar_collapsed();
+        let names_hidden = list.camera_names_hidden();
         let theme = QString::from(list.theme().unwrap_or_default());
         let thread = self.qt_thread();
         list.on_save_error(move |error| {
@@ -599,6 +606,7 @@ impl qobject::CameraGrid {
         });
         self.as_mut().rust_mut().list = Some(list);
         self.as_mut().set_sidebar_collapsed(collapsed);
+        self.as_mut().set_camera_names_hidden(names_hidden);
         self.as_mut().set_theme(theme);
         self.as_mut()
             .set_cycle_seconds(i32::try_from(cycle_seconds).unwrap_or(0));
@@ -1329,6 +1337,13 @@ impl qobject::CameraGrid {
             list.set_theme(&text);
         }
         self.set_theme(theme.clone());
+    }
+
+    fn save_camera_names_hidden(mut self: Pin<&mut Self>, hidden: bool) {
+        if let Some(list) = self.as_mut().rust_mut().list.as_mut() {
+            list.set_camera_names_hidden(hidden);
+        }
+        self.set_camera_names_hidden(hidden);
     }
 
     fn save_sidebar_collapsed(mut self: Pin<&mut Self>, collapsed: bool) {

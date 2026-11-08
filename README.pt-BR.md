@@ -25,6 +25,7 @@ API HTTP da Dahua para o resto. Por isso não precisa do SDK do fabricante e rod
 - Clique duplo para abrir uma câmera sozinha no stream principal, com zoom digital e gamma
 - RTX Super Resolution e RTX HDR no Windows com placa NVIDIA RTX, desligados por padrão
 - Foto salva na resolução do vídeo
+- Nomes sobre a grade que podem ser ocultados, para câmeras que já mostram o próprio
 - Nomes dos canais lidos do gravador
 - Câmeras sem permissão para o usuário aparecem assim, sem novas tentativas
 

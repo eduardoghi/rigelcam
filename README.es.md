@@ -27,6 +27,7 @@ nativa en Linux.
 - Doble clic para abrir una cámara en el flujo principal, con zoom digital y gamma
 - RTX Super Resolution y RTX HDR en Windows con tarjeta NVIDIA RTX, desactivados por defecto
 - Foto guardada con la resolución del video
+- Nombres sobre la cuadrícula que se pueden ocultar, para cámaras que ya muestran el suyo
 - Nombres de canal leídos del grabador
 - Las cámaras sin permiso para el usuario aparecen así, sin nuevos intentos
 

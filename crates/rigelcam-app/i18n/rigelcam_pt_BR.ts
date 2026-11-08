@@ -507,5 +507,13 @@
         <source>Really delete %1? Its cameras stay in the sidebar.</source>
         <translation>Quer mesmo excluir %1? As câmeras dela continuam na barra lateral.</translation>
     </message>
+    <message>
+        <source>Show camera names</source>
+        <translation>Mostrar os nomes das câmeras</translation>
+    </message>
+    <message>
+        <source>Hide camera names</source>
+        <translation>Ocultar os nomes das câmeras</translation>
+    </message>
 </context>
 </TS>

@@ -25,6 +25,7 @@ Dahua HTTP API for everything else, so it does not need the vendor SDK and runs 
 - Double click to open a single camera on the main stream, with digital zoom and gamma
 - RTX Super Resolution and RTX HDR on Windows with an NVIDIA RTX card, off by default
 - Save a photo at the resolution of the video
+- Hide the names over the grid, for cameras that print their own
 - Channel names read from the recorder
 - Cameras the user has no permission for are shown as such, without trying again
 

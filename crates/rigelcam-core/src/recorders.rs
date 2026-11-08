@@ -278,6 +278,9 @@ struct Saved {
     cycle_seconds: u32,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     sidebar_collapsed: bool,
+    /// Many cameras print their name on the picture, which the label of the grid would repeat.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    hide_camera_names: bool,
     /// "pt_BR", "en" or "es", or nothing to follow the system.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     language: Option<String>,
@@ -660,6 +663,15 @@ impl RecorderList {
         self.save_later();
     }
 
+    pub fn camera_names_hidden(&self) -> bool {
+        self.saved.hide_camera_names
+    }
+
+    pub fn set_camera_names_hidden(&mut self, hidden: bool) {
+        self.saved.hide_camera_names = hidden;
+        self.save_later();
+    }
+
     /// Where a save done by `set_layout` and the other settings reports its failure, on the
     /// thread that saves. Without it the failure is lost.
     pub fn on_save_error(&self, handler: impl Fn(Error) + Send + Sync + 'static) {
@@ -1006,10 +1018,12 @@ mod tests {
         list.remove_layout(0);
         assert_eq!(list.layouts().len(), 1);
         list.set_cycle_seconds(30);
+        list.set_camera_names_hidden(true);
         drop(list);
         let reopened = RecorderList::open(path).unwrap();
         assert_eq!(reopened.layouts()[0].name, "Pátio");
         assert_eq!(reopened.cycle_seconds(), 30);
+        assert!(reopened.camera_names_hidden());
     }
 
     #[test]

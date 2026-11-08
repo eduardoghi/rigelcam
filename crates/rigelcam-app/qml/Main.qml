@@ -909,6 +909,25 @@ ApplicationWindow {
                 }
             }
 
+            AppButton {
+                id: namesButton
+                visible: win.recorderList.length > 0 && !win.inRecordings
+                display: AbstractButton.IconOnly
+                icon.source: "qrc:/rigelcam/icons/names.svg"
+                text: grid.cameraNamesHidden ? qsTr("Show camera names") : qsTr("Hide camera names")
+                implicitWidth: 34
+                leftPadding: 9
+                rightPadding: 9
+                // Lit while the names show, like the size of the grid in use.
+                fill: grid.cameraNamesHidden ? "transparent" : colors.raised
+                contentColor: grid.cameraNamesHidden ? colors.muted : colors.text
+                onClicked: grid.saveCameraNamesHidden(!grid.cameraNamesHidden)
+                AppToolTip {
+                    visible: namesButton.hovered
+                    text: namesButton.text
+                }
+            }
+
             // One button per grid size, each drawn as its grid.
             Row {
                 visible: win.recorderList.length > 0 && !win.inRecordings
@@ -1973,7 +1992,9 @@ ApplicationWindow {
                 required property string key
                 required property string label
                 readonly property int square: win.gridKeys.indexOf(key)
+                // Hidden names still show under the mouse, to tell which camera a square is.
                 visible: square >= 0 && win.zoomed === "" && !win.inRecordings
+                    && (!grid.cameraNamesHidden || cameraArea.hoveredKey === key)
                 x: (square % win.cols) * (cameraArea.cellWidth + 2) + 6
                 y: Math.floor(square / win.cols) * (cameraArea.cellHeight + 2) + 6
                 width: Math.min(cameraName.implicitWidth + 14,

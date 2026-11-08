@@ -4,6 +4,16 @@ User-visible changes, newest first.
 
 ## [Unreleased]
 
+### Added
+
+- A button in the toolbar hides the names over the cameras of the grid, for cameras that print
+  their own on the picture. A hidden name still shows under the mouse.
+
+### Changed
+
+- A more sober look, with neutral gray surfaces and a teal accent, smaller corners, live and
+  recordings as two halves of one control and the grid size as a row of buttons.
+
 ## [0.1.4] (2026-11-07)
 
 ### Added
