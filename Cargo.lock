@@ -1895,6 +1895,7 @@ dependencies = [
  "gstreamer-video",
  "pkg-config",
  "rigelcam-core",
+ "serde",
  "serde_json",
  "thiserror 2.0.21",
  "ureq",

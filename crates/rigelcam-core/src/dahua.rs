@@ -149,7 +149,7 @@ impl LoginGate {
 }
 
 /// A continuous recording of a day, in seconds since its midnight on the clock of the recorder.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct Span {
     pub start: u32,
     pub end: u32,

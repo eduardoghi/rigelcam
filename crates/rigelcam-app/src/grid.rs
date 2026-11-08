@@ -247,7 +247,8 @@ use cxx_qt::{CxxQtThread, CxxQtType, Threading};
 use cxx_qt_lib::QString;
 use rigelcam_core::clips;
 use rigelcam_core::dahua::{
-    days_in_month, is_clock, is_date, Channel, Client, Error as RecorderError, LoginGate, Stream,
+    days_in_month, is_clock, is_date, Channel, Client, Error as RecorderError, LoginGate, Span,
+    Stream,
 };
 use rigelcam_core::layout::{CameraId, Layout};
 use rigelcam_core::recorders::{
@@ -277,6 +278,17 @@ extern "C" {
 
 extern "C" fn destroy_stream(stream: *mut c_void) {
     drop(unsafe { Box::from_raw(stream as *mut CameraStream) });
+}
+
+/// The answer to a search of recordings, as QML reads it from the `recordings` property.
+#[derive(serde::Serialize)]
+struct Recordings<'a> {
+    search: u64,
+    recorder: i32,
+    channel: i32,
+    date: &'a str,
+    now: &'a str,
+    spans: &'a [Span],
 }
 
 const REFUSED_MESSAGE: &str = "The recorder refused the user or password.";
@@ -1031,19 +1043,17 @@ impl qobject::CameraGrid {
                 }
                 match result {
                     Ok((now, day, spans)) => {
-                        let spans: Vec<_> = spans
-                            .iter()
-                            .map(|s| json!({"start": s.start, "end": s.end, "event": s.event}))
-                            .collect();
-                        let text = json!({
-                            "search": search,
-                            "recorder": recorder,
-                            "channel": channel,
-                            "date": day,
-                            "now": now,
-                            "spans": spans,
+                        // Straight to text, since a day can hold hundreds of spans and this runs
+                        // again every minute for each camera of today.
+                        let text = serde_json::to_string(&Recordings {
+                            search,
+                            recorder,
+                            channel,
+                            date: &day,
+                            now: &now,
+                            spans: &spans,
                         })
-                        .to_string();
+                        .unwrap_or_default();
                         grid.set_recordings(QString::from(text.as_str()));
                     }
                     Err(error) => {
@@ -1665,6 +1675,32 @@ fn recorder_cameras(recorder: u64, numbers: &[u32]) -> Vec<CameraId> {
 mod tests {
     use super::*;
     use std::cell::Cell;
+
+    #[test]
+    fn recordings_reach_qml_in_the_same_shape() {
+        let spans = [Span {
+            start: 0,
+            end: 60,
+            event: true,
+        }];
+        let text = serde_json::to_string(&Recordings {
+            search: 3,
+            recorder: 1,
+            channel: 2,
+            date: "2026-11-08",
+            now: "2026-11-08 10:00:00",
+            spans: &spans,
+        })
+        .unwrap();
+        let expected = json!({
+            "search": 3, "recorder": 1, "channel": 2, "date": "2026-11-08",
+            "now": "2026-11-08 10:00:00", "spans": [{"start": 0, "end": 60, "event": true}],
+        });
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&text).unwrap(),
+            expected
+        );
+    }
 
     fn connection() -> Connection {
         let address = Address::parse("127.0.0.1", None, None).unwrap();
