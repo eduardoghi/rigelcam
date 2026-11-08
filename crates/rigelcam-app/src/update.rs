@@ -82,12 +82,20 @@ pub fn install(manifest: &Manifest, progress: &mut dyn FnMut(f64)) -> Result<(),
         std::process::id()
     ));
     let mut file = std::fs::File::create_new(&path).map_err(|e| failed(&e))?;
-    file.write_all(&installer).map_err(|e| failed(&e))?;
-    drop(file);
-    Command::new(&path)
-        .args(["/SILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/update=1"])
-        .spawn()
-        .map_err(|e| failed(&e))?;
+    let started = file
+        .write_all(&installer)
+        .and_then(|()| {
+            drop(file);
+            Command::new(&path)
+                .args(["/SILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/update=1"])
+                .spawn()
+        })
+        .map(drop);
+    // The name is the same on the next try, which create_new would refuse while this file stays.
+    if let Err(error) = started {
+        let _ = std::fs::remove_file(&path);
+        return Err(failed(&error));
+    }
     Ok(())
 }
 
