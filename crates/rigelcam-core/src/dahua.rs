@@ -338,7 +338,7 @@ impl Client {
     /// only in the main stream, and asking for the substream is an error.
     pub fn playback_url(&self, channel: u32, date: &str, seconds: u32) -> String {
         let day = date.replace('-', "_");
-        let (hours, minutes, seconds) = (seconds / 3600, seconds / 60 % 60, seconds % 60);
+        let (hours, minutes, seconds) = crate::clock_parts(seconds);
         format!(
             "rtsp://{}:{}/cam/playback?channel={channel}\
              &starttime={day}_{hours:02}_{minutes:02}_{seconds:02}&endtime={day}_23_59_59",
@@ -357,7 +357,7 @@ impl Client {
         end: u32,
     ) -> Result<Box<dyn Read + Send>, Error> {
         let clock = |seconds: u32| {
-            let (hours, minutes, seconds) = (seconds / 3600, seconds / 60 % 60, seconds % 60);
+            let (hours, minutes, seconds) = crate::clock_parts(seconds);
             format!("{hours:02}:{minutes:02}:{seconds:02}")
         };
         let path = format!(
@@ -810,9 +810,11 @@ fn channel_of(index: &str) -> Option<u32> {
 impl RecordedFile {
     /// The part of this file on a day, since a file can cross midnight.
     fn span_on(&self, date: &str) -> Option<Span> {
-        let day_of = |time: &str| time.split(' ').next().unwrap_or_default().to_owned();
-        // The format sorts like the dates it holds.
-        if day_of(&self.end).as_str() < date || day_of(&self.start).as_str() > date {
+        fn day_of(time: &str) -> &str {
+            time.split(' ').next().unwrap_or_default()
+        }
+        // The format sorts like the dates it holds, and comparing borrows them without a copy.
+        if day_of(&self.end) < date || day_of(&self.start) > date {
             return None;
         }
         let on_day = |time: &str| time.starts_with(date);

@@ -14,7 +14,7 @@ pub fn folder() -> PathBuf {
 }
 
 fn clock(seconds: u32) -> String {
-    let (hours, minutes, seconds) = (seconds / 3600, seconds / 60 % 60, seconds % 60);
+    let (hours, minutes, seconds) = crate::clock_parts(seconds);
     format!("{hours:02}-{minutes:02}-{seconds:02}")
 }
 
