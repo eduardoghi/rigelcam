@@ -1,7 +1,9 @@
 //! The saved recorders. Addresses go in a JSON file, passwords in the system keyring.
 
+use std::collections::HashSet;
 use std::fs::{self, File, TryLockError};
 use std::io::{self, Write};
+use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
@@ -296,6 +298,9 @@ fn is_zero<T: Default + PartialEq>(value: &T) -> bool {
     *value == T::default()
 }
 
+/// Highest id a recorder can have, since the interface takes ids as 32 bit signed numbers.
+const MAX_RECORDER_ID: u64 = i32::MAX as u64;
+
 /// Longest name of a grid, in characters.
 const MAX_LAYOUT_NAME: usize = 60;
 /// Columns of a new grid, which grows as cameras come in.
@@ -355,7 +360,10 @@ impl SaveQueue {
             if let Some(bytes) = state.pending.take() {
                 state.saving = true;
                 drop(state);
-                let result = save(path, &bytes);
+                // A panic here would end the thread with `saving` still set, and every later save
+                // would wait for it, or never be made, without a word.
+                let result = panic::catch_unwind(AssertUnwindSafe(|| save(path, &bytes)))
+                    .unwrap_or_else(|_| Err(io::Error::other("the save stopped").into()));
                 state = self.lock();
                 state.saving = false;
                 self.changed.notify_all();
@@ -363,7 +371,7 @@ impl SaveQueue {
                     let handler = state.on_error.clone();
                     drop(state);
                     if let Some(handler) = handler {
-                        handler(error);
+                        let _ = panic::catch_unwind(AssertUnwindSafe(|| handler(error)));
                     }
                     state = self.lock();
                 }
@@ -447,6 +455,15 @@ impl RecorderList {
             Err(e) if e.kind() == io::ErrorKind::NotFound => Saved::default(),
             Err(e) => return Err(e.into()),
         };
+        // Only a file edited by hand has these. Two recorders with one id would share a password in
+        // the keyring, and an id past what the interface takes can't be told apart there.
+        let mut seen = HashSet::new();
+        saved
+            .recorders
+            .retain(|r| (1..=MAX_RECORDER_ID).contains(&r.id) && seen.insert(r.id));
+        if saved.next_id > MAX_RECORDER_ID {
+            saved.next_id = 0;
+        }
         if saved.layouts.is_empty() {
             if let Some(layout) = saved.layout.take() {
                 saved.layouts.push(NamedLayout {
@@ -735,7 +752,9 @@ impl Drop for RecorderList {
 fn save(path: &Path, bytes: &[u8]) -> Result<(), Error> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
-        restrict_folder(parent)?;
+        // A folder on a share or a file system without Unix permissions refuses this, and the
+        // list still has to be saved there.
+        let _ = restrict_folder(parent);
     }
     write_atomically(path, bytes)
 }
@@ -1094,6 +1113,31 @@ mod tests {
         assert_eq!(list.cycle_seconds(), 30);
         list.set_cycle_seconds(15);
         assert_eq!(list.cycle_seconds(), 0);
+    }
+
+    #[test]
+    fn recorders_with_a_repeated_or_impossible_id_are_left_out() {
+        let path = temp_path("bad-ids");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let recorder = |id: u64, name: &str| {
+            format!(r#"{{"id":{id},"name":"{name}","host":"192.0.2.1","user":"u"}}"#)
+        };
+        let recorders = [
+            recorder(3, "A"),
+            recorder(3, "B"),
+            recorder(0, "C"),
+            recorder(u64::MAX, "D"),
+        ]
+        .join(",");
+        fs::write(
+            &path,
+            format!(r#"{{"recorders":[{recorders}],"next_id":18446744073709551615}}"#),
+        )
+        .unwrap();
+        let mut list = RecorderList::open(path).unwrap();
+        let names: Vec<_> = list.recorders().iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, ["A"]);
+        assert_eq!(list.reserve_id(), 4);
     }
 
     #[test]
