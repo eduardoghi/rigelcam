@@ -999,6 +999,12 @@ impl qobject::CameraGrid {
             json!({"search": search, "recorder": recorder, "channel": channel, "error": error})
                 .to_string()
         };
+        // Only the interface calls this, which never sends a channel below 1.
+        if channel_number(channel).is_none() {
+            let text = failure("invalid channel".to_owned());
+            self.set_recordings(QString::from(text.as_str()));
+            return;
+        }
         let Some(connection) = self.connections.get(&(recorder as u64)).cloned() else {
             let text = failure(message("The recorder is not connected.", &[]));
             self.set_recordings(QString::from(text.as_str()));
@@ -1202,6 +1208,9 @@ impl qobject::CameraGrid {
     }
 
     fn search_recorded_days(self: Pin<&mut Self>, recorder: i32, channel: i32, month: &QString) {
+        if channel_number(channel).is_none() {
+            return;
+        }
         let Some(connection) = self.connections.get(&(recorder as u64)).cloned() else {
             return;
         };
@@ -1621,7 +1630,7 @@ impl qobject::CameraGrid {
         let source = self
             .connections
             .get(&(recorder as u64))
-            .filter(|_| visible && !self.video_unavailable)
+            .filter(|_| visible && !self.video_unavailable && channel_number(channel).is_some())
             .map(|connection| {
                 let kind = if main_stream {
                     Stream::Main

@@ -786,12 +786,21 @@ struct RecordedFile {
     event: bool,
 }
 
+/// Seconds after midnight of a time such as `2026-10-30 13:05:00`. 24:00:00 is the end of the day,
+/// and anything past it isn't a time.
 fn seconds_of(time: &str) -> Option<u32> {
     let (_, clock) = time.split_once(' ')?;
     let mut parts = clock.split(':').map(|part| part.parse::<u8>().ok());
     let (hours, minutes, seconds) = (parts.next()??, parts.next()??, parts.next()??);
-    (hours <= 24 && minutes < 60 && seconds < 60)
-        .then(|| u32::from(hours) * 3600 + u32::from(minutes) * 60 + u32::from(seconds))
+    let total = u32::from(hours) * 3600 + u32::from(minutes) * 60 + u32::from(seconds);
+    (minutes < 60 && seconds < 60 && total <= 86_400).then_some(total)
+}
+
+/// The channel number of an index the recorder counts from 0, within the channels a recorder has.
+fn channel_of(index: &str) -> Option<u32> {
+    let index = index.parse::<u32>().ok()?;
+    // A closure, since then_some would add 1 before the check and overflow on u32::MAX.
+    ((index as usize) < MAX_CHANNELS).then(|| index + 1)
 }
 
 impl RecordedFile {
@@ -877,7 +886,7 @@ fn parse_channel_titles(body: &str) -> Vec<Channel> {
             Some(Channel {
                 camera: None,
                 main_size: None,
-                number: index.parse::<u32>().ok()? + 1,
+                number: channel_of(index)?,
                 name,
             })
         })
@@ -898,15 +907,11 @@ fn parse_main_sizes(body: &str) -> HashMap<u32, (u32, u32)> {
         else {
             continue;
         };
-        let parsed =
-            index
-                .parse::<u32>()
-                .ok()
-                .zip(size.split_once('x').and_then(|(width, height)| {
-                    Some((width.parse::<u32>().ok()?, height.parse::<u32>().ok()?))
-                }));
-        if let Some((index, (width, height))) = parsed.filter(|(_, (_, height))| *height > 0) {
-            sizes.insert(index + 1, (width, height));
+        let parsed = channel_of(index).zip(size.split_once('x').and_then(|(width, height)| {
+            Some((width.parse::<u32>().ok()?, height.parse::<u32>().ok()?))
+        }));
+        if let Some((channel, (width, height))) = parsed.filter(|(_, (_, height))| *height > 0) {
+            sizes.insert(channel, (width, height));
         }
     }
     sizes
@@ -934,7 +939,7 @@ fn parse_cameras(body: &str, recorder: &[Ipv4Addr]) -> HashMap<u32, Camera> {
         let Some((index, field)) = field.split_once('.') else {
             continue;
         };
-        let Ok(channel) = index.parse::<u32>().map(|index| index + 1) else {
+        let Some(channel) = channel_of(index) else {
             continue;
         };
         if let Some(host) = field.strip_prefix("Address=") {
@@ -962,7 +967,7 @@ fn parse_disabled_cameras(body: &str) -> Vec<u32> {
                 .trim_end()
                 .strip_prefix("table.RemoteDevice.uuid:System_CONFIG_NETCAMERA_INFO_")?
                 .strip_suffix(".Enable=false")?;
-            Some(index.parse::<u32>().ok()? + 1)
+            channel_of(index)
         })
         .collect()
 }
@@ -1016,6 +1021,15 @@ mod tests {
             event: false,
         };
         assert_eq!(file.span_on("2026-10-30"), None);
+    }
+
+    #[test]
+    fn times_and_channels_past_their_range_are_left_out() {
+        assert_eq!(seconds_of("2026-10-30 24:00:00"), Some(86_400));
+        assert_eq!(seconds_of("2026-10-30 24:59:59"), None);
+        assert_eq!(channel_of("0"), Some(1));
+        assert_eq!(channel_of("4294967295"), None);
+        assert_eq!(channel_of(&MAX_CHANNELS.to_string()), None);
     }
 
     #[test]
