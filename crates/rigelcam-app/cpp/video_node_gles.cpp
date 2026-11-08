@@ -284,7 +284,11 @@ private:
             m_res->generation = fr.generation;
         }
         struct stat st {};
-        if (fstat(fr.fds[0], &st) != 0) return 0;
+        if (fstat(fr.fds[0], &st) != 0) {
+            // Without this the tile would stay black while the stream counts as playing.
+            if (m_picture.failed(*m_link)) fprintf(stderr, "a frame of the decoder couldn't be read\n");
+            return 0;
+        }
         auto it = m_res->cache.find(st.st_ino);
         if (it != m_res->cache.end()) return it->second.texture;
 

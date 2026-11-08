@@ -129,6 +129,10 @@ struct Pipeline {
     ComPtr<ID3D11RasterizerState> plain, scissored;
     ComPtr<ID3D11DepthStencilState> noDepth;
     ComPtr<ID3D11BlendState> opaque;
+    bool built = false;
+    /// False when a shader didn't compile, which only a missing d3dcompiler or a broken driver
+    /// causes. Nothing can be drawn then, and the items say so.
+    bool ready = false;
 };
 
 ComPtr<ID3DBlob> compile(const char *entry, const char *target) {
@@ -141,13 +145,17 @@ ComPtr<ID3DBlob> compile(const char *entry, const char *target) {
 // Shared by all items, which draw on the same thread and device.
 Pipeline &pipeline() {
     static Pipeline p;
-    if (!p.vs) {
+    if (!p.built) {
+        // Once, since a shader that failed fails the same way on every frame.
+        p.built = true;
         auto vs = compile("vs", "vs_5_0");
         auto ps = compile("ps", "ps_5_0");
-        g_device->CreateVertexShader(vs->GetBufferPointer(), vs->GetBufferSize(), nullptr, &p.vs);
-        g_device->CreatePixelShader(ps->GetBufferPointer(), ps->GetBufferSize(), nullptr, &p.ps);
         auto vsFrame = compile("vsFrame", "vs_5_0");
         auto psFrame = compile("psFrame", "ps_5_0");
+        if (!vs || !ps || !vsFrame || !psFrame) return p;
+        p.ready = true;
+        g_device->CreateVertexShader(vs->GetBufferPointer(), vs->GetBufferSize(), nullptr, &p.vs);
+        g_device->CreatePixelShader(ps->GetBufferPointer(), ps->GetBufferSize(), nullptr, &p.ps);
         g_device->CreateVertexShader(vsFrame->GetBufferPointer(), vsFrame->GetBufferSize(), nullptr, &p.vsFrame);
         g_device->CreatePixelShader(psFrame->GetBufferPointer(), psFrame->GetBufferSize(), nullptr, &p.psFrame);
         D3D11_SAMPLER_DESC sampler{};
@@ -279,6 +287,10 @@ public:
         const D3D11_VIEWPORT viewport{0, 0, float(desc.Width), float(desc.Height), 0, 1};
         g_context->RSSetViewports(1, &viewport);
         Pipeline &p = pipeline();
+        if (!p.ready) {
+            m_picture.failed(*m_link);
+            return;
+        }
         if (state->scissorEnabled()) {
             // The scene graph counts from the bottom of the target.
             const QRect clip = state->scissorRect();
@@ -306,9 +318,13 @@ private:
     void copy(const RigelFrame &frame) {
         GstBuffer *buffer = gst_sample_get_buffer(static_cast<GstSample *>(frame.sample));
         GstMemory *memory = buffer ? gst_buffer_peek_memory(buffer, 0) : nullptr;
-        if (!memory || !gst_is_d3d11_memory(memory)) return;
         GstMapInfo info;
-        if (!gst_memory_map(memory, &info, GstMapFlags(GST_MAP_READ | GST_MAP_D3D11))) return;
+        // Without this the tile would stay black while the stream counts as playing.
+        if (!memory || !gst_is_d3d11_memory(memory) ||
+            !gst_memory_map(memory, &info, GstMapFlags(GST_MAP_READ | GST_MAP_D3D11))) {
+            if (m_picture.failed(*m_link)) fprintf(stderr, "a frame of the decoder couldn't be read\n");
+            return;
+        }
         auto *source = reinterpret_cast<ID3D11Resource *>(info.data);
         const UINT subresource = gst_d3d11_memory_get_subresource_index(GST_D3D11_MEMORY_CAST(memory));
         ensureTexture(source);
