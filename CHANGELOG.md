@@ -4,6 +4,8 @@ User-visible changes, newest first.
 
 ## [Unreleased]
 
+## [0.1.5] (2026-11-08)
+
 ### Added
 
 - A button in the toolbar hides the names over the cameras of the grid, for cameras that print
