@@ -879,10 +879,11 @@ fn feed(
 }
 
 fn decoder_elements(codec: Codec) -> (&'static str, &'static str) {
-    match codec {
-        Codec::H264 => ("h264parse", H264_DECODER),
-        Codec::H265 => ("h265parse", H265_DECODER),
-    }
+    let decoder = match codec {
+        Codec::H264 => H264_DECODER,
+        Codec::H265 => H265_DECODER,
+    };
+    (export::parser_of(codec), decoder)
 }
 
 fn build_stretch_pipeline(
@@ -893,10 +894,6 @@ fn build_stretch_pipeline(
     codec: Codec,
 ) -> Option<(gst::Pipeline, AppSrc)> {
     let (parse, decoder) = decoder_elements(codec);
-    let caps = match codec {
-        Codec::H264 => "video/x-h264",
-        Codec::H265 => "video/x-h265",
-    };
     let description = format!(
         "appsrc name=video format=time block=true max-bytes=8388608 ! {parse} ! {decoder} \
          ! {DECODED_CAPS} ! appsink name=sink enable-last-sample=false sync=true max-buffers=1"
@@ -907,12 +904,7 @@ fn build_stretch_pipeline(
         .ok()?;
     share_decoder_device(&pipeline);
     let video = pipeline.by_name("video")?.downcast::<AppSrc>().ok()?;
-    video.set_caps(Some(
-        &gst::Caps::builder(caps)
-            .field("stream-format", "byte-stream")
-            .field("alignment", "au")
-            .build(),
-    ));
+    video.set_caps(Some(&export::frame_caps(codec)));
     let sink = pipeline.by_name("sink")?.downcast::<AppSink>().ok()?;
     let time_scale = f64::from(source.rate.max(1));
     attach_sink(&sink, shared, source, generation, progress, time_scale);
@@ -969,6 +961,20 @@ fn attach_sink(
     );
 }
 
+/// An RTSP source over TCP with the login of the recorder and the limit on its tries.
+fn rtsp_source(url: &str, user: &str, password: &str) -> Option<gst::Element> {
+    let src = gst::ElementFactory::make("rtspsrc")
+        .property("location", url)
+        .property_from_str("protocols", "tcp")
+        // Through properties, so the password stays out of the URL and of the logs.
+        .property("user-id", user)
+        .property("user-pw", password)
+        .build()
+        .ok()?;
+    limit_logins(&src);
+    Some(src)
+}
+
 /// rtspsrc answers every refusal with the same password, 8 times before it gives up. Past the few
 /// requests a good login takes, the next one is refused here and it stops.
 ///
@@ -1007,16 +1013,9 @@ pub enum Access {
 /// Asks for a recording to learn the permission of a channel. Waits for the video, so a refusal at
 /// any step of the request counts. Stops waiting once `cancel` is set.
 pub fn recording_access(url: &str, user: &str, password: &str, cancel: &AtomicBool) -> Access {
-    let Ok(src) = gst::ElementFactory::make("rtspsrc")
-        .property("location", url)
-        .property_from_str("protocols", "tcp")
-        .property("user-id", user)
-        .property("user-pw", password)
-        .build()
-    else {
+    let Some(src) = rtsp_source(url, user, password) else {
         return Access::Unknown;
     };
-    limit_logins(&src);
     let pipeline = gst::Pipeline::new();
     if pipeline.add(&src).is_err() {
         return Access::Unknown;
@@ -1087,18 +1086,9 @@ fn build_pipeline(
 ) -> Option<gst::Pipeline> {
     let pipeline = gst::Pipeline::new();
     share_decoder_device(&pipeline);
-    let src = gst::ElementFactory::make("rtspsrc")
-        .property("location", source.url.as_str())
-        .property_from_str("protocols", "tcp")
-        .property("latency", 300u32)
-        // Through properties, so the password stays out of the URL and of the logs.
-        .property("user-id", source.user.as_str())
-        .property("user-pw", source.password.as_str())
-        .build()
-        .ok()?;
+    let src = rtsp_source(&source.url, &source.user, &source.password)?;
+    src.set_property("latency", 300u32);
     pipeline.add(&src).ok()?;
-
-    limit_logins(&src);
 
     src.connect("select-stream", false, |values| {
         let media = values[2].get::<gst::Caps>().ok().and_then(|caps| {

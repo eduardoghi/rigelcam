@@ -140,18 +140,35 @@ struct Muxer {
     bus: gst::Bus,
 }
 
+/// The parser of a codec, which both the export and the playback put after the frames.
+pub(crate) fn parser_of(codec: Codec) -> &'static str {
+    match codec {
+        Codec::H264 => "h264parse",
+        Codec::H265 => "h265parse",
+    }
+}
+
+/// Caps of the frames read from a recording, one access unit at a time with start codes.
+pub(crate) fn frame_caps(codec: Codec) -> gst::Caps {
+    let name = match codec {
+        Codec::H264 => "video/x-h264",
+        Codec::H265 => "video/x-h265",
+    };
+    gst::Caps::builder(name)
+        .field("stream-format", "byte-stream")
+        .field("alignment", "au")
+        .build()
+}
+
 impl Muxer {
     fn new(codec: Codec, path: &Path) -> Result<Self, Error> {
-        let (parser, caps) = match codec {
-            Codec::H264 => ("h264parse", "video/x-h264"),
-            Codec::H265 => ("h265parse", "video/x-h265"),
-        };
+        let parser = parser_of(codec);
         let description =
             format!("appsrc name=source format=time ! {parser} ! mp4mux ! filesink name=sink");
-        Self::open(&description, caps, path)
+        Self::open(&description, codec, path)
     }
 
-    fn open(description: &str, caps: &str, path: &Path) -> Result<Self, Error> {
+    fn open(description: &str, codec: Codec, path: &Path) -> Result<Self, Error> {
         let failed = |error: gst::glib::Error| Error::Write(error.to_string());
         let pipeline = gst::parse::launch(description)
             .map_err(failed)?
@@ -162,12 +179,7 @@ impl Muxer {
         let source = element("source")
             .downcast::<AppSrc>()
             .expect("created as appsrc");
-        source.set_caps(Some(
-            &gst::Caps::builder(caps)
-                .field("stream-format", "byte-stream")
-                .field("alignment", "au")
-                .build(),
-        ));
+        source.set_caps(Some(&frame_caps(codec)));
         let bus = pipeline.bus().expect("pipelines have a bus");
         let muxer = Self {
             pipeline,
@@ -350,7 +362,7 @@ mod tests {
 
     fn muxer(pipeline: &str, path: &str) -> Muxer {
         gst::init().unwrap();
-        Muxer::open(pipeline, "video/x-h264", Path::new(path)).unwrap()
+        Muxer::open(pipeline, Codec::H264, Path::new(path)).unwrap()
     }
 
     #[cfg(target_os = "linux")]
