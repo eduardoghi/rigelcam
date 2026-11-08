@@ -276,6 +276,16 @@ extern "C" {
     fn rigel_graphics_ready() -> bool;
 }
 
+/// The stream of an item, made the first time it is asked for.
+unsafe fn stream_of(item: *mut c_void) -> *mut CameraStream {
+    let mut stream = rigel_item_stream(item) as *mut CameraStream;
+    if stream.is_null() {
+        stream = Box::into_raw(Box::new(CameraStream::new(item)));
+        rigel_item_set_stream(item, stream as *mut c_void, destroy_stream);
+    }
+    stream
+}
+
 extern "C" fn destroy_stream(stream: *mut c_void) {
     drop(unsafe { Box::from_raw(stream as *mut CameraStream) });
 }
@@ -423,6 +433,15 @@ struct Connection {
     allowed_recordings: Arc<Mutex<HashMap<u32, Instant>>>,
     direct_cameras: Arc<DirectCameras>,
     sessions_refused: Arc<Mutex<bool>>,
+}
+
+impl CameraGridRust {
+    /// Drops the failure and the retries of a recorder, for one that answered or starts over.
+    fn forget_retries(&mut self, id: u64) {
+        self.failures.remove(&id);
+        self.retry_delays.remove(&id);
+        self.answered_retries.remove(&id);
+    }
 }
 
 impl Connection {
@@ -765,10 +784,7 @@ impl qobject::CameraGrid {
     /// Starts connecting to a recorder from scratch. With `fill_empty_grid`, an empty grid takes
     /// its cameras, which is what someone adding a recorder expects to see.
     fn connect_recorder(mut self: Pin<&mut Self>, id: u64, fill_empty_grid: bool) {
-        let mut state = self.as_mut().rust_mut();
-        state.failures.remove(&id);
-        state.retry_delays.remove(&id);
-        state.answered_retries.remove(&id);
+        self.as_mut().rust_mut().forget_retries(id);
         self.as_mut().publish_tree();
         self.attempt_recorder(id, fill_empty_grid);
     }
@@ -833,9 +849,7 @@ impl qobject::CameraGrid {
                 match result {
                     Ok((connection, channels)) => {
                         let mut state = grid.as_mut().rust_mut();
-                        state.failures.remove(&id);
-                        state.retry_delays.remove(&id);
-                        state.answered_retries.remove(&id);
+                        state.forget_retries(id);
                         state.connections.insert(id, connection);
                         state.channels.insert(id, channels.clone());
                         // Before the tree, so no camera outside the grid gets opened.
@@ -880,11 +894,10 @@ impl qobject::CameraGrid {
 
     /// Starts the grid with the channels of a recorder the first time, and fixes the saved one.
     fn merge_layout(self: Pin<&mut Self>, recorder: u64, channels: &[Channel], fill_empty: bool) {
-        let numbers: Vec<u32> = channels.iter().map(|c| c.number).collect();
         let saved = self.list.as_ref().and_then(|list| list.layout().cloned());
         let mut layout = match saved.clone() {
             Some(layout) if !(fill_empty && layout.is_empty()) => layout,
-            _ => Layout::fitting(&recorder_cameras(recorder, &numbers)),
+            _ => Layout::fitting(&recorder_cameras(recorder, channels)),
         };
         layout.repair();
         if saved.as_ref() != Some(&layout) {
@@ -1001,10 +1014,9 @@ impl qobject::CameraGrid {
         let Some(channels) = self.channels.get(&id) else {
             return;
         };
-        let numbers: Vec<u32> = channels.iter().map(|c| c.number).collect();
-        let cameras = numbers.len();
-        self.as_mut()
-            .save_layout(Layout::fitting(&recorder_cameras(id, &numbers)));
+        let cameras = channels.len();
+        let fitted = Layout::fitting(&recorder_cameras(id, channels));
+        self.as_mut().save_layout(fitted);
         let capacity = Layout::capacity();
         let notice = if cameras > capacity {
             message(
@@ -1049,11 +1061,7 @@ impl qobject::CameraGrid {
                 if !date.is_empty() && !is_date(&date) {
                     return Err(RecorderError::Unexpected(format!("day {date}")));
                 }
-                let day = if date.is_empty() {
-                    now.split(' ').next().unwrap_or_default().to_owned()
-                } else {
-                    date
-                };
+                let day = if date.is_empty() { day_of(&now) } else { date };
                 let spans = client.recordings(channel as u32, &day)?;
                 Ok((now, day, spans))
             });
@@ -1257,7 +1265,7 @@ impl qobject::CameraGrid {
                 Err(error) => return refused(error),
             };
             let today = match client.clock() {
-                Ok(now) => now.split(' ').next().unwrap_or_default().to_owned(),
+                Ok(now) => day_of(&now),
                 Err(error @ RecorderError::Unauthorized) => return refused(error),
                 Err(_) => String::new(),
             };
@@ -1343,12 +1351,7 @@ impl qobject::CameraGrid {
             })),
             direct: None,
         };
-        let item = item as *mut c_void;
-        let mut stream = rigel_item_stream(item) as *mut CameraStream;
-        if stream.is_null() {
-            stream = Box::into_raw(Box::new(CameraStream::new(item)));
-            rigel_item_set_stream(item, stream as *mut c_void, destroy_stream);
-        }
+        let stream = stream_of(item as *mut c_void);
         (*stream).set_paused(false);
         (*stream).set_source(Some(source));
         attempt
@@ -1474,12 +1477,7 @@ impl qobject::CameraGrid {
         }
         let Some(target) = (match id {
             Some(id) => Some(id),
-            None => self
-                .as_mut()
-                .rust_mut()
-                .list
-                .as_mut()
-                .map(|list| list.reserve_id()),
+            None => self.as_mut().with_list(RecorderList::reserve_id),
         }) else {
             return;
         };
@@ -1519,10 +1517,7 @@ impl qobject::CameraGrid {
                 let label = if name.trim().is_empty() { model } else { name };
                 let saved = grid
                     .as_mut()
-                    .rust_mut()
-                    .list
-                    .as_mut()
-                    .map(|list| list.store(target, label.trim(), &address, &user));
+                    .with_list(|list| list.store(target, label.trim(), &address, &user));
                 let Some(saved) = saved else {
                     return;
                 };
@@ -1554,9 +1549,7 @@ impl qobject::CameraGrid {
         let mut state = self.rust_mut();
         state.connections.remove(&id);
         state.channels.remove(&id);
-        state.failures.remove(&id);
-        state.retry_delays.remove(&id);
-        state.answered_retries.remove(&id);
+        state.forget_retries(id);
         // Bumped and never reset, so a try still on its way can't pass for a later one.
         *state.attempts.entry(id).or_default() += 1;
     }
@@ -1596,13 +1589,7 @@ impl qobject::CameraGrid {
         password: Previous,
         password_removed: bool,
     ) {
-        let Some(result) = self
-            .as_mut()
-            .rust_mut()
-            .list
-            .as_mut()
-            .map(|list| list.forget(id))
-        else {
+        let Some(result) = self.as_mut().with_list(|list| list.forget(id)) else {
             return;
         };
         if let Err(error) = result {
@@ -1638,15 +1625,11 @@ impl qobject::CameraGrid {
         main_stream: bool,
     ) {
         let item = item as *mut c_void;
-        let mut stream = rigel_item_stream(item) as *mut CameraStream;
-        if stream.is_null() {
-            // Each stream has a thread, which a camera outside the grid doesn't need.
-            if !visible {
-                return;
-            }
-            stream = Box::into_raw(Box::new(CameraStream::new(item)));
-            rigel_item_set_stream(item, stream as *mut c_void, destroy_stream);
+        // Each stream has a thread, which a camera outside the grid doesn't need.
+        if !visible && rigel_item_stream(item).is_null() {
+            return;
         }
+        let stream = stream_of(item);
         let source = self
             .connections
             .get(&(recorder as u64))
@@ -1687,11 +1670,19 @@ impl qobject::CameraGrid {
     }
 }
 
-fn recorder_cameras(recorder: u64, numbers: &[u32]) -> Vec<CameraId> {
-    numbers
+fn recorder_cameras(recorder: u64, channels: &[Channel]) -> Vec<CameraId> {
+    channels
         .iter()
-        .map(|&channel| CameraId { recorder, channel })
+        .map(|channel| CameraId {
+            recorder,
+            channel: channel.number,
+        })
         .collect()
+}
+
+/// The day of a clock of the recorder, as `YYYY-MM-DD HH:MM:SS` gives it.
+fn day_of(now: &str) -> String {
+    now.split(' ').next().unwrap_or_default().to_owned()
 }
 
 #[cfg(test)]
