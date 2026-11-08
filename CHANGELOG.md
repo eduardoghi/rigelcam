@@ -31,6 +31,8 @@ User-visible changes, newest first.
   of the graphics driver.
 - After the gamma slider is used, the space bar, Ctrl+arrows and the grid shortcuts work again
   right away. Only the arrows still move the slider while it has the focus.
+- On Windows, the notice of a new version stays above the controls of the recordings instead of
+  covering the speed, export and event buttons.
 - A recorder that answers without its list of channels is tried five times and then waits for
   the user, instead of every minute, which added a login to its log each time.
 - On Windows, an update that failed to start can be tried again without reopening the app.

@@ -3550,6 +3550,8 @@ ApplicationWindow {
         anchors.right: parent.right
         anchors.bottom: parent.bottom
         anchors.margins: 20
+        // Above the controls of the recordings, like the other notices.
+        anchors.bottomMargin: win.inRecordings ? 124 : 20
         width: Math.min(420, parent.width - 32)
         height: updateLayout.implicitHeight + 24
         radius: 6
