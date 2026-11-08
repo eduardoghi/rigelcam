@@ -135,10 +135,7 @@ struct GlesResources : VideoResources {
 
     void clear() override {
         clearCache();
-        std::lock_guard lock(frames);
-        release(next);
-        release(current);
-        release(previous);
+        releaseFrames();
     }
 };
 
