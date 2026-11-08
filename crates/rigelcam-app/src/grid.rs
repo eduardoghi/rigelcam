@@ -867,12 +867,18 @@ impl qobject::CameraGrid {
         self.save_layout(layout);
     }
 
+    /// Runs `change` on the saved list, which is there once the app has read it.
+    fn with_list<R>(
+        self: Pin<&mut Self>,
+        change: impl FnOnce(&mut RecorderList) -> R,
+    ) -> Option<R> {
+        self.rust_mut().list.as_mut().map(change)
+    }
+
     /// The grid follows the new layout even if saving fails, and the error comes to the toolbar
     /// later, from the thread that saves.
     fn save_layout(mut self: Pin<&mut Self>, layout: Layout) {
-        if let Some(list) = self.as_mut().rust_mut().list.as_mut() {
-            list.set_layout(layout.clone());
-        }
+        self.as_mut().with_list(|list| list.set_layout(layout));
         self.as_mut().set_error(QString::default());
         self.publish_layouts();
     }
@@ -902,10 +908,7 @@ impl qobject::CameraGrid {
         let Ok(index) = usize::try_from(index) else {
             return;
         };
-        let selected = match self.as_mut().rust_mut().list.as_mut() {
-            Some(list) => list.select_layout(index),
-            None => false,
-        };
+        let selected = self.as_mut().with_list(|list| list.select_layout(index)) == Some(true);
         if selected {
             self.as_mut().set_notice(QString::default());
             self.publish_layouts();
@@ -913,13 +916,10 @@ impl qobject::CameraGrid {
     }
 
     fn turn_layout(mut self: Pin<&mut Self>) {
-        let shown = match self.as_mut().rust_mut().list.as_mut() {
-            Some(list) => {
-                let next = (list.current_layout() + 1) % list.layouts().len().max(1);
-                list.show_layout(next)
-            }
-            None => false,
-        };
+        let shown = self.as_mut().with_list(|list| {
+            let next = (list.current_layout() + 1) % list.layouts().len().max(1);
+            list.show_layout(next)
+        }) == Some(true);
         // Leaves a notice in place, since nobody chose to move away from it.
         if shown {
             self.publish_layouts();
@@ -927,10 +927,7 @@ impl qobject::CameraGrid {
     }
 
     fn add_layout(mut self: Pin<&mut Self>) {
-        let added = match self.as_mut().rust_mut().list.as_mut() {
-            Some(list) => list.add_layout(),
-            None => false,
-        };
+        let added = self.as_mut().with_list(RecorderList::add_layout) == Some(true);
         if added {
             self.as_mut().set_notice(QString::default());
             self.publish_layouts();
@@ -941,9 +938,8 @@ impl qobject::CameraGrid {
         let Ok(index) = usize::try_from(index) else {
             return;
         };
-        if let Some(list) = self.as_mut().rust_mut().list.as_mut() {
-            list.rename_layout(index, &name.to_string());
-        }
+        self.as_mut()
+            .with_list(|list| list.rename_layout(index, &name.to_string()));
         self.publish_layouts();
     }
 
@@ -951,19 +947,16 @@ impl qobject::CameraGrid {
         let Ok(index) = usize::try_from(index) else {
             return;
         };
-        if let Some(list) = self.as_mut().rust_mut().list.as_mut() {
-            list.remove_layout(index);
-        }
+        self.as_mut().with_list(|list| list.remove_layout(index));
         self.publish_layouts();
     }
 
     fn save_cycle_seconds(mut self: Pin<&mut Self>, seconds: i32) {
-        let saved = match self.as_mut().rust_mut().list.as_mut() {
-            Some(list) => {
-                list.set_cycle_seconds(u32::try_from(seconds).unwrap_or(0));
-                list.cycle_seconds()
-            }
-            None => return,
+        let Some(saved) = self.as_mut().with_list(|list| {
+            list.set_cycle_seconds(u32::try_from(seconds).unwrap_or(0));
+            list.cycle_seconds()
+        }) else {
+            return;
         };
         self.set_cycle_seconds(i32::try_from(saved).unwrap_or(0));
     }
@@ -1362,31 +1355,25 @@ impl qobject::CameraGrid {
     fn save_language(mut self: Pin<&mut Self>, language: &QString) {
         let code = i18n::resolve(&language.to_string());
         i18n::install(code);
-        if let Some(list) = self.as_mut().rust_mut().list.as_mut() {
-            list.set_language(code);
-        }
+        self.as_mut().with_list(|list| list.set_language(code));
         self.set_language(QString::from(code));
     }
 
     fn save_theme(mut self: Pin<&mut Self>, theme: &QString) {
         let text = theme.to_string();
-        if let Some(list) = self.as_mut().rust_mut().list.as_mut() {
-            list.set_theme(&text);
-        }
+        self.as_mut().with_list(|list| list.set_theme(&text));
         self.set_theme(theme.clone());
     }
 
     fn save_camera_names_hidden(mut self: Pin<&mut Self>, hidden: bool) {
-        if let Some(list) = self.as_mut().rust_mut().list.as_mut() {
-            list.set_camera_names_hidden(hidden);
-        }
+        self.as_mut()
+            .with_list(|list| list.set_camera_names_hidden(hidden));
         self.set_camera_names_hidden(hidden);
     }
 
     fn save_sidebar_collapsed(mut self: Pin<&mut Self>, collapsed: bool) {
-        if let Some(list) = self.as_mut().rust_mut().list.as_mut() {
-            list.set_sidebar_collapsed(collapsed);
-        }
+        self.as_mut()
+            .with_list(|list| list.set_sidebar_collapsed(collapsed));
         self.set_sidebar_collapsed(collapsed);
     }
 
