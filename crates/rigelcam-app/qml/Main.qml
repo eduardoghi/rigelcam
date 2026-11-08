@@ -1022,7 +1022,8 @@ ApplicationWindow {
                 implicitWidth: 34
                 leftPadding: 9
                 rightPadding: 9
-                onClicked: moreMenu.open()
+                // A press on its own button doesn't close a menu, so the button does it.
+                onClicked: moreMenu.visible ? moreMenu.close() : moreMenu.open()
                 AppToolTip {
                     visible: moreButton.hovered && !moreMenu.visible
                     text: moreButton.text
