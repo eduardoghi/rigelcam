@@ -565,9 +565,13 @@ impl Drop for Session<'_> {
 /// `MD5(user:random:MD5(user:realm:password))`, in uppercase hexadecimal.
 fn login_hash(user: &str, password: &str, realm: &str, random: &str) -> String {
     let md5 = |text: String| {
-        Md5::digest(text.as_bytes())
-            .iter()
-            .fold(String::new(), |hex, byte| hex + &format!("{byte:02X}"))
+        use std::fmt::Write;
+        let digest = Md5::digest(text.as_bytes());
+        let mut hex = String::with_capacity(digest.len() * 2);
+        for byte in digest {
+            let _ = write!(hex, "{byte:02X}");
+        }
+        hex
     };
     md5(format!(
         "{user}:{random}:{}",
