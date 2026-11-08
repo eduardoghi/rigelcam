@@ -2311,6 +2311,8 @@ ApplicationWindow {
         // What each camera recorded on the day, by key, and all of it together for the bar.
         property var spansOf: ({})
         property var spans: []
+        // Kept with the spans, since the event buttons ask for them as the position moves.
+        readonly property var eventRuns: Playback.eventRuns(spans)
         // The events of the open cameras, by time, for the list of the day. Without
         // Object.fromEntries, which the JavaScript of QML doesn't have.
         readonly property var events: Playback.eventList(spansOf, win.playbackCameras.reduce((names, camera) => {
@@ -2533,13 +2535,13 @@ ApplicationWindow {
         }
 
         function previousEvent() {
-            const target = Playback.previousEvent(spans, position, rate)
+            const target = Playback.previousEventIn(eventRuns, position, rate)
             if (target >= 0)
                 seek(target)
         }
 
         function nextEvent() {
-            const target = Playback.nextEvent(spans, position)
+            const target = Playback.nextEventIn(eventRuns, position)
             if (target >= 0)
                 seek(target)
         }
@@ -3045,7 +3047,7 @@ ApplicationWindow {
                 Item { Layout.fillWidth: true }
 
                 AppButton {
-                    enabled: Playback.previousEvent(playback.spans, playback.position, playback.rate) >= 0
+                    enabled: Playback.previousEventIn(playback.eventRuns, playback.position, playback.rate) >= 0
                     display: AbstractButton.IconOnly
                     icon.source: "qrc:/rigelcam/icons/previous-event.svg"
                     text: qsTr("Previous event")
@@ -3085,7 +3087,7 @@ ApplicationWindow {
                     AppToolTip { visible: parent.hovered; text: qsTr("Forward 10 s") }
                 }
                 AppButton {
-                    enabled: Playback.nextEvent(playback.spans, playback.position) >= 0
+                    enabled: Playback.nextEventIn(playback.eventRuns, playback.position) >= 0
                     display: AbstractButton.IconOnly
                     icon.source: "qrc:/rigelcam/icons/next-event.svg"
                     text: qsTr("Next event")

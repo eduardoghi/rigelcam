@@ -130,7 +130,12 @@ function eventRuns(spans) {
 
 // The start of the first event after `position`, or -1.
 function nextEvent(spans, position) {
-    const run = eventRuns(spans).find(run => run.start > position)
+    return nextEventIn(eventRuns(spans), position)
+}
+
+// The same from the runs of eventRuns, for a caller that keeps them while the position moves.
+function nextEventIn(runs, position) {
+    const run = runs.find(run => run.start > position)
     return run ? run.start : -1
 }
 
@@ -138,8 +143,16 @@ function nextEvent(spans, position) {
 // so pressing it again right after a jump keeps going back. The 3 s are of the clock on the wall,
 // which at 8x is 24 s of the recording.
 function previousEvent(spans, position, rate) {
-    const runs = eventRuns(spans).filter(run => run.start < position - 3 * (rate || 1))
-    return runs.length > 0 ? runs[runs.length - 1].start : -1
+    return previousEventIn(eventRuns(spans), position, rate)
+}
+
+function previousEventIn(runs, position, rate) {
+    const limit = position - 3 * (rate || 1)
+    for (let i = runs.length - 1; i >= 0; i--) {
+        if (runs[i].start < limit)
+            return runs[i].start
+    }
+    return -1
 }
 
 // The events of every open camera as { start, end, key, name }, by time, for the list of the day.
