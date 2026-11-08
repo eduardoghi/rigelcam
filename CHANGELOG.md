@@ -12,8 +12,8 @@ User-visible changes, newest first.
 
 ### Changed
 
-- A more sober look, with neutral gray surfaces and a teal accent, smaller corners, live and
-  recordings as two halves of one control and the grid size as a row of buttons.
+- A more sober look, with neutral gray surfaces, a blue accent and a new logo, smaller corners,
+  live and recordings as two halves of one control and the grid size as a row of buttons.
 
 ## [0.1.4] (2026-11-07)
 
