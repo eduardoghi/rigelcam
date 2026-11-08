@@ -531,5 +531,25 @@
         <source>Hide password</source>
         <translation>Ocultar a senha</translation>
     </message>
+    <message>
+        <source>Could not read or write the recorder list (%1).</source>
+        <translation>Não foi possível ler ou gravar a lista de gravadores (%1).</translation>
+    </message>
+    <message>
+        <source>The recorder list is corrupted (%1).</source>
+        <translation>A lista de gravadores está corrompida (%1).</translation>
+    </message>
+    <message>
+        <source>The system keyring failed (%1).</source>
+        <translation>O cofre do sistema falhou (%1).</translation>
+    </message>
+    <message>
+        <source>The system keyring has no password for this recorder.</source>
+        <translation>O cofre do sistema não tem a senha deste gravador.</translation>
+    </message>
+    <message>
+        <source>This system has no folder for configuration files.</source>
+        <translation>Este sistema não tem uma pasta para arquivos de configuração.</translation>
+    </message>
 </context>
 </TS>

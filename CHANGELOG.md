@@ -51,6 +51,8 @@ User-visible changes, newest first.
   installer starts and the clip was lost.
 - Marks that turn text around, such as U+202E, are replaced in the names of exported videos and
   photos, so a camera name can't show a file name backwards.
+- Errors of the keyring and of the recorder list, such as a locked keyring, show in the language
+  of the app instead of in English.
 - A photo of a camera with a long name keeps its date and time, which were the part cut to fit
   the length of a file name.
 - A recorder list edited by hand with two recorders on one id, or an id the interface can't hold,

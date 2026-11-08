@@ -531,5 +531,25 @@
         <source>Hide password</source>
         <translation>Ocultar la contraseña</translation>
     </message>
+    <message>
+        <source>Could not read or write the recorder list (%1).</source>
+        <translation>No se pudo leer ni escribir la lista de grabadores (%1).</translation>
+    </message>
+    <message>
+        <source>The recorder list is corrupted (%1).</source>
+        <translation>La lista de grabadores está dañada (%1).</translation>
+    </message>
+    <message>
+        <source>The system keyring failed (%1).</source>
+        <translation>El almacén del sistema falló (%1).</translation>
+    </message>
+    <message>
+        <source>The system keyring has no password for this recorder.</source>
+        <translation>El almacén del sistema no tiene la contraseña de este grabador.</translation>
+    </message>
+    <message>
+        <source>This system has no folder for configuration files.</source>
+        <translation>Este sistema no tiene una carpeta para archivos de configuración.</translation>
+    </message>
 </context>
 </TS>

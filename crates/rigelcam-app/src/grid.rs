@@ -291,6 +291,28 @@ struct Recordings<'a> {
     spans: &'a [Span],
 }
 
+/// An error of the saved list or the keyring as the interface shows it, translated. The detail
+/// in parentheses comes from the system and stays as it is.
+fn list_error(error: &RecordersError) -> String {
+    match error {
+        RecordersError::File(detail) => message(
+            "Could not read or write the recorder list (%1).",
+            &[&detail.to_string()],
+        ),
+        RecordersError::Format(detail) => message(
+            "The recorder list is corrupted (%1).",
+            &[&detail.to_string()],
+        ),
+        RecordersError::Keyring(detail) => message("The system keyring failed (%1).", &[detail]),
+        RecordersError::NoPassword => {
+            message("The system keyring has no password for this recorder.", &[])
+        }
+        RecordersError::NoConfigDir => {
+            message("This system has no folder for configuration files.", &[])
+        }
+    }
+}
+
 const REFUSED_MESSAGE: &str = "The recorder refused the user or password.";
 
 fn recorder_message(error: &RecorderError) -> String {
@@ -558,7 +580,7 @@ impl qobject::CameraGrid {
                 );
                 self.set_error(QString::from(text.as_str()));
             }
-            Err(error) => self.set_error(QString::from(error.to_string().as_str())),
+            Err(error) => self.set_error(QString::from(list_error(&error).as_str())),
         }
     }
 
@@ -628,7 +650,7 @@ impl qobject::CameraGrid {
         let theme = QString::from(list.theme().unwrap_or_default());
         let thread = self.qt_thread();
         list.on_save_error(move |error| {
-            let text = error.to_string();
+            let text = list_error(&error);
             let _ = thread.queue(move |grid: Pin<&mut qobject::CameraGrid>| {
                 grid.set_error(QString::from(text.as_str()));
             });
@@ -656,7 +678,7 @@ impl qobject::CameraGrid {
                 let text = message("The damaged list was kept at %1.", &[&path]);
                 self.set_notice(QString::from(text.as_str()));
             }
-            Err(error) => self.set_error(QString::from(error.to_string().as_str())),
+            Err(error) => self.set_error(QString::from(list_error(&error).as_str())),
         }
     }
 
@@ -772,7 +794,7 @@ impl qobject::CameraGrid {
             // Off the interface thread, since a locked keyring waits for the user to unlock it.
             let result = SystemKeyring
                 .get(id)
-                .map_err(|error| (error.to_string(), Retry::Never))
+                .map_err(|error| (list_error(&error), Retry::Never))
                 .and_then(|password| {
                     let address = recorder.address();
                     let gate = client_for(&address, &recorder.user, &password);
@@ -1469,7 +1491,7 @@ impl qobject::CameraGrid {
                 _ => Ok(password.clone()),
             };
             let result = saved_password
-                .map_err(|error| error.to_string())
+                .map_err(|error| list_error(&error))
                 .and_then(|tested| {
                     client_for(&address, &user, &tested)
                         .device_type()
@@ -1482,7 +1504,7 @@ impl qobject::CameraGrid {
                     }
                     put_password(&SystemKeyring, target, &password)
                         .map(|previous| (model, Some(previous)))
-                        .map_err(|error| error.to_string())
+                        .map_err(|error| list_error(&error))
                 });
             let _ = thread.queue(move |mut grid: Pin<&mut qobject::CameraGrid>| {
                 let (model, previous) = match result {
@@ -1519,7 +1541,7 @@ impl qobject::CameraGrid {
                             });
                         }
                         grid.as_mut()
-                            .set_form_error(QString::from(error.to_string().as_str()));
+                            .set_form_error(QString::from(list_error(&error).as_str()));
                     }
                 }
                 grid.as_mut().set_form_busy(false);
@@ -1589,7 +1611,7 @@ impl qobject::CameraGrid {
                     restore_password(&SystemKeyring, id, &password);
                 });
             }
-            self.set_error(QString::from(error.to_string().as_str()));
+            self.set_error(QString::from(list_error(&error).as_str()));
             return;
         }
         let notice = if password_removed {
