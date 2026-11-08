@@ -53,8 +53,9 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           test "$GITHUB_REF" = refs/heads/main
+          # Only a run of the push to main checked this tree, as below.
           passed=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml --commit "$GITHUB_SHA" \
-            --status success --json databaseId --jq length)
+            --event push --branch main --status success --json databaseId --jq length)
           test "$passed" -ge 1
           # Takes the workflow and the paths that start it, which have to match its `on.push.paths`.
           # A push of several commits runs it only on the newest, which also holds that change, and
