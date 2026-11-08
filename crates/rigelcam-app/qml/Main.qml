@@ -82,19 +82,46 @@ ApplicationWindow {
         }
     }
 
-    // A button with only an icon in the toolbars, its text shown as a tip under the mouse.
-    component IconButton: AppButton {
-        id: iconButton
-        property string tip: text
+    // A button with a tip under the mouse, shown when it has one.
+    component TipButton: AppButton {
+        id: tipButton
+        property string tip
         property bool tipVisible: hovered
-        display: AbstractButton.IconOnly
-        implicitWidth: 34
-        leftPadding: 9
-        rightPadding: 9
         AppToolTip {
-            visible: iconButton.tipVisible
-            text: iconButton.tip
+            visible: tipButton.tipVisible && tipButton.tip !== ""
+            text: tipButton.tip
         }
+    }
+
+    // A button with only an icon, its text shown as the tip. The padding centers a 16 px icon,
+    // or a 14 px one in the small buttons.
+    component IconButton: TipButton {
+        property int size: 34
+        tip: text
+        display: AbstractButton.IconOnly
+        implicitWidth: size
+        leftPadding: (size - icon.width) / 2
+        rightPadding: (size - icon.width) / 2
+    }
+
+    // In the rows of the sidebar and over the video.
+    component SmallIconButton: IconButton {
+        size: 26
+        implicitHeight: 26
+        icon.width: 14
+        icon.height: 14
+    }
+
+    component OverVideoButton: SmallIconButton {
+        fill: colors.overVideo
+        contentColor: colors.overVideoText
+    }
+
+    // The controls of the player, which share one width.
+    component PlayerButton: TipButton {
+        implicitWidth: 40
+        leftPadding: 4
+        rightPadding: 4
     }
 
     component PrimaryButton: AppButton {
@@ -267,19 +294,13 @@ ApplicationWindow {
             stepSize: 0.05
             value: win.gamma
             onMoved: win.gamma = value
-            background: Rectangle {
+            background: ThinBar {
                 x: gammaSlider.leftPadding
                 y: (gammaSlider.height - height) / 2
                 width: gammaSlider.availableWidth
+                // Set, or the slider would stretch its background to its own height.
                 height: 4
-                radius: 2
-                color: colors.line
-                Rectangle {
-                    width: gammaSlider.visualPosition * parent.width
-                    height: parent.height
-                    radius: 2
-                    color: colors.accent
-                }
+                fraction: gammaSlider.visualPosition
             }
             handle: Rectangle {
                 x: gammaSlider.leftPadding + gammaSlider.visualPosition * (gammaSlider.availableWidth - width)
@@ -290,17 +311,14 @@ ApplicationWindow {
                 color: gammaSlider.pressed ? colors.accentHover : colors.accent
             }
         }
-        AppButton {
+        TipButton {
             id: gammaReset
             text: win.gamma.toFixed(2)
             implicitWidth: 44
             leftPadding: 4
             rightPadding: 4
             onClicked: win.gamma = 1
-            AppToolTip {
-                visible: gammaReset.hovered
-                text: qsTr("Back to normal")
-            }
+            tip: qsTr("Back to normal")
         }
     }
 
@@ -412,6 +430,20 @@ ApplicationWindow {
         }
     }
 
+    // A line that fills from the left, for progress and for the track of the gamma slider.
+    component ThinBar: Rectangle {
+        property real fraction: 0
+        implicitHeight: 4
+        radius: 2
+        color: colors.line
+        Rectangle {
+            width: parent.width * parent.fraction
+            height: parent.height
+            radius: 2
+            color: colors.accent
+        }
+    }
+
     component DangerButton: AppButton {
         fill: colors.danger
         hoverFill: "#F2666A"
@@ -488,6 +520,8 @@ ApplicationWindow {
     readonly property var gridKeys: gridLayout.cameras.map(c => c ? cameraKey(c.recorder, c.channel) : null)
     readonly property var tileKeys: recorderList.reduce((keys, r) => keys.concat(r.cameras.map(c => cameraKey(r.id, c.number))), [])
     readonly property int cols: gridLayout.columns
+    // Notices at the bottom sit above the controls of the recordings, which are 112 px tall.
+    readonly property int noticeBottom: inRecordings ? 124 : 20
     // Below this the top bar doesn't fit, so the logo becomes the icon and the count goes.
     readonly property bool narrowBar: width < 1150
     // The saved grids as { name }, the one on screen at grid.currentLayout.
@@ -538,9 +572,6 @@ ApplicationWindow {
     // Not saved, so nobody ends up watching rebuilt detail without having asked for it.
     property bool superResolution: false
     property bool rtxHdr: false
-    function isoDay(date) {
-        return Playback.isoDay(date)
-    }
     property var zoomedCamera: null
     readonly property bool fullScreen: visibility === Window.FullScreen
     // Nothing is seen, so the video stops using the decoder and the network.
@@ -602,9 +633,6 @@ ApplicationWindow {
         grid.selectLayout((grid.currentLayout + step + count) % count)
     }
 
-    function secondsOf(text) {
-        return Playback.secondsOf(text)
-    }
 
     function clamp(value, low, high) {
         return Math.min(Math.max(value, low), high)
@@ -1024,7 +1052,7 @@ ApplicationWindow {
                 visible: win.recorderList.length > 0 && !win.inRecordings
                 Repeater {
                     model: 6
-                    AppButton {
+                    TipButton {
                         id: sizeButton
                         required property int index
                         readonly property int columns: index + 1
@@ -1052,10 +1080,7 @@ ApplicationWindow {
                                 }
                             }
                         }
-                        AppToolTip {
-                            visible: sizeButton.hovered
-                            text: sizeButton.text
-                        }
+                        tip: text
                     }
                 }
             }
@@ -1242,25 +1267,18 @@ ApplicationWindow {
                 rightPadding: 40
                 placeholderText: addDialog.editing ? qsTr("Blank to keep the current one") : ""
                 onAccepted: addDialog.submit()
-                AppButton {
+                IconButton {
                     id: revealButton
                     anchors.right: parent.right
                     anchors.verticalCenter: parent.verticalCenter
                     anchors.rightMargin: 4
-                    display: AbstractButton.IconOnly
                     icon.source: passwordField.shown ? "qrc:/rigelcam/icons/eye-off.svg" : "qrc:/rigelcam/icons/eye.svg"
                     text: passwordField.shown ? qsTr("Hide password") : qsTr("Show password")
-                    implicitWidth: 30
                     implicitHeight: 30
-                    leftPadding: 7
-                    rightPadding: 7
                     contentColor: colors.muted
                     focusPolicy: Qt.NoFocus
                     onClicked: passwordField.shown = !passwordField.shown
-                    AppToolTip {
-                        visible: revealButton.hovered
-                        text: revealButton.text
-                    }
+                    size: 30
                 }
             }
             AppButton {
@@ -1340,8 +1358,8 @@ ApplicationWindow {
     AppDialog {
         id: exportDialog
         readonly property var cameras: win.playbackCameras.filter(camera => camera)
-        readonly property int startTime: win.secondsOf(startField.text)
-        readonly property int endTime: win.secondsOf(endField.text)
+        readonly property int startTime: Playback.secondsOf(startField.text)
+        readonly property int endTime: Playback.secondsOf(endField.text)
         readonly property bool valid: startTime >= 0 && endTime > startTime
         title: qsTr("Export clip")
         width: Math.min(400, parent.width - 32)
@@ -1349,8 +1367,8 @@ ApplicationWindow {
 
         function openAt(seconds) {
             const start = Math.floor(seconds)
-            startField.text = playback.clockText(start)
-            endField.text = playback.clockText(Math.min(start + 60, 86399))
+            startField.text = Playback.clockText(start)
+            endField.text = Playback.clockText(Math.min(start + 60, 86399))
             open()
         }
 
@@ -1601,20 +1619,13 @@ ApplicationWindow {
                     color: colors.text
                     text: qsTr("Recorders")
                 }
-                AppButton {
+                IconButton {
                     id: addButton
-                    display: AbstractButton.IconOnly
                     icon.source: "qrc:/rigelcam/icons/plus.svg"
                     text: qsTr("Add recorder")
-                    implicitWidth: 30
                     implicitHeight: 30
-                    leftPadding: 7
-                    rightPadding: 7
                     onClicked: addDialog.openFor(null)
-                    AppToolTip {
-                        visible: addButton.hovered
-                        text: addButton.text
-                    }
+                    size: 30
                 }
             }
 
@@ -1678,43 +1689,21 @@ ApplicationWindow {
                                         font.weight: Font.DemiBold
                                         color: colors.text
                                     }
-                                    AppButton {
+                                    SmallIconButton {
                                         id: editButton
                                         visible: recorderHover.hovered
-                                        display: AbstractButton.IconOnly
                                         icon.source: "qrc:/rigelcam/icons/edit.svg"
-                                        icon.width: 14
-                                        icon.height: 14
                                         text: qsTr("Edit recorder")
-                                        implicitWidth: 26
-                                        implicitHeight: 26
-                                        leftPadding: 6
-                                        rightPadding: 6
                                         onClicked: addDialog.openFor(recorderGroup.modelData)
-                                        AppToolTip {
-                                            visible: editButton.hovered
-                                            text: editButton.text
-                                        }
                                     }
-                                    AppButton {
+                                    SmallIconButton {
                                         id: removeButton
                                         visible: recorderHover.hovered
-                                        display: AbstractButton.IconOnly
                                         icon.source: "qrc:/rigelcam/icons/trash.svg"
-                                        icon.width: 14
-                                        icon.height: 14
                                         text: qsTr("Remove recorder")
-                                        implicitWidth: 26
-                                        implicitHeight: 26
-                                        leftPadding: 6
-                                        rightPadding: 6
                                         onClicked: {
                                             removeDialog.recorder = recorderGroup.modelData
                                             removeDialog.open()
-                                        }
-                                        AppToolTip {
-                                            visible: removeButton.hovered
-                                            text: removeButton.text
                                         }
                                     }
                                 }
@@ -1996,28 +1985,15 @@ ApplicationWindow {
                     border.width: 2
                 }
 
-                AppButton {
+                OverVideoButton {
                     id: leaveGrid
                     anchors.right: parent.right
                     anchors.top: parent.top
                     anchors.margins: 6
                     visible: tileHover.hovered && !tile.isMain
-                    display: AbstractButton.IconOnly
                     icon.source: "qrc:/rigelcam/icons/close.svg"
-                    icon.width: 14
-                    icon.height: 14
                     text: qsTr("Remove from the grid")
-                    implicitWidth: 26
-                    implicitHeight: 26
-                    leftPadding: 6
-                    rightPadding: 6
-                    fill: colors.overVideo
-                    contentColor: colors.overVideoText
                     onClicked: grid.removeCamera(tile.recorder, tile.number)
-                    AppToolTip {
-                        visible: leaveGrid.hovered
-                        text: leaveGrid.text
-                    }
                 }
 
                 HoverHandler {
@@ -2095,30 +2071,17 @@ ApplicationWindow {
 
                             // A camera the recorder stopped listing can be gone for good, and only the
                             // user knows that.
-                            AppButton {
+                            OverVideoButton {
                                 id: clearSquare
                                 anchors.right: parent.right
                                 anchors.top: parent.top
                                 anchors.margins: 6
                                 visible: square.key !== null && squareHover.hovered
-                                display: AbstractButton.IconOnly
                                 icon.source: "qrc:/rigelcam/icons/close.svg"
-                                icon.width: 14
-                                icon.height: 14
                                 text: qsTr("Remove from the grid")
-                                implicitWidth: 26
-                                implicitHeight: 26
-                                leftPadding: 6
-                                rightPadding: 6
-                                fill: colors.overVideo
-                                contentColor: colors.overVideoText
                                 onClicked: {
                                     const camera = win.gridLayout.cameras[square.index]
                                     grid.removeCamera(camera.recorder, camera.channel)
-                                }
-                                AppToolTip {
-                                    visible: clearSquare.hovered
-                                    text: clearSquare.text
                                 }
                             }
                             // An empty square is a faint plus, and says what it takes under the mouse or
@@ -2260,6 +2223,7 @@ ApplicationWindow {
         // What each camera recorded on the day, by key, and all of it together for the bar.
         property var spansOf: ({})
         property var spans: []
+        readonly property var rates: [1, 2, 4, 8]
         // Kept with the spans, since the event buttons ask for them as the position moves.
         readonly property var eventRuns: Playback.eventRuns(spans)
         // The events of the open cameras, by time, for the list of the day. Without
@@ -2308,11 +2272,10 @@ ApplicationWindow {
         }
 
         function savePhotos() {
-            for (let i = 0; i < cells.count; i++) {
-                const cell = cells.itemAt(i)
-                if (cell && cell.camera && cell.streamOpen)
+            eachCell(cell => {
+                if (cell.streamOpen)
                     cell.savePhoto()
-            }
+            })
         }
 
         function leadCell() {
@@ -2455,7 +2418,7 @@ ApplicationWindow {
             // From the day asked for, so a second click doesn't wait for the first answer.
             const day = new Date(viewDate + "T12:00:00")
             day.setDate(day.getDate() + days)
-            changeDay(win.isoDay(day))
+            changeDay(Playback.isoDay(day))
         }
 
         function stop() {
@@ -2564,9 +2527,6 @@ ApplicationWindow {
                 seek(next)
         }
 
-        function clockText(seconds) {
-            return Playback.clockText(seconds)
-        }
 
         onVisibleChanged: {
             if (!visible) {
@@ -2654,7 +2614,7 @@ ApplicationWindow {
                     }
 
                     function savePhoto() {
-                        const time = playback.clockText(position).replace(/:/g, "-")
+                        const time = Playback.clockText(position).replace(/:/g, "-")
                         video.savePhoto(camera.name + " " + playback.date + " " + time)
                     }
 
@@ -2769,53 +2729,28 @@ ApplicationWindow {
                         maxWidth: cell.width - 16
                     }
 
-                    AppButton {
+                    OverVideoButton {
                         id: cellPhoto
                         anchors.right: closeCell.left
                         anchors.top: parent.top
                         anchors.topMargin: 8
                         anchors.rightMargin: 4
                         visible: cellHover.hovered && video.hasVideo
-                        display: AbstractButton.IconOnly
                         icon.source: "qrc:/rigelcam/icons/camera.svg"
-                        icon.width: 14
-                        icon.height: 14
                         text: qsTr("Save photo")
-                        implicitWidth: 26
-                        implicitHeight: 26
-                        leftPadding: 6
-                        rightPadding: 6
-                        fill: colors.overVideo
-                        contentColor: colors.overVideoText
                         onClicked: cell.savePhoto()
-                        AppToolTip {
-                            visible: cellPhoto.hovered
-                            text: cellPhoto.text + " (Ctrl+S)"
-                        }
+                        tip: text + " (Ctrl+S)"
                     }
 
-                    AppButton {
+                    OverVideoButton {
                         id: closeCell
                         anchors.right: parent.right
                         anchors.top: parent.top
                         anchors.margins: 8
                         visible: cellHover.hovered
-                        display: AbstractButton.IconOnly
                         icon.source: "qrc:/rigelcam/icons/close.svg"
-                        icon.width: 14
-                        icon.height: 14
                         text: qsTr("Close")
-                        implicitWidth: 26
-                        implicitHeight: 26
-                        leftPadding: 6
-                        rightPadding: 6
-                        fill: colors.overVideo
-                        contentColor: colors.overVideoText
                         onClicked: playback.removeCamera(cell.index)
-                        AppToolTip {
-                            visible: closeCell.hovered
-                            text: closeCell.text
-                        }
                     }
 
                     HoverHandler { id: cellHover }
@@ -2854,19 +2789,18 @@ ApplicationWindow {
                 anchors.margins: 10
                 spacing: 6
 
-                AppButton {
+                TipButton {
                     enabled: win.playbackCamera !== null && playback.viewDate !== ""
                     text: "‹"
                     implicitWidth: 34
                     onClicked: playback.stepDay(-1)
-                    AppToolTip { visible: parent.hovered; text: qsTr("Previous day") }
+                    tip: qsTr("Previous day")
                 }
-                AppButton {
+                TipButton {
                     enabled: win.playbackCamera !== null
                     text: playback.viewDate ? new Date(playback.viewDate + "T12:00:00").toLocaleDateString(Qt.locale(grid.language), Locale.ShortFormat) : ""
                     edge: colors.line
                     onClicked: calendar.open()
-                    AppToolTip { visible: parent.hovered; text: qsTr("Pick a day") }
 
                     Popup {
                         id: calendar
@@ -2883,7 +2817,7 @@ ApplicationWindow {
                         }
                         // Days with recordings, by camera and month, since searching takes seconds.
                         property var knownDays: ({})
-                        readonly property string monthText: win.isoDay(shown).slice(0, 7)
+                        readonly property string monthText: Playback.isoDay(shown).slice(0, 7)
                         readonly property string monthKey: win.playbackCamera
                             ? win.playbackCamera.recorder + ":" + win.playbackCamera.number + ":" + monthText : ""
                         readonly property var days: knownDays[monthKey] ?? []
@@ -2908,7 +2842,7 @@ ApplicationWindow {
                                 known[found.key] = found.days
                                 calendar.knownDays = Object.assign({}, known)
                                 // The current month still gets new days.
-                                const current = found.key.endsWith(win.isoDay(new Date()).slice(0, 7))
+                                const current = found.key.endsWith(Playback.isoDay(new Date()).slice(0, 7))
                                 if (found.done && !current)
                                     calendar.finished[found.key] = true
                             }
@@ -2945,7 +2879,7 @@ ApplicationWindow {
                                 locale: Qt.locale(grid.language)
                                 onClicked: date => {
                                     calendar.close()
-                                    playback.changeDay(win.isoDay(date))
+                                    playback.changeDay(Playback.isoDay(date))
                                 }
                                 delegate: Rectangle {
                                     id: dayCell
@@ -2968,68 +2902,52 @@ ApplicationWindow {
                             }
                         }
                     }
+                    tip: qsTr("Pick a day")
                 }
-                AppButton {
+                TipButton {
                     enabled: win.playbackCamera !== null && playback.viewDate !== "" && playback.viewDate < playback.today
                     text: "›"
                     implicitWidth: 34
                     onClicked: playback.stepDay(1)
-                    AppToolTip { visible: parent.hovered; text: qsTr("Next day") }
+                    tip: qsTr("Next day")
                 }
 
                 Item { Layout.fillWidth: true }
 
-                AppButton {
+                IconButton {
                     enabled: Playback.previousEventIn(playback.eventRuns, playback.position, playback.rate) >= 0
-                    display: AbstractButton.IconOnly
                     icon.source: "qrc:/rigelcam/icons/previous-event.svg"
                     text: qsTr("Previous event")
                     contentColor: colors.waiting
-                    implicitWidth: 40
-                    leftPadding: 12
-                    rightPadding: 12
                     onClicked: playback.previousEvent()
-                    AppToolTip { visible: parent.hovered; text: parent.text }
+                    size: 40
                 }
-                AppButton {
+                PlayerButton {
                     enabled: playback.spans.length > 0
                     text: "-10"
-                    implicitWidth: 40
-                    leftPadding: 4
-                    rightPadding: 4
                     onClicked: playback.skipBack()
-                    AppToolTip { visible: parent.hovered; text: qsTr("Back 10 s") }
+                    tip: qsTr("Back 10 s")
                 }
-                AppButton {
+                PlayerButton {
                     enabled: playback.spans.length > 0
                     text: playback.playing ? "II" : "▶"
-                    implicitWidth: 40
-                    leftPadding: 4
-                    rightPadding: 4
                     fill: colors.raised
                     onClicked: playback.togglePlaying()
-                    AppToolTip { visible: parent.hovered; text: playback.playing ? qsTr("Pause") : qsTr("Play") }
+                    tip: playback.playing ? qsTr("Pause") : qsTr("Play")
                 }
-                AppButton {
+                PlayerButton {
                     enabled: playback.spans.length > 0
                     text: "+10"
-                    implicitWidth: 40
-                    leftPadding: 4
-                    rightPadding: 4
                     onClicked: playback.seek(playback.position + 10)
-                    AppToolTip { visible: parent.hovered; text: qsTr("Forward 10 s") }
+                    tip: qsTr("Forward 10 s")
                 }
-                AppButton {
+                IconButton {
                     enabled: Playback.nextEventIn(playback.eventRuns, playback.position) >= 0
-                    display: AbstractButton.IconOnly
                     icon.source: "qrc:/rigelcam/icons/next-event.svg"
                     text: qsTr("Next event")
                     contentColor: colors.waiting
-                    implicitWidth: 40
-                    leftPadding: 12
-                    rightPadding: 12
                     onClicked: playback.nextEvent()
-                    AppToolTip { visible: parent.hovered; text: parent.text }
+                    size: 40
                 }
                 Text {
                     Layout.leftMargin: 8
@@ -3037,7 +2955,7 @@ ApplicationWindow {
                     font.weight: Font.Medium
                     font.features: { "tnum": 1 }
                     color: colors.text
-                    text: playback.clockText(playback.position)
+                    text: Playback.clockText(playback.position)
                 }
 
                 Item { Layout.fillWidth: true }
@@ -3125,7 +3043,7 @@ ApplicationWindow {
                                         color: eventRow.playing ? colors.text : colors.waiting
                                     }
                                     Text {
-                                        text: playback.clockText(eventRow.modelData.start)
+                                        text: Playback.clockText(eventRow.modelData.start)
                                         font.pixelSize: 13
                                         font.features: { "tnum": 1 }
                                         color: colors.text
@@ -3169,7 +3087,7 @@ ApplicationWindow {
                     enabled: playback.spans.length > 0
                     // The text of the box keeps 40 px of padding, and below this it had no room.
                     Layout.preferredWidth: 82
-                    readonly property var rates: [1, 2, 4, 8]
+                    readonly property var rates: playback.rates
                     model: rates
                     labelOf: rate => rate + "x"
                     // From the plain list, since the model of a ComboBox isn't a JavaScript array.
@@ -3178,15 +3096,12 @@ ApplicationWindow {
                 }
 
                 Repeater {
-                    model: [1, 2, 4, 8]
-                    AppButton {
+                    model: playback.rates
+                    PlayerButton {
                         required property int modelData
                         visible: !playerRow.compact
                         enabled: playback.spans.length > 0
                         text: modelData + "x"
-                        implicitWidth: 40
-                        leftPadding: 4
-                        rightPadding: 4
                         fill: playback.rate === modelData ? colors.raised : "transparent"
                         onClicked: playback.setRate(modelData)
                     }
@@ -3314,7 +3229,7 @@ ApplicationWindow {
                         visible: x >= 0 && x + implicitWidth <= timeline.width
                         font.pixelSize: 11
                         color: colors.muted
-                        text: playback.clockText(time).slice(0, 5)
+                        text: Playback.clockText(time).slice(0, 5)
                     }
                 }
 
@@ -3386,7 +3301,7 @@ ApplicationWindow {
                         font.pixelSize: 11
                         font.features: { "tnum": 1 }
                         color: colors.text
-                        text: playback.clockText(win.clamp(timeline.timeAt(timelineMouse.mouseX), 0, 86399))
+                        text: Playback.clockText(win.clamp(timeline.timeAt(timelineMouse.mouseX), 0, 86399))
                     }
                 }
             }
@@ -3472,7 +3387,7 @@ ApplicationWindow {
         z: 10
         anchors.horizontalCenter: parent.horizontalCenter
         anchors.bottom: parent.bottom
-        anchors.bottomMargin: win.inRecordings ? 124 : 20
+        anchors.bottomMargin: win.noticeBottom
         width: toastRow.implicitWidth + 28
         height: 54
         radius: 6
@@ -3521,8 +3436,7 @@ ApplicationWindow {
         anchors.right: parent.right
         anchors.bottom: parent.bottom
         anchors.margins: 20
-        // Above the controls of the recordings, like the other notices.
-        anchors.bottomMargin: win.inRecordings ? 124 : 20
+        anchors.bottomMargin: win.noticeBottom
         width: Math.min(420, parent.width - 32)
         height: updateLayout.implicitHeight + 24
         radius: 6
@@ -3546,18 +3460,10 @@ ApplicationWindow {
                         + "  " + Math.round(grid.updateProgress * 100) + "%"
                     : qsTr("Version %1 is available.").arg(grid.updateVersion)
             }
-            Rectangle {
+            ThinBar {
                 visible: grid.updateRunning
                 Layout.fillWidth: true
-                implicitHeight: 4
-                radius: 2
-                color: colors.line
-                Rectangle {
-                    width: parent.width * grid.updateProgress
-                    height: parent.height
-                    radius: 2
-                    color: colors.accent
-                }
+                fraction: grid.updateProgress
             }
             RowLayout {
                 visible: !grid.updateRunning && !win.updateAfterExport
@@ -3586,7 +3492,7 @@ ApplicationWindow {
         z: 10
         anchors.horizontalCenter: parent.horizontalCenter
         anchors.bottom: parent.bottom
-        anchors.bottomMargin: (win.inRecordings ? 124 : 20) + (photoToast.visible ? 62 : 0)
+        anchors.bottomMargin: win.noticeBottom + (photoToast.visible ? 62 : 0)
         width: Math.min(420, parent.width - 32)
         height: 62
         radius: 6
@@ -3611,17 +3517,9 @@ ApplicationWindow {
                         : qsTr("Exporting %1").arg(grid.exporting))
                         + "  " + Math.round(grid.exportProgress * 100) + "%"
                 }
-                Rectangle {
+                ThinBar {
                     Layout.fillWidth: true
-                    implicitHeight: 4
-                    radius: 2
-                    color: colors.line
-                    Rectangle {
-                        width: parent.width * grid.exportProgress
-                        height: parent.height
-                        radius: 2
-                        color: colors.accent
-                    }
+                    fraction: grid.exportProgress
                 }
             }
             AppButton {
