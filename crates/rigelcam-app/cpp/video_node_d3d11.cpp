@@ -265,11 +265,14 @@ public:
     }
 
     void render(const RenderState *state) override {
-        if (!m_res->texture) {
+        // Before the device is locked, so leaving here can't keep the lock from the decoders.
+        Pipeline &p = pipeline();
+        if (!m_res->texture || !p.ready) {
             if (!m_photoName.isEmpty()) {
                 m_photoName.clear();
                 m_link->report({});
             }
+            if (!p.ready) m_picture.failed(*m_link);
             return;
         }
         gst_d3d11_device_lock(g_gstDevice);
@@ -286,11 +289,6 @@ public:
 
         const D3D11_VIEWPORT viewport{0, 0, float(desc.Width), float(desc.Height), 0, 1};
         g_context->RSSetViewports(1, &viewport);
-        Pipeline &p = pipeline();
-        if (!p.ready) {
-            m_picture.failed(*m_link);
-            return;
-        }
         if (state->scissorEnabled()) {
             // The scene graph counts from the bottom of the target.
             const QRect clip = state->scissorRect();
@@ -336,7 +334,8 @@ private:
             m_res->height = frame.height;
             m_res->fullRange = frame.full_range;
             m_res->matrix = frame.matrix;
-            m_picture.shown(*m_link);
+            // A frame copied isn't shown when nothing can draw it, which render reports.
+            if (pipeline().ready) m_picture.shown(*m_link);
         }
         gst_memory_unmap(memory, &info);
     }
