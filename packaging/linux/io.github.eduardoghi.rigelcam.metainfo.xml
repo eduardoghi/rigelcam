@@ -20,6 +20,24 @@
   <launchable type="desktop-id">io.github.eduardoghi.rigelcam.desktop</launchable>
   <url type="homepage">https://github.com/eduardoghi/rigelcam</url>
   <url type="bugtracker">https://github.com/eduardoghi/rigelcam/issues</url>
+  <screenshots>
+    <screenshot type="default">
+      <caption>Live grid with nine cameras</caption>
+      <image>https://raw.githubusercontent.com/eduardoghi/rigelcam/main/assets/screenshots/live.jpg</image>
+    </screenshot>
+    <screenshot>
+      <caption>Recordings of one camera, with events on the timeline</caption>
+      <image>https://raw.githubusercontent.com/eduardoghi/rigelcam/main/assets/screenshots/recordings.jpg</image>
+    </screenshot>
+    <screenshot>
+      <caption>One camera on its own, from the main stream</caption>
+      <image>https://raw.githubusercontent.com/eduardoghi/rigelcam/main/assets/screenshots/camera.jpg</image>
+    </screenshot>
+    <screenshot>
+      <caption>The light theme</caption>
+      <image>https://raw.githubusercontent.com/eduardoghi/rigelcam/main/assets/screenshots/light.jpg</image>
+    </screenshot>
+  </screenshots>
   <content_rating type="oars-1.1"/>
   <releases>
     <release version="0.1.4" date="2026-11-07"/>
