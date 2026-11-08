@@ -27,13 +27,22 @@ namespace {
 QString writePhoto(const QImage &image, QString name) {
     const QString folder = QStandardPaths::writableLocation(QStandardPaths::PicturesLocation) + QStringLiteral("/Rigelcam");
     if (!QDir().mkpath(folder)) return {};
-    // Camera names come from the recorder, so they can't choose the folder or hide the file.
-    static const QRegularExpression notAllowed(QStringLiteral("[<>:\"/\\\\|?*\\x00-\\x1f\\x7f]"));
+    // Camera names come from the recorder, so they can't choose the folder or hide the file, nor
+    // turn the text around with the marks that change its direction, as in the names of clips.
+    static const QRegularExpression notAllowed(QStringLiteral(
+        "[<>:\"/\\\\|?*\\x00-\\x1f\\x7f\\x{061C}\\x{200B}-\\x{200F}\\x{2028}-\\x{202E}\\x{2066}-\\x{2069}\\x{FEFF}]"));
     name.replace(notAllowed, QStringLiteral("_"));
     while (name.startsWith(u'.')) name.remove(0, 1);
+    // The time at the end stays whole, so only the camera name gives way.
+    static const QRegularExpression stamp(QStringLiteral(" \\d{4}-\\d{2}-\\d{2} \\d{2}-\\d{2}-\\d{2}$"));
+    const QRegularExpressionMatch found = stamp.match(name);
+    const QString time = found.hasMatch() ? found.captured() : QString();
+    QString camera = name.left(name.size() - time.size());
     // File systems count names in bytes, so a name in a script of 3 bytes a character is cut
     // earlier, never in the middle of one.
-    while (name.toUtf8().size() > 150) name.chop(name.size() > 1 && name.back().isLowSurrogate() ? 2 : 1);
+    const qsizetype room = 150 - time.toUtf8().size();
+    while (camera.toUtf8().size() > room) camera.chop(camera.size() > 1 && camera.back().isLowSurrogate() ? 2 : 1);
+    name = camera + time;
     for (int copy = 1; copy < 100; copy++) {
         const QString suffix = copy == 1 ? QString() : QStringLiteral(" (%1)").arg(copy);
         QFile file(folder + u'/' + name + suffix + QStringLiteral(".jpg"));
