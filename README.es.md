@@ -38,6 +38,7 @@ nativa en Linux.
 - Calendario con los días que tienen grabación
 - Clic en cualquier punto de la línea de tiempo para reproducir desde ese momento, hasta 8x
 - Salto al siguiente evento o al anterior, también con Ctrl+Derecha y Ctrl+Izquierda
+- Lista de los eventos del día de las cámaras abiertas, que se reproducen con un clic
 - Hasta 4 canales reproducidos en sincronía, cada uno con su zoom digital
 - Exportar un fragmento a MP4, sin recomprimir, solo de las grabaciones que el usuario puede
   reproducir

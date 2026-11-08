@@ -104,4 +104,19 @@ TestCase {
         compare(Playback.previousEvent(day, 7230, 8), 7200)
         compare(Playback.nextEvent(spans, 0), -1)
     }
+
+    function test_the_events_of_the_day_come_by_time_with_their_camera() {
+        const spansOf = {
+            "1:2": [{ start: 100, end: 160, event: true }, { start: 160, end: 900, event: false },
+                    { start: 900, end: 960, event: true }],
+            "1:5": [{ start: 500, end: 530, event: true }, { start: 531, end: 560, event: true }],
+        }
+        const names = { "1:2": "Gate", "1:5": "Dock" }
+        compare(Playback.eventList(spansOf, names), [
+            { start: 100, end: 160, key: "1:2", name: "Gate" },
+            { start: 500, end: 560, key: "1:5", name: "Dock" },
+            { start: 900, end: 960, key: "1:2", name: "Gate" },
+        ])
+        compare(Playback.eventList({}, {}), [])
+    }
 }

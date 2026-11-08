@@ -35,6 +35,7 @@ Dahua HTTP API for everything else, so it does not need the vendor SDK and runs 
 - Calendar with the days that have recordings
 - Click anywhere on the timeline to play from that moment, at up to 8x
 - Jump to the next or previous event, also with Ctrl+Right and Ctrl+Left
+- List of the events of the day of the open cameras, which play with a click
 - Up to 4 channels played back in sync, each with its own digital zoom
 - Export a clip to MP4, without re-encoding, limited to the recordings the user can play
 

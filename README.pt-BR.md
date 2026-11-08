@@ -35,6 +35,7 @@ API HTTP da Dahua para o resto. Por isso não precisa do SDK do fabricante e rod
 - Calendário com os dias que têm gravação
 - Clique em qualquer ponto da linha do tempo para reproduzir a partir dali, em até 8x
 - Pule para o próximo evento ou para o anterior, também com Ctrl+Direita e Ctrl+Esquerda
+- Lista dos eventos do dia das câmeras abertas, que tocam com um clique
 - Até 4 canais reproduzidos em sincronia, cada um com seu zoom digital
 - Exportação de trechos em MP4, sem recompressão, só das gravações que o usuário pode reproduzir
 

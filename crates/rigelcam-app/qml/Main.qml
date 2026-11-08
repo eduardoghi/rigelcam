@@ -480,7 +480,7 @@ ApplicationWindow {
     readonly property bool inRecordings: mode === "recordings"
     // Off while a popup is open, which takes these keys for itself.
     readonly property bool playerKeys: inRecordings && playback.spans.length > 0 && !addDialog.visible && !removeDialog.visible && !exportDialog.visible
-        && !calendar.visible && !comboOpen && !gammaFocused
+        && !calendar.visible && !eventsPopup.visible && !comboOpen && !gammaFocused
     property bool comboOpen: false
     property bool gammaFocused: false
     // The player controls don't fit beside the sidebar, so it opens over the video on request.
@@ -2250,6 +2250,9 @@ ApplicationWindow {
         // What each camera recorded on the day, by key, and all of it together for the bar.
         property var spansOf: ({})
         property var spans: []
+        // The events of the open cameras, by time, for the list of the day.
+        readonly property var events: Playback.eventList(spansOf, Object.fromEntries(win.playbackCameras
+            .filter(camera => camera).map(camera => [win.cameraKey(camera.recorder, camera.number), camera.name])))
         // The clock of each recorder, by recorder, as { today, seconds }, since cameras of
         // different recorders can be open together and their clocks don't agree.
         property var clocks: ({})
@@ -3045,6 +3048,99 @@ ApplicationWindow {
                     AppToolTip {
                         visible: exportButton.hovered
                         text: exportButton.text
+                    }
+                }
+
+                AppButton {
+                    id: eventsButton
+                    enabled: playback.events.length > 0
+                    display: AbstractButton.IconOnly
+                    icon.source: "qrc:/rigelcam/icons/events.svg"
+                    text: qsTr("Events of the day")
+                    implicitWidth: 34
+                    leftPadding: 9
+                    rightPadding: 9
+                    onClicked: eventsPopup.open()
+                    AppToolTip {
+                        visible: eventsButton.hovered && !eventsPopup.visible
+                        text: eventsButton.text
+                    }
+
+                    // Stays open while it is used, so one event after another can be looked at.
+                    Popup {
+                        id: eventsPopup
+                        x: eventsButton.width - width
+                        y: -height - 6
+                        width: 300
+                        height: Math.min(eventsList.contentHeight + topPadding + bottomPadding, 380)
+                        modal: true
+                        dim: false
+                        focus: true
+                        padding: 4
+                        background: Rectangle {
+                            radius: 6
+                            color: colors.surface
+                            border.color: colors.line
+                        }
+                        // Opens on the event playing, or on the next one.
+                        onOpened: {
+                            const next = playback.events.findIndex(event => event.end > playback.position)
+                            eventsList.positionViewAtIndex(Math.max(0, next), ListView.Center)
+                        }
+
+                        ListView {
+                            id: eventsList
+                            anchors.fill: parent
+                            clip: true
+                            boundsBehavior: Flickable.StopAtBounds
+                            model: playback.events
+                            ScrollIndicator.vertical: ScrollIndicator {}
+                            delegate: ItemDelegate {
+                                id: eventRow
+                                required property var modelData
+                                readonly property bool playing: playback.position >= modelData.start
+                                    && playback.position < modelData.end
+                                readonly property int length: modelData.end - modelData.start
+                                width: ListView.view.width
+                                height: 32
+                                leftPadding: 8
+                                rightPadding: 10
+                                onClicked: playback.seek(modelData.start)
+                                background: Rectangle {
+                                    radius: 3
+                                    color: eventRow.playing || eventRow.hovered ? colors.raised : "transparent"
+                                }
+                                contentItem: RowLayout {
+                                    spacing: 10
+                                    Rectangle {
+                                        implicitWidth: 3
+                                        implicitHeight: 16
+                                        color: eventRow.playing ? colors.text : colors.waiting
+                                    }
+                                    Text {
+                                        text: playback.clockText(eventRow.modelData.start)
+                                        font.pixelSize: 13
+                                        font.features: { "tnum": 1 }
+                                        color: colors.text
+                                    }
+                                    Text {
+                                        Layout.fillWidth: true
+                                        text: eventRow.modelData.name
+                                        // The name comes from the recorder, so it can't be read as markup.
+                                        textFormat: Text.PlainText
+                                        elide: Text.ElideRight
+                                        font.pixelSize: 13
+                                        color: colors.muted
+                                    }
+                                    Text {
+                                        text: Math.floor(eventRow.length / 60) + ":" + String(eventRow.length % 60).padStart(2, "0")
+                                        font.pixelSize: 12
+                                        font.features: { "tnum": 1 }
+                                        color: colors.faint
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
 

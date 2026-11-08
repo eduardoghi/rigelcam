@@ -519,5 +519,9 @@
         <source>More</source>
         <translation>Más</translation>
     </message>
+    <message>
+        <source>Events of the day</source>
+        <translation>Eventos del día</translation>
+    </message>
 </context>
 </TS>

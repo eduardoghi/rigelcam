@@ -9,6 +9,8 @@ User-visible changes, newest first.
 - A button in the toolbar hides the names over the cameras of the grid, for cameras that print
   their own on the picture. A hidden name still shows under the mouse.
 - The timeline of the recordings shows the time under the mouse, with a thin line on the bar.
+- A list of the events of the day, for every open camera with its time, name and length, opens
+  from the bar of the recordings. A click plays the event.
 
 ### Changed
 

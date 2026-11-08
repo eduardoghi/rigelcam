@@ -141,3 +141,14 @@ function previousEvent(spans, position, rate) {
     const runs = eventRuns(spans).filter(run => run.start < position - 3 * (rate || 1))
     return runs.length > 0 ? runs[runs.length - 1].start : -1
 }
+
+// The events of every open camera as { start, end, key, name }, by time, for the list of the day.
+// `names` gives the name of each camera by its key.
+function eventList(spansOf, names) {
+    const list = []
+    for (const key of Object.keys(spansOf)) {
+        for (const run of eventRuns(spansOf[key]))
+            list.push({ start: run.start, end: run.end, key: key, name: names[key] ?? "" })
+    }
+    return list.sort((a, b) => a.start - b.start || a.name.localeCompare(b.name))
+}
