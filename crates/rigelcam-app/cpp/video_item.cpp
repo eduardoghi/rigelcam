@@ -34,7 +34,8 @@ QString writePhoto(const QImage &image, QString name) {
     name.replace(notAllowed, QStringLiteral("_"));
     while (name.startsWith(u'.')) name.remove(0, 1);
     // The time at the end stays whole, so only the camera name gives way.
-    static const QRegularExpression stamp(QStringLiteral(" \\d{4}-\\d{2}-\\d{2} \\d{2}-\\d{2}-\\d{2}$"));
+    // Any digits, since a system language can write the time with its own.
+    static const QRegularExpression stamp(QStringLiteral(" \\p{Nd}{4}-\\p{Nd}{2}-\\p{Nd}{2} \\p{Nd}{2}-\\p{Nd}{2}-\\p{Nd}{2}$"));
     const QRegularExpressionMatch found = stamp.match(name);
     const QString time = found.hasMatch() ? found.captured() : QString();
     QString camera = name.left(name.size() - time.size());
