@@ -2392,8 +2392,12 @@ ApplicationWindow {
                 const clock = now[1].split(":")
                 const seconds = parseInt(clock[0]) * 3600 + parseInt(clock[1]) * 60 + parseInt(clock[2])
                 clocks = Object.assign({}, clocks, { [recordings.recorder]: { today: now[0], seconds: seconds } })
-                spansOf = Object.assign({}, spansOf, { [key]: recordings.spans })
-                updateSpans()
+                // The day of today is asked again every minute, and most answers are the same. A new
+                // list would rebuild everything drawn from it, the list of events among them.
+                if (JSON.stringify(spansOf[key]) !== JSON.stringify(recordings.spans)) {
+                    spansOf = Object.assign({}, spansOf, { [key]: recordings.spans })
+                    updateSpans()
+                }
             }
             if (started)
                 syncCells()
@@ -3124,10 +3128,24 @@ ApplicationWindow {
 
                         ListView {
                             id: eventsList
+                            // The first event in view, which the list goes back to when a new
+                            // event comes in and the model is rebuilt, instead of the top.
+                            property int firstShown: 0
                             anchors.fill: parent
                             clip: true
                             boundsBehavior: Flickable.StopAtBounds
                             model: playback.events
+                            onContentYChanged: {
+                                const index = indexAt(0, contentY)
+                                if (index >= 0)
+                                    firstShown = playback.events[index].start
+                            }
+                            onModelChanged: {
+                                if (!eventsPopup.visible)
+                                    return
+                                const index = playback.events.findIndex(event => event.start >= firstShown)
+                                positionViewAtIndex(Math.max(0, index), ListView.Beginning)
+                            }
                             ScrollIndicator.vertical: ScrollIndicator {}
                             delegate: ItemDelegate {
                                 id: eventRow
