@@ -107,8 +107,8 @@ the same way. Its data is apart from a build made from source, so add the record
 
 ## Building
 
-You need Rust 1.98 or newer, Qt 6 with Qt Quick and the Linguist tools, and GStreamer 1.24 or newer
-with its base, good and bad plugins.
+You need Rust 1.98 or newer, Qt 6.6 or newer with Qt Quick and the Linguist tools, and GStreamer
+1.24 or newer with its base, good and bad plugins.
 
 ```sh
 cargo build --release -p rigelcam-app

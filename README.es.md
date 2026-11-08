@@ -114,8 +114,8 @@ a agregar los grabadores.
 
 ## Compilación
 
-Se necesita Rust 1.98 o superior, Qt 6 con Qt Quick y las herramientas de Linguist, y GStreamer 1.24
-o superior con los plugins base, good y bad.
+Se necesita Rust 1.98 o superior, Qt 6.6 o superior con Qt Quick y las herramientas de Linguist, y
+GStreamer 1.24 o superior con los plugins base, good y bad.
 
 ```sh
 cargo build --release -p rigelcam-app
