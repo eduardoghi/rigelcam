@@ -646,8 +646,12 @@ ApplicationWindow {
     }
 
     // Replaces whatever is in the recordings.
+    // From a camera watched live, which wants what it recorded today and not the day that was
+    // last open. Adding a camera to open recordings keeps their day, so they play together.
     function openPlayback(camera) {
         playback.clear()
+        playback.date = ""
+        playback.requestedDate = ""
         addPlayback(camera)
     }
 

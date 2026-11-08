@@ -36,6 +36,8 @@ User-visible changes, newest first.
 - In a narrow window the bar of the recordings shows the speeds as a list and the gamma without
   its label, instead of squeezing every control, and the bar of a camera open alone shortens a
   long name instead of pushing its buttons out of the window.
+- Recordings opened from a camera watched live start on today, instead of the day that was last
+  open in the recordings.
 - A recorder that answers without its list of channels is tried five times and then waits for
   the user, instead of every minute, which added a login to its log each time.
 - On Windows, an update that failed to start can be tried again without reopening the app.
