@@ -48,9 +48,9 @@ const DRM_FORMAT_NV12: u32 = 0x3231_564e;
 #[cfg(unix)]
 const DRM_FORMAT_P010: u32 = 0x3031_3050;
 const RTSP_FORBIDDEN: u32 = 403;
-/// A stream that stops sending frames without an error counts as lost after this long.
 /// Wait before a stream that dropped opens again, which grows while it keeps failing.
 const FIRST_RETRY_DELAY: Duration = Duration::from_secs(2);
+/// A stream that stops sending frames without an error counts as lost after this long.
 const STALL_TIMEOUT: Duration = Duration::from_secs(15);
 const PERMISSION_TIMEOUT: Duration = Duration::from_secs(10);
 /// The first frame also waits for the RTSP handshake and for a key frame.
