@@ -20,23 +20,23 @@ ApplicationWindow {
         id: colors
         readonly property bool dark: grid.theme ? grid.theme === "dark" : Qt.styleHints.colorScheme !== Qt.Light
         readonly property url logo: dark ? "qrc:/rigelcam/logo.svg" : "qrc:/rigelcam/logo-light.svg"
-        readonly property color page: dark ? "#0B101C" : "#E9EEF6"
-        readonly property color bar: dark ? "#0F1626" : "#FFFFFF"
-        readonly property color surface: dark ? "#121B2F" : "#F5F8FC"
-        readonly property color raised: dark ? "#1A2540" : "#E3EAF4"
-        readonly property color line: dark ? "#26324D" : "#D3DCE9"
-        readonly property color text: dark ? "#E4EEFF" : "#121B2F"
-        readonly property color muted: dark ? "#8A94A3" : "#5B6880"
-        readonly property color faint: dark ? "#5B6880" : "#7D8899"
-        readonly property color accent: dark ? "#3D84F7" : "#2F6FDB"
-        readonly property color accentHover: dark ? "#5A97F9" : "#3D84F7"
+        readonly property color page: dark ? "#111214" : "#F2F2F3"
+        readonly property color bar: dark ? "#17181B" : "#FFFFFF"
+        readonly property color surface: dark ? "#1C1D21" : "#F7F7F8"
+        readonly property color raised: dark ? "#26282D" : "#E8E9EB"
+        readonly property color line: dark ? "#2E3036" : "#D9DADD"
+        readonly property color text: dark ? "#ECEDEE" : "#17181B"
+        readonly property color muted: dark ? "#9A9DA3" : "#5E6168"
+        readonly property color faint: dark ? "#6B6E75" : "#8A8D93"
+        readonly property color accent: dark ? "#22A394" : "#0F8C7E"
+        readonly property color accentHover: dark ? "#2BB3A3" : "#14A090"
         readonly property color danger: dark ? "#E5484D" : "#CE2C31"
         readonly property color live: dark ? "#3DD68C" : "#1F9D63"
         readonly property color waiting: dark ? "#E5B94D" : "#A86B00"
-        readonly property color panel: dark ? "#D90F1626" : "#E6FFFFFF"
+        readonly property color panel: dark ? "#D917181B" : "#E6FFFFFF"
         // Over the video, which looks the same in both themes.
-        readonly property color overVideo: "#B30B101C"
-        readonly property color overVideoText: "#E4EEFF"
+        readonly property color overVideo: "#B3111214"
+        readonly property color overVideoText: "#ECEDEE"
     }
 
     component AppButton: Button {
@@ -59,7 +59,7 @@ ApplicationWindow {
         palette.buttonText: contentColor
         opacity: enabled ? 1 : 0.45
         background: Rectangle {
-            radius: 7
+            radius: 4
             color: button.hovered || button.visualFocus ? button.hoverFill : button.fill
             border.color: button.edge
         }
@@ -76,7 +76,7 @@ ApplicationWindow {
             color: colors.text
         }
         background: Rectangle {
-            radius: 6
+            radius: 4
             color: colors.raised
             border.color: colors.line
         }
@@ -109,9 +109,10 @@ ApplicationWindow {
         palette.text: colors.text
         palette.buttonText: colors.text
         background: Rectangle {
-            radius: 7
-            color: box.hovered ? colors.raised : colors.surface
-            border.color: colors.line
+            radius: 4
+            // A flat one, as in the toolbar, only lights up under the mouse.
+            color: box.hovered ? colors.raised : box.flat ? "transparent" : colors.surface
+            border.color: box.flat ? "transparent" : colors.line
         }
         contentItem: Text {
             leftPadding: 12
@@ -138,7 +139,7 @@ ApplicationWindow {
             height: 34
             highlighted: box.highlightedIndex === index
             background: Rectangle {
-                radius: 5
+                radius: 3
                 color: boxRow.highlighted ? colors.raised : "transparent"
             }
             contentItem: Text {
@@ -156,7 +157,7 @@ ApplicationWindow {
         // The default height leaves out the padding, which would make the list scroll.
         popup.height: popup.contentItem.implicitHeight + 2 * popup.padding
         popup.background: Rectangle {
-            radius: 8
+            radius: 5
             color: colors.surface
             border.color: colors.line
         }
@@ -296,7 +297,7 @@ ApplicationWindow {
         placeholderTextColor: colors.faint
         selectionColor: colors.accent
         background: Rectangle {
-            radius: 7
+            radius: 4
             color: colors.page
             border.color: field.activeFocus ? colors.accent : colors.line
         }
@@ -346,9 +347,9 @@ ApplicationWindow {
         anchors.centerIn: parent
         padding: 24
         topPadding: 8
-        Overlay.modal: Rectangle { color: "#B3060A12" }
+        Overlay.modal: Rectangle { color: "#B30A0A0B" }
         background: Rectangle {
-            radius: 12
+            radius: 8
             color: colors.surface
             border.color: colors.line
         }
@@ -798,11 +799,30 @@ ApplicationWindow {
                 sourceSize.height: 60
             }
 
-            AppButton {
+            // Both modes side by side, so the one open is plain to see.
+            Rectangle {
                 visible: win.recorderList.length > 0
-                text: win.inRecordings ? qsTr("Live") : qsTr("Recordings")
-                edge: colors.line
-                onClicked: win.setMode(win.inRecordings ? "live" : "recordings")
+                implicitWidth: modeRow.implicitWidth + 4
+                implicitHeight: 34
+                radius: 4
+                color: colors.surface
+                Row {
+                    id: modeRow
+                    anchors.centerIn: parent
+                    spacing: 2
+                    Repeater {
+                        model: [{ mode: "live", label: qsTr("Live") }, { mode: "recordings", label: qsTr("Recordings") }]
+                        AppButton {
+                            required property var modelData
+                            readonly property bool current: win.mode === modelData.mode
+                            text: modelData.label
+                            implicitHeight: 30
+                            fill: current ? colors.raised : "transparent"
+                            contentColor: current ? colors.text : colors.muted
+                            onClicked: win.setMode(modelData.mode)
+                        }
+                    }
+                }
             }
 
             Rectangle {
@@ -816,6 +836,8 @@ ApplicationWindow {
             Label {
                 visible: win.recorderList.length > 0 && !win.inRecordings
                 font.pixelSize: 13
+                // Digits of one width, so the text doesn't shift as cameras come and go.
+                font.features: { "tnum": 1 }
                 color: colors.muted
                 text: qsTr("%1 of %2 live").arg(win.liveCount).arg(win.includedCount)
             }
@@ -839,6 +861,7 @@ ApplicationWindow {
 
             AppComboBox {
                 id: layoutBox
+                flat: true
                 Layout.preferredWidth: 170
                 visible: win.recorderList.length > 0 && !win.inRecordings && win.layoutNames.length > 0
                 model: win.layoutNames.map((item, index) => ({ index: index, name: item.name }))
@@ -886,18 +909,49 @@ ApplicationWindow {
                 }
             }
 
-            AppComboBox {
-                Layout.preferredWidth: 150
+            // One button per grid size, each drawn as its grid.
+            Row {
                 visible: win.recorderList.length > 0 && !win.inRecordings
-                // Fixed, because a new list would reset the current row when the language changes.
-                model: [1, 2, 3, 4, 5, 6].map(columns => ({ columns: columns }))
-                labelOf: item => item.columns === 1 ? qsTr("1 square") : qsTr("%1 squares").arg(item.columns * item.columns)
-                valueRole: "columns"
-                currentIndex: win.cols - 1
-                onActivated: grid.setGridColumns(currentValue)
+                Repeater {
+                    model: 6
+                    AppButton {
+                        id: sizeButton
+                        required property int index
+                        readonly property int columns: index + 1
+                        readonly property bool current: win.cols === columns
+                        // Whole pixels for every size, so the small squares stay sharp.
+                        readonly property int cell: [14, 6, 4, 3, 2, 2][index]
+                        text: columns === 1 ? qsTr("1 square") : qsTr("%1 squares").arg(columns * columns)
+                        implicitWidth: 30
+                        leftPadding: 0
+                        rightPadding: 0
+                        fill: current ? colors.raised : "transparent"
+                        onClicked: grid.setGridColumns(columns)
+                        contentItem: Item {
+                            Grid {
+                                anchors.centerIn: parent
+                                columns: sizeButton.columns
+                                spacing: sizeButton.columns === 2 ? 2 : 1
+                                Repeater {
+                                    model: sizeButton.columns * sizeButton.columns
+                                    Rectangle {
+                                        width: sizeButton.cell
+                                        height: sizeButton.cell
+                                        color: sizeButton.current ? colors.text : colors.muted
+                                    }
+                                }
+                            }
+                        }
+                        AppToolTip {
+                            visible: sizeButton.hovered
+                            text: sizeButton.text
+                        }
+                    }
+                }
             }
 
             AppComboBox {
+                flat: true
                 Layout.preferredWidth: 136
                 model: [{ code: "pt_BR", label: "Português" }, { code: "en", label: "English" }, { code: "es", label: "Español" }]
                 textRole: "label"
@@ -1519,7 +1573,7 @@ ApplicationWindow {
                             Rectangle {
                                 width: parent.width
                                 height: 34
-                                radius: 5
+                                radius: 3
                                 color: recorderHover.hovered ? colors.raised : "transparent"
 
                                 RowLayout {
@@ -1651,7 +1705,7 @@ ApplicationWindow {
                                     })
                                     width: recorderGroup.width
                                     height: 30
-                                    radius: 5
+                                    radius: 3
                                     color: rowHover.hovered ? colors.raised : "transparent"
 
                                     RowLayout {
@@ -1925,7 +1979,7 @@ ApplicationWindow {
                 width: Math.min(cameraName.implicitWidth + 14,
                                 cameraArea.cellWidth - (cameraArea.hoveredKey === key ? 44 : 12))
                 height: cameraName.implicitHeight + 6
-                radius: 5
+                radius: 0
                 color: colors.overVideo
                 Text {
                     id: cameraName
@@ -2039,7 +2093,7 @@ ApplicationWindow {
         y: 12
         width: zoomBar.implicitWidth + 8
         height: 42
-        radius: 9
+        radius: 6
         color: colors.panel
         border.color: colors.line
         RowLayout {
@@ -2633,7 +2687,7 @@ ApplicationWindow {
                         y: 8
                         width: Math.min(cellName.implicitWidth + 14, cell.width - 16)
                         height: cellName.implicitHeight + 6
-                        radius: 5
+                        radius: 0
                         color: colors.overVideo
                         Text {
                             id: cellName
@@ -2793,7 +2847,7 @@ ApplicationWindow {
                             }
                         }
                         background: Rectangle {
-                            radius: 10
+                            radius: 6
                             color: colors.surface
                             border.color: colors.line
                         }
@@ -2833,7 +2887,7 @@ ApplicationWindow {
                                     readonly property bool recorded: inMonth && calendar.days.includes(model.day)
                                     implicitWidth: 34
                                     implicitHeight: 28
-                                    radius: 5
+                                    radius: 3
                                     color: recorded ? colors.accent : "transparent"
                                     opacity: inMonth ? 1 : 0.35
                                     Text {
@@ -2914,6 +2968,7 @@ ApplicationWindow {
                     Layout.leftMargin: 8
                     font.pixelSize: 15
                     font.weight: Font.Medium
+                    font.features: { "tnum": 1 }
                     color: colors.text
                     text: playback.clockText(playback.position)
                 }
@@ -3138,7 +3193,7 @@ ApplicationWindow {
         y: 14
         width: hintText.implicitWidth + 24
         height: 32
-        radius: 7
+        radius: 4
         color: colors.panel
         border.color: colors.line
         Text {
@@ -3156,7 +3211,7 @@ ApplicationWindow {
         z: 10
         width: dragName.implicitWidth + 24
         height: 32
-        radius: 7
+        radius: 4
         color: colors.raised
         border.color: colors.accent
         Drag.active: visible
@@ -3208,7 +3263,7 @@ ApplicationWindow {
         anchors.bottomMargin: win.inRecordings ? 124 : 20
         width: toastRow.implicitWidth + 28
         height: 54
-        radius: 9
+        radius: 6
         color: colors.panel
         border.color: colors.line
 
@@ -3256,7 +3311,7 @@ ApplicationWindow {
         anchors.margins: 20
         width: Math.min(420, parent.width - 32)
         height: updateLayout.implicitHeight + 24
-        radius: 9
+        radius: 6
         // Solid, so the grid under it doesn't get in the way of reading.
         color: colors.surface
         border.color: colors.line
@@ -3320,7 +3375,7 @@ ApplicationWindow {
         anchors.bottomMargin: (win.inRecordings ? 124 : 20) + (photoToast.visible ? 62 : 0)
         width: Math.min(420, parent.width - 32)
         height: 62
-        radius: 9
+        radius: 6
         color: colors.panel
         border.color: colors.line
         RowLayout {
