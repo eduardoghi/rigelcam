@@ -27,8 +27,9 @@ pub fn file_stem(camera: &str, date: &str, start: u32, end: u32) -> String {
             '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => '_',
             c if c.is_control() => '_',
             // Marks that turn text around or hide in it, which could show the name backwards.
-            '\u{200B}'..='\u{200F}'
-            | '\u{202A}'..='\u{202E}'
+            '\u{061C}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{2028}'..='\u{202E}'
             | '\u{2066}'..='\u{2069}'
             | '\u{FEFF}' => '_',
             c => c,

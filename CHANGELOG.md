@@ -48,8 +48,10 @@ User-visible changes, newest first.
   longer close the app or freeze the video.
 - On Windows, a clip can't be exported while an update downloads, since the app closes when the
   installer starts and the clip was lost.
-- Marks that turn text around, such as U+202E, are replaced in the names of exported videos, so
-  a camera name can't show a file name backwards.
+- Marks that turn text around, such as U+202E, are replaced in the names of exported videos and
+  photos, so a camera name can't show a file name backwards.
+- A photo of a camera with a long name keeps its date and time, which were the part cut to fit
+  the length of a file name.
 - A recorder list edited by hand with two recorders on one id, or an id the interface can't hold,
   opens without them, since they would share a password in the keyring. A folder that refuses
   its permissions no longer stops the list from being saved.
