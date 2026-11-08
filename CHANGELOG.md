@@ -21,6 +21,11 @@ User-visible changes, newest first.
 - An empty square of the grid shows a faint plus, and its hint only under the mouse or while a
   camera is dragged. About, the theme and full screen moved to a menu at the end of the toolbar.
 
+### Fixed
+
+- A recorder that answers without its list of channels is tried five times and then waits for
+  the user, instead of every minute, which added a login to its log each time.
+
 ## [0.1.4] (2026-11-07)
 
 ### Added

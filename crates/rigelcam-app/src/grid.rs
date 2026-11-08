@@ -323,6 +323,20 @@ const PERMISSION_MEMORY: Duration = Duration::from_secs(10 * 60);
 
 const FIRST_RETRY_DELAY: Duration = Duration::from_secs(5);
 const MAX_RETRY_DELAY: Duration = Duration::from_secs(60);
+/// Tries of a recorder that answers but not with its channels. Each one is a login in its log, so
+/// after these it waits for the user to try again.
+const MAX_ANSWERED_RETRIES: u32 = 5;
+
+/// What to do after a recorder failed to list its channels.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Retry {
+    /// It couldn't be reached, which leaves nothing in its log.
+    Always,
+    /// It answered with an error or something that isn't a channel list, as one that is starting
+    /// does for a while, but also one that never will.
+    Limited,
+    Never,
+}
 
 fn report_refused(thread: &CxxQtThread<qobject::CameraGrid>, recorder: i32) {
     let _ = thread.queue(move |grid: Pin<&mut qobject::CameraGrid>| {
@@ -493,6 +507,8 @@ pub struct CameraGridRust {
     /// Latest try for each recorder, so an older answer or retry is ignored.
     attempts: HashMap<u64, u64>,
     retry_delays: HashMap<u64, Duration>,
+    /// Retries spent on a recorder that answered, against MAX_ANSWERED_RETRIES.
+    answered_retries: HashMap<u64, u32>,
 }
 
 impl qobject::CameraGrid {
@@ -717,6 +733,7 @@ impl qobject::CameraGrid {
         let mut state = self.as_mut().rust_mut();
         state.failures.remove(&id);
         state.retry_delays.remove(&id);
+        state.answered_retries.remove(&id);
         self.as_mut().publish_tree();
         self.attempt_recorder(id, fill_empty_grid);
     }
@@ -742,7 +759,7 @@ impl qobject::CameraGrid {
             // Off the interface thread, since a locked keyring waits for the user to unlock it.
             let result = SystemKeyring
                 .get(id)
-                .map_err(|error| (error.to_string(), false))
+                .map_err(|error| (error.to_string(), Retry::Never))
                 .and_then(|password| {
                     let address = recorder.address();
                     let gate = client_for(&address, &recorder.user, &password);
@@ -762,13 +779,13 @@ impl qobject::CameraGrid {
                             Ok((connection, channels))
                         }
                         Err(error) => {
-                            // A recorder that is starting answers errors for a while.
-                            let retry = matches!(
-                                error,
-                                RecorderError::Http(_)
-                                    | RecorderError::Status(500..=599)
-                                    | RecorderError::Unexpected(_)
-                            );
+                            let retry = match error {
+                                RecorderError::Http(_) => Retry::Always,
+                                RecorderError::Status(500..=599) | RecorderError::Unexpected(_) => {
+                                    Retry::Limited
+                                }
+                                _ => Retry::Never,
+                            };
                             Err((recorder_message(&error), retry))
                         }
                     }
@@ -783,14 +800,25 @@ impl qobject::CameraGrid {
                         let mut state = grid.as_mut().rust_mut();
                         state.failures.remove(&id);
                         state.retry_delays.remove(&id);
+                        state.answered_retries.remove(&id);
                         state.connections.insert(id, connection);
                         state.channels.insert(id, channels.clone());
                         // Before the tree, so no camera outside the grid gets opened.
                         grid.as_mut().merge_layout(id, &channels, fill_empty_grid);
                     }
                     Err((message, retry)) => {
-                        grid.as_mut().rust_mut().failures.insert(id, message);
-                        if retry {
+                        let mut state = grid.as_mut().rust_mut();
+                        state.failures.insert(id, message);
+                        let again = match retry {
+                            Retry::Always => true,
+                            Retry::Limited => {
+                                let spent = state.answered_retries.entry(id).or_default();
+                                *spent += 1;
+                                *spent <= MAX_ANSWERED_RETRIES
+                            }
+                            Retry::Never => false,
+                        };
+                        if again {
                             grid.as_mut().schedule_retry(id, attempt, fill_empty_grid);
                         }
                     }
@@ -1499,6 +1527,7 @@ impl qobject::CameraGrid {
         state.channels.remove(&id);
         state.failures.remove(&id);
         state.retry_delays.remove(&id);
+        state.answered_retries.remove(&id);
         // Bumped and never reset, so a try still on its way can't pass for a later one.
         *state.attempts.entry(id).or_default() += 1;
     }
