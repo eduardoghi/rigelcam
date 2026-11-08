@@ -1131,6 +1131,7 @@ ApplicationWindow {
             httpField.text = recorder ? recorder.httpPort : 80
             rtspField.text = recorder ? recorder.rtspPort : 554
             advanced = recorder !== null && (recorder.httpPort !== 80 || recorder.rtspPort !== 554)
+            passwordField.shown = false
             open()
         }
 
@@ -1167,9 +1168,33 @@ ApplicationWindow {
             FormLabel { text: qsTr("Password") }
             FormField {
                 id: passwordField
-                echoMode: TextInput.Password
+                // A wrong password tried a few times can lock the user out of the recorder, so it
+                // can be checked before saving.
+                property bool shown: false
+                echoMode: shown ? TextInput.Normal : TextInput.Password
+                rightPadding: 40
                 placeholderText: addDialog.editing ? qsTr("Blank to keep the current one") : ""
                 onAccepted: addDialog.submit()
+                AppButton {
+                    id: revealButton
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.rightMargin: 4
+                    display: AbstractButton.IconOnly
+                    icon.source: passwordField.shown ? "qrc:/rigelcam/icons/eye-off.svg" : "qrc:/rigelcam/icons/eye.svg"
+                    text: passwordField.shown ? qsTr("Hide password") : qsTr("Show password")
+                    implicitWidth: 30
+                    implicitHeight: 30
+                    leftPadding: 7
+                    rightPadding: 7
+                    contentColor: colors.muted
+                    focusPolicy: Qt.NoFocus
+                    onClicked: passwordField.shown = !passwordField.shown
+                    AppToolTip {
+                        visible: revealButton.hovered
+                        text: revealButton.text
+                    }
+                }
             }
             AppButton {
                 Layout.topMargin: 6

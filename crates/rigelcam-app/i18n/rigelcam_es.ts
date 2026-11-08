@@ -523,5 +523,13 @@
         <source>Events of the day</source>
         <translation>Eventos del día</translation>
     </message>
+    <message>
+        <source>Show password</source>
+        <translation>Mostrar la contraseña</translation>
+    </message>
+    <message>
+        <source>Hide password</source>
+        <translation>Ocultar la contraseña</translation>
+    </message>
 </context>
 </TS>

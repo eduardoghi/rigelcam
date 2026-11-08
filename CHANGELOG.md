@@ -11,6 +11,8 @@ User-visible changes, newest first.
 - The timeline of the recordings shows the time under the mouse, with a thin line on the bar.
 - A list of the events of the day, for every open camera with its time, name and length, opens
   from the bar of the recordings. A click plays the event.
+- The password of a recorder can be shown while typing it, to check it before saving, since a
+  wrong one tried a few times can lock the user out of the recorder.
 
 ### Changed
 
