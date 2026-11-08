@@ -201,7 +201,7 @@
     </message>
     <message>
         <source>Drag a camera here</source>
-        <translation>Arraste uma câmera</translation>
+        <translation>Arraste uma câmera aqui</translation>
     </message>
     <message>
         <source>Test and save</source>

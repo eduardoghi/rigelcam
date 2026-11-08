@@ -113,7 +113,7 @@
     </message>
     <message>
         <source>You don&apos;t have permission to see the recordings of this camera.</source>
-        <translation>No tienes permiso para ver las grabaciones de esta cámara.</translation>
+        <translation>No tiene permiso para ver las grabaciones de esta cámara.</translation>
     </message>
     <message>
         <source>Version %1 is available.</source>
