@@ -82,6 +82,21 @@ ApplicationWindow {
         }
     }
 
+    // A button with only an icon in the toolbars, its text shown as a tip under the mouse.
+    component IconButton: AppButton {
+        id: iconButton
+        property string tip: text
+        property bool tipVisible: hovered
+        display: AbstractButton.IconOnly
+        implicitWidth: 34
+        leftPadding: 9
+        rightPadding: 9
+        AppToolTip {
+            visible: iconButton.tipVisible
+            text: iconButton.tip
+        }
+    }
+
     component PrimaryButton: AppButton {
         contentColor: "#FFFFFF"
         fill: colors.accent
@@ -372,6 +387,66 @@ ApplicationWindow {
         background: Rectangle {
             radius: 3
             color: menuItem.highlighted ? colors.raised : "transparent"
+        }
+    }
+
+    // The name of a camera over its video, with square corners like the text a camera prints.
+    component OverlayLabel: Rectangle {
+        property alias text: overlayText.text
+        property real maxWidth: Infinity
+        width: Math.min(overlayText.implicitWidth + 14, maxWidth)
+        height: overlayText.implicitHeight + 6
+        color: colors.overVideo
+        Text {
+            id: overlayText
+            anchors.fill: parent
+            anchors.leftMargin: 7
+            anchors.rightMargin: 7
+            verticalAlignment: Text.AlignVCenter
+            // Names come from the recorder, so they can't be read as markup.
+            textFormat: Text.PlainText
+            elide: Text.ElideRight
+            font.pixelSize: 12
+            font.weight: Font.Medium
+            color: colors.overVideoText
+        }
+    }
+
+    component DangerButton: AppButton {
+        fill: colors.danger
+        hoverFill: "#F2666A"
+        contentColor: "#FFFFFF"
+    }
+
+    // Asks before something that can't be undone, with the button that does it in red.
+    component ConfirmDialog: AppDialog {
+        id: confirm
+        property string message
+        signal confirmed()
+        width: Math.min(400, parent.width - 32)
+        ColumnLayout {
+            anchors.fill: parent
+            spacing: 18
+            Label {
+                Layout.fillWidth: true
+                wrapMode: Text.WordWrap
+                textFormat: Text.PlainText
+                font.pixelSize: 14
+                color: colors.muted
+                text: confirm.message
+            }
+            RowLayout {
+                Layout.alignment: Qt.AlignRight
+                spacing: 8
+                AppButton { text: qsTr("Cancel"); onClicked: confirm.close() }
+                DangerButton {
+                    text: qsTr("Delete")
+                    onClicked: {
+                        confirm.confirmed()
+                        confirm.close()
+                    }
+                }
+            }
         }
     }
 
@@ -814,24 +889,16 @@ ApplicationWindow {
             anchors.rightMargin: 14
             spacing: 12
 
-            AppButton {
+            IconButton {
                 id: sidebarButton
                 visible: win.recorderList.length > 0
-                display: AbstractButton.IconOnly
                 icon.source: "qrc:/rigelcam/icons/sidebar.svg"
                 text: sidebar.open ? qsTr("Hide cameras") : qsTr("Show cameras")
-                implicitWidth: 34
-                leftPadding: 9
-                rightPadding: 9
                 onClicked: {
                     if (win.narrowPlayer)
                         win.sidebarFloating = !win.sidebarFloating
                     else
                         grid.saveSidebarCollapsed(!grid.sidebarCollapsed)
-                }
-                AppToolTip {
-                    visible: sidebarButton.hovered
-                    text: sidebarButton.text
                 }
             }
 
@@ -925,55 +992,31 @@ ApplicationWindow {
                 onActivated: index => grid.selectLayout(index)
             }
 
-            AppButton {
+            IconButton {
                 id: newLayoutButton
                 visible: layoutBox.visible
-                display: AbstractButton.IconOnly
                 icon.source: "qrc:/rigelcam/icons/plus.svg"
                 text: qsTr("New grid")
-                implicitWidth: 34
-                leftPadding: 9
-                rightPadding: 9
                 onClicked: grid.addLayout()
-                AppToolTip {
-                    visible: newLayoutButton.hovered
-                    text: newLayoutButton.text
-                }
             }
 
-            AppButton {
+            IconButton {
                 id: layoutButton
                 visible: layoutBox.visible
-                display: AbstractButton.IconOnly
                 icon.source: "qrc:/rigelcam/icons/edit.svg"
                 text: qsTr("Edit grid")
-                implicitWidth: 34
-                leftPadding: 9
-                rightPadding: 9
                 onClicked: layoutDialog.openFor(grid.currentLayout)
-                AppToolTip {
-                    visible: layoutButton.hovered
-                    text: layoutButton.text
-                }
             }
 
-            AppButton {
+            IconButton {
                 id: namesButton
                 visible: win.recorderList.length > 0 && !win.inRecordings
-                display: AbstractButton.IconOnly
                 icon.source: "qrc:/rigelcam/icons/names.svg"
                 text: grid.cameraNamesHidden ? qsTr("Show camera names") : qsTr("Hide camera names")
-                implicitWidth: 34
-                leftPadding: 9
-                rightPadding: 9
                 // Lit while the names show, like the size of the grid in use.
                 fill: grid.cameraNamesHidden ? "transparent" : colors.raised
                 contentColor: grid.cameraNamesHidden ? colors.muted : colors.text
                 onClicked: grid.saveCameraNamesHidden(!grid.cameraNamesHidden)
-                AppToolTip {
-                    visible: namesButton.hovered
-                    text: namesButton.text
-                }
             }
 
             // One button per grid size, each drawn as its grid.
@@ -1018,20 +1061,12 @@ ApplicationWindow {
             }
 
             // What is seldom used, out of the way of the controls of the grid.
-            AppButton {
+            IconButton {
                 id: moreButton
-                display: AbstractButton.IconOnly
                 icon.source: "qrc:/rigelcam/icons/more.svg"
                 text: qsTr("More")
-                implicitWidth: 34
-                leftPadding: 9
-                rightPadding: 9
                 // A press on its own button doesn't close a menu, so the button does it.
                 onClicked: moreMenu.visible ? moreMenu.close() : moreMenu.open()
-                AppToolTip {
-                    visible: moreButton.hovered && !moreMenu.visible
-                    text: moreButton.text
-                }
                 AppMenu {
                     id: moreMenu
                     x: moreButton.width - width
@@ -1075,6 +1110,7 @@ ApplicationWindow {
                         onTriggered: grid.saveLanguage("es")
                     }
                 }
+                tipVisible: hovered && !moreMenu.visible
             }
         }
     }
@@ -1445,79 +1481,26 @@ ApplicationWindow {
         }
     }
 
-    AppDialog {
+    ConfirmDialog {
         id: removeLayoutDialog
         property int index: 0
         title: qsTr("Delete grid")
-        width: Math.min(400, parent.width - 32)
+        message: qsTr("Really delete %1? Its cameras stay in the sidebar.")
+            .arg(win.layoutLabel(index, win.layoutNames[index]?.name ?? ""))
+        onConfirmed: grid.removeLayout(index)
 
         function openFor(index) {
             removeLayoutDialog.index = index
             open()
         }
-
-        ColumnLayout {
-            anchors.fill: parent
-            spacing: 18
-            Label {
-                Layout.fillWidth: true
-                wrapMode: Text.WordWrap
-                textFormat: Text.PlainText
-                font.pixelSize: 14
-                color: colors.muted
-                text: qsTr("Really delete %1? Its cameras stay in the sidebar.")
-                    .arg(win.layoutLabel(removeLayoutDialog.index, win.layoutNames[removeLayoutDialog.index]?.name ?? ""))
-            }
-            RowLayout {
-                Layout.alignment: Qt.AlignRight
-                spacing: 8
-                AppButton { text: qsTr("Cancel"); onClicked: removeLayoutDialog.close() }
-                AppButton {
-                    text: qsTr("Delete")
-                    fill: colors.danger
-                    hoverFill: "#F2666A"
-                    contentColor: "#FFFFFF"
-                    onClicked: {
-                        grid.removeLayout(removeLayoutDialog.index)
-                        removeLayoutDialog.close()
-                    }
-                }
-            }
-        }
     }
 
-    AppDialog {
+    ConfirmDialog {
         id: removeDialog
         property var recorder: null
         title: qsTr("Delete recorder")
-        width: Math.min(400, parent.width - 32)
-        ColumnLayout {
-            anchors.fill: parent
-            spacing: 18
-            Label {
-                Layout.fillWidth: true
-                wrapMode: Text.WordWrap
-                textFormat: Text.PlainText
-                font.pixelSize: 14
-                color: colors.muted
-                text: qsTr("Really delete %1? The saved password will be erased, and the recordings on the device stay as they are.").arg(removeDialog.recorder ? removeDialog.recorder.name : "")
-            }
-            RowLayout {
-                Layout.alignment: Qt.AlignRight
-                spacing: 8
-                AppButton { text: qsTr("Cancel"); onClicked: removeDialog.close() }
-                AppButton {
-                    text: qsTr("Delete")
-                    fill: colors.danger
-                    hoverFill: "#F2666A"
-                    contentColor: "#FFFFFF"
-                    onClicked: {
-                        grid.removeRecorder(removeDialog.recorder.id)
-                        removeDialog.close()
-                    }
-                }
-            }
-        }
+        message: qsTr("Really delete %1? The saved password will be erased, and the recordings on the device stay as they are.").arg(recorder ? recorder.name : "")
+        onConfirmed: grid.removeRecorder(recorder.id)
     }
 
     Column {
@@ -2065,7 +2048,7 @@ ApplicationWindow {
             model: tileModel
 
             // At the top because recorders usually print their own title at the bottom left.
-            Rectangle {
+            OverlayLabel {
                 id: nameTag
                 required property string key
                 required property string label
@@ -2075,25 +2058,8 @@ ApplicationWindow {
                     && (!grid.cameraNamesHidden || cameraArea.hoveredKey === key)
                 x: (square % win.cols) * (cameraArea.cellWidth + 2) + 6
                 y: Math.floor(square / win.cols) * (cameraArea.cellHeight + 2) + 6
-                width: Math.min(cameraName.implicitWidth + 14,
-                                cameraArea.cellWidth - (cameraArea.hoveredKey === key ? 44 : 12))
-                height: cameraName.implicitHeight + 6
-                radius: 0
-                color: colors.overVideo
-                Text {
-                    id: cameraName
-                    anchors.fill: parent
-                    anchors.leftMargin: 7
-                    anchors.rightMargin: 7
-                    verticalAlignment: Text.AlignVCenter
-                    text: nameTag.label
-                    // The name comes from the recorder, so it can't be read as markup.
-                    textFormat: Text.PlainText
-                    elide: Text.ElideRight
-                    font.pixelSize: 12
-                    font.weight: Font.Medium
-                    color: colors.overVideoText
-                }
+                text: label
+                maxWidth: cameraArea.cellWidth - (cameraArea.hoveredKey === key ? 44 : 12)
             }
         }
 
@@ -2240,35 +2206,20 @@ ApplicationWindow {
                 font.weight: Font.Medium
                 color: colors.text
             }
-            AppButton {
+            IconButton {
                 id: zoomPhoto
-                display: AbstractButton.IconOnly
                 icon.source: "qrc:/rigelcam/icons/camera.svg"
                 text: qsTr("Save photo")
-                implicitWidth: 34
-                leftPadding: 9
-                rightPadding: 9
                 onClicked: win.photoRequested()
-                AppToolTip {
-                    visible: zoomPhoto.hovered
-                    text: zoomPhoto.text + " (Ctrl+S)"
-                }
+                tip: text + " (Ctrl+S)"
             }
-            AppButton {
+            IconButton {
                 id: zoomOut
                 Layout.leftMargin: 8
                 enabled: win.zoom.scale > 1
-                display: AbstractButton.IconOnly
                 icon.source: "qrc:/rigelcam/icons/minus.svg"
                 text: qsTr("Zoom out")
-                implicitWidth: 34
-                leftPadding: 9
-                rightPadding: 9
                 onClicked: win.zoom.zoomAt(win.zoom.scale / 1.5, 0.5, 0.5)
-                AppToolTip {
-                    visible: zoomOut.hovered
-                    text: zoomOut.text
-                }
             }
             Text {
                 text: Math.round(win.zoom.scale * 100) + "%"
@@ -2277,20 +2228,12 @@ ApplicationWindow {
                 font.pixelSize: 13
                 color: colors.text
             }
-            AppButton {
+            IconButton {
                 id: zoomIn
                 enabled: win.zoom.scale < 8
-                display: AbstractButton.IconOnly
                 icon.source: "qrc:/rigelcam/icons/plus.svg"
                 text: qsTr("Zoom in")
-                implicitWidth: 34
-                leftPadding: 9
-                rightPadding: 9
                 onClicked: win.zoom.zoomAt(win.zoom.scale * 1.5, 0.5, 0.5)
-                AppToolTip {
-                    visible: zoomIn.hovered
-                    text: zoomIn.text
-                }
             }
             SuperResolutionButton { Layout.leftMargin: 8 }
             RtxHdrButton {}
@@ -2812,28 +2755,12 @@ ApplicationWindow {
                         zoom: cell.zoom
                     }
 
-                    Rectangle {
+                    OverlayLabel {
                         visible: cell.camera !== null && videoArea.used.length > 1
                         x: 8
                         y: 8
-                        width: Math.min(cellName.implicitWidth + 14, cell.width - 16)
-                        height: cellName.implicitHeight + 6
-                        radius: 0
-                        color: colors.overVideo
-                        Text {
-                            id: cellName
-                            anchors.fill: parent
-                            anchors.leftMargin: 7
-                            anchors.rightMargin: 7
-                            verticalAlignment: Text.AlignVCenter
-                            text: cell.camera ? cell.camera.name : ""
-                            // The name comes from the recorder, so it can't be read as markup.
-                            textFormat: Text.PlainText
-                            elide: Text.ElideRight
-                            font.pixelSize: 12
-                            font.weight: Font.Medium
-                            color: colors.overVideoText
-                        }
+                        text: cell.camera ? cell.camera.name : ""
+                        maxWidth: cell.width - 16
                     }
 
                     AppButton {
@@ -3109,36 +3036,20 @@ ApplicationWindow {
 
                 Item { Layout.fillWidth: true }
 
-                AppButton {
+                IconButton {
                     id: exportButton
                     enabled: playback.spans.length > 0
-                    display: AbstractButton.IconOnly
                     icon.source: "qrc:/rigelcam/icons/download.svg"
                     text: qsTr("Export clip")
-                    implicitWidth: 34
-                    leftPadding: 9
-                    rightPadding: 9
                     onClicked: exportDialog.openAt(playback.position)
-                    AppToolTip {
-                        visible: exportButton.hovered
-                        text: exportButton.text
-                    }
                 }
 
-                AppButton {
+                IconButton {
                     id: eventsButton
                     enabled: playback.events.length > 0
-                    display: AbstractButton.IconOnly
                     icon.source: "qrc:/rigelcam/icons/events.svg"
                     text: qsTr("Events of the day")
-                    implicitWidth: 34
-                    leftPadding: 9
-                    rightPadding: 9
                     onClicked: eventsPopup.open()
-                    AppToolTip {
-                        visible: eventsButton.hovered && !eventsPopup.visible
-                        text: eventsButton.text
-                    }
 
                     // Stays open while it is used, so one event after another can be looked at.
                     Popup {
@@ -3232,6 +3143,7 @@ ApplicationWindow {
                             }
                         }
                     }
+                    tipVisible: hovered && !eventsPopup.visible
                 }
 
                 SuperResolutionButton {
