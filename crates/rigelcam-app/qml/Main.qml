@@ -2275,9 +2275,13 @@ ApplicationWindow {
         // What each camera recorded on the day, by key, and all of it together for the bar.
         property var spansOf: ({})
         property var spans: []
-        // The events of the open cameras, by time, for the list of the day.
-        readonly property var events: Playback.eventList(spansOf, Object.fromEntries(win.playbackCameras
-            .filter(camera => camera).map(camera => [win.cameraKey(camera.recorder, camera.number), camera.name])))
+        // The events of the open cameras, by time, for the list of the day. Without
+        // Object.fromEntries, which the JavaScript of QML doesn't have.
+        readonly property var events: Playback.eventList(spansOf, win.playbackCameras.reduce((names, camera) => {
+            if (camera)
+                names[win.cameraKey(camera.recorder, camera.number)] = camera.name
+            return names
+        }, {}))
         // The clock of each recorder, by recorder, as { today, seconds }, since cameras of
         // different recorders can be open together and their clocks don't agree.
         property var clocks: ({})
