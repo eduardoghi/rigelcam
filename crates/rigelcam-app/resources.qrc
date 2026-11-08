@@ -32,4 +32,5 @@
     <file>icons/chevron.svg</file>
     <file>icons/camera-off.svg</file>
     <file>icons/check.svg</file>
+    <file>icons/blank.svg</file>
 </qresource></RCC>

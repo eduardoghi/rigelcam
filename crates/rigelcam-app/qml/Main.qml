@@ -413,6 +413,8 @@ ApplicationWindow {
     readonly property var gridKeys: gridLayout.cameras.map(c => c ? cameraKey(c.recorder, c.channel) : null)
     readonly property var tileKeys: recorderList.reduce((keys, r) => keys.concat(r.cameras.map(c => cameraKey(r.id, c.number))), [])
     readonly property int cols: gridLayout.columns
+    // Below this the top bar doesn't fit, so the logo becomes the icon and the count goes.
+    readonly property bool narrowBar: width < 1150
     // The saved grids as { name }, the one on screen at grid.currentLayout.
     readonly property var layoutNames: grid.layouts ? JSON.parse(grid.layouts) : []
     readonly property bool layoutKeys: !inRecordings && layoutNames.length > 1 && zoomed === "" && dragged === null
@@ -833,12 +835,13 @@ ApplicationWindow {
                 }
             }
 
+            // Only the icon in a narrow window, where the whole bar wouldn't fit.
             Image {
-                source: colors.logo
+                source: win.narrowBar ? "qrc:/rigelcam/icon-64.png" : colors.logo
                 fillMode: Image.PreserveAspectFit
                 Layout.preferredHeight: 30
-                Layout.preferredWidth: 130
-                Layout.rightMargin: 12
+                Layout.preferredWidth: win.narrowBar ? 30 : 130
+                Layout.rightMargin: win.narrowBar ? 4 : 12
                 sourceSize.height: 60
             }
 
@@ -877,7 +880,8 @@ ApplicationWindow {
                 Layout.leftMargin: 4
             }
             Label {
-                visible: win.recorderList.length > 0 && !win.inRecordings
+                // The dot before it still tells whether cameras are live.
+                visible: win.recorderList.length > 0 && !win.inRecordings && !win.narrowBar
                 font.pixelSize: 13
                 // Digits of one width, so the text doesn't shift as cameras come and go.
                 font.features: { "tnum": 1 }
@@ -1013,16 +1017,6 @@ ApplicationWindow {
                 }
             }
 
-            AppComboBox {
-                flat: true
-                Layout.preferredWidth: 136
-                model: [{ code: "pt_BR", label: "Português" }, { code: "en", label: "English" }, { code: "es", label: "Español" }]
-                textRole: "label"
-                valueRole: "code"
-                currentIndex: model.findIndex(l => l.code === grid.language)
-                onActivated: grid.saveLanguage(currentValue)
-            }
-
             // What is seldom used, out of the way of the controls of the grid.
             AppButton {
                 id: moreButton
@@ -1056,6 +1050,29 @@ ApplicationWindow {
                         icon.source: "qrc:/rigelcam/icons/fullscreen.svg"
                         text: qsTr("Full screen (F11)")
                         onTriggered: win.toggleFullScreen()
+                    }
+                    MenuSeparator {
+                        contentItem: Rectangle {
+                            implicitHeight: 1
+                            color: colors.line
+                        }
+                    }
+                    // In their own names, so someone who can't read the current one finds theirs.
+                    AppMenuItem {
+                        text: "Português"
+                        // An empty icon on the others, so the names line up.
+                        icon.source: grid.language === "pt_BR" ? "qrc:/rigelcam/icons/check.svg" : "qrc:/rigelcam/icons/blank.svg"
+                        onTriggered: grid.saveLanguage("pt_BR")
+                    }
+                    AppMenuItem {
+                        text: "English"
+                        icon.source: grid.language === "en" ? "qrc:/rigelcam/icons/check.svg" : "qrc:/rigelcam/icons/blank.svg"
+                        onTriggered: grid.saveLanguage("en")
+                    }
+                    AppMenuItem {
+                        text: "Español"
+                        icon.source: grid.language === "es" ? "qrc:/rigelcam/icons/check.svg" : "qrc:/rigelcam/icons/blank.svg"
+                        onTriggered: grid.saveLanguage("es")
                     }
                 }
             }

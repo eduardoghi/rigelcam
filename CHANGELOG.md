@@ -19,7 +19,9 @@ User-visible changes, newest first.
 - A more sober look, with neutral gray surfaces, a blue accent and a new logo, smaller corners,
   live and recordings as two halves of one control and the grid size as a row of buttons.
 - An empty square of the grid shows a faint plus, and its hint only under the mouse or while a
-  camera is dragged. About, the theme and full screen moved to a menu at the end of the toolbar.
+  camera is dragged. About, the theme, full screen and the language moved to a menu at the end
+  of the toolbar, which fits a window of 900 px with the logo as an icon and without the count of
+  live cameras.
 
 ### Fixed
 
