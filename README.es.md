@@ -116,6 +116,8 @@ a agregar los grabadores.
 
 Se necesita Rust 1.98 o superior, Qt 6.6 o superior con Qt Quick y las herramientas de Linguist, y
 GStreamer 1.24 o superior con los plugins base, good y bad.
+En Linux también necesita los archivos de desarrollo de EGL y OpenGL ES, `libegl-dev` y
+`libgles-dev` en Debian y Ubuntu.
 
 ```sh
 cargo build --release -p rigelcam-app

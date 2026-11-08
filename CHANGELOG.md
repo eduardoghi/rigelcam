@@ -102,7 +102,8 @@ User-visible changes, newest first.
 - The calendar only asks the recorder for days that exist.
 - An export checks the permission of the camera first, also for a camera that was never played.
   The answer holds for 10 minutes, so exporting the same camera again adds no login to the recorder.
-- A download stops 60 seconds after the recorder goes silent, instead of holding its connection.
+- An export stops 30 seconds after the recorder goes silent, and a recording played over HTTP
+  after 15, instead of holding the connection.
 - Starting over after a damaged list of recorders can't reuse an id with a saved password.
 - `rigelcam-cli` cleans what the recorder sends before printing an error.
 - Recordings of cameras from different recorders follow the clock of the one that is behind, so

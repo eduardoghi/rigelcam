@@ -109,6 +109,8 @@ the same way. Its data is apart from a build made from source, so add the record
 
 You need Rust 1.98 or newer, Qt 6.6 or newer with Qt Quick and the Linguist tools, and GStreamer
 1.24 or newer with its base, good and bad plugins.
+On Linux it also needs the development files of EGL and OpenGL ES, `libegl-dev` and `libgles-dev`
+on Debian and Ubuntu.
 
 ```sh
 cargo build --release -p rigelcam-app
