@@ -136,6 +136,8 @@ pub fn buffer_of(frame: Frame, milliseconds: u64) -> gst::Buffer {
 struct Muxer {
     pipeline: gst::Pipeline,
     source: AppSrc,
+    /// Kept, since every frame looks at it for an error and asking the pipeline costs a reference.
+    bus: gst::Bus,
 }
 
 impl Muxer {
@@ -166,7 +168,12 @@ impl Muxer {
                 .field("alignment", "au")
                 .build(),
         ));
-        let muxer = Self { pipeline, source };
+        let bus = pipeline.bus().expect("pipelines have a bus");
+        let muxer = Self {
+            pipeline,
+            source,
+            bus,
+        };
         muxer
             .pipeline
             .set_state(gst::State::Playing)
@@ -186,9 +193,8 @@ impl Muxer {
     /// `block=true` on `appsrc` would wait in a place that only ends when the pipeline stops, so
     /// a full disk would hold the export forever, deaf to a cancellation.
     fn wait_for_room(&self, cancel: &AtomicBool) -> Result<(), Error> {
-        let bus = self.pipeline.bus().expect("pipelines have a bus");
         loop {
-            if let Some(message) = bus.pop_filtered(&[gst::MessageType::Error]) {
+            if let Some(message) = self.bus.pop_filtered(&[gst::MessageType::Error]) {
                 return Err(write_error(&message));
             }
             if self.source.current_level_bytes() < MAX_QUEUED_BYTES {
@@ -204,8 +210,7 @@ impl Muxer {
     /// Writes the index of the MP4, without which the file can't be played.
     fn finish(self) -> Result<(), Error> {
         self.source.end_of_stream().map_err(|_| self.failure())?;
-        let bus = self.pipeline.bus().expect("pipelines have a bus");
-        let message = bus.timed_pop_filtered(
+        let message = self.bus.timed_pop_filtered(
             gst::ClockTime::from_seconds(60),
             &[gst::MessageType::Eos, gst::MessageType::Error],
         );
@@ -217,8 +222,7 @@ impl Muxer {
     }
 
     fn failure(&self) -> Error {
-        let bus = self.pipeline.bus().expect("pipelines have a bus");
-        match bus.pop_filtered(&[gst::MessageType::Error]) {
+        match self.bus.pop_filtered(&[gst::MessageType::Error]) {
             Some(message) => write_error(&message),
             None => Error::Write("the video could not be written".to_owned()),
         }
