@@ -413,8 +413,7 @@ ApplicationWindow {
     // The saved grids as { name }, the one on screen at grid.currentLayout.
     readonly property var layoutNames: grid.layouts ? JSON.parse(grid.layouts) : []
     readonly property bool layoutKeys: !inRecordings && layoutNames.length > 1 && zoomed === "" && dragged === null
-        && !addDialog.visible && !removeDialog.visible && !layoutDialog.visible && !removeLayoutDialog.visible
-        && !aboutDialog.visible && !comboOpen && !gammaFocused
+        && !popupOpen && !gammaFocused
     readonly property int includedCount: gridKeys.filter(k => k !== null).length
     property int liveCount: 0
     // State of each camera in the grid, by key, as "live", "denied", "lost" or "connecting".
@@ -479,8 +478,12 @@ ApplicationWindow {
     property string mode: "live"
     readonly property bool inRecordings: mode === "recordings"
     // Off while a popup is open, which takes these keys for itself.
-    readonly property bool playerKeys: inRecordings && playback.spans.length > 0 && !addDialog.visible && !removeDialog.visible && !exportDialog.visible
-        && !calendar.visible && !eventsPopup.visible && !comboOpen && !gammaFocused
+    readonly property bool playerKeys: inRecordings && playback.spans.length > 0 && !popupOpen && !gammaFocused
+    // Any dialog, list or menu, which takes the keys for itself. One list, so a new popup
+    // can't be left out of one shortcut and not another.
+    readonly property bool popupOpen: comboOpen || aboutDialog.visible || addDialog.visible
+        || exportDialog.visible || layoutDialog.visible || removeLayoutDialog.visible
+        || removeDialog.visible || calendar.visible || eventsPopup.visible
     property bool comboOpen: false
     property bool gammaFocused: false
     // The player controls don't fit beside the sidebar, so it opens over the video on request.
@@ -739,7 +742,7 @@ ApplicationWindow {
 
     Shortcut {
         sequence: "Ctrl+S"
-        enabled: win.zoomed !== "" || win.inRecordings
+        enabled: (win.zoomed !== "" || win.inRecordings) && !win.popupOpen
         onActivated: {
             if (win.inRecordings)
                 playback.savePhotos()

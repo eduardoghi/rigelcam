@@ -23,6 +23,8 @@ User-visible changes, newest first.
 
 ### Fixed
 
+- Shortcuts of the player and Ctrl+S no longer act behind an open dialog, list or menu, such as
+  About, which the space bar used to pause the recording under.
 - A recorder that answers without its list of channels is tried five times and then waits for
   the user, instead of every minute, which added a login to its log each time.
 - On Windows, an update that failed to start can be tried again without reopening the app.
