@@ -1355,7 +1355,7 @@ ApplicationWindow {
         }
 
         function submit() {
-            if (!valid)
+            if (!valid || grid.updateRunning)
                 return
             for (const camera of cameras)
                 grid.exportClip(camera.recorder, camera.number, camera.name, playback.viewDate, startTime, endTime)
@@ -1413,7 +1413,9 @@ ApplicationWindow {
                 spacing: 8
                 AppButton { text: qsTr("Cancel"); onClicked: exportDialog.close() }
                 PrimaryButton {
-                    enabled: exportDialog.valid
+                    // The app closes when the installer of an update starts, which would cut
+                    // an export begun during the download.
+                    enabled: exportDialog.valid && !grid.updateRunning
                     text: qsTr("Export")
                     onClicked: exportDialog.submit()
                 }
@@ -3038,7 +3040,7 @@ ApplicationWindow {
 
                 IconButton {
                     id: exportButton
-                    enabled: playback.spans.length > 0
+                    enabled: playback.spans.length > 0 && !grid.updateRunning
                     icon.source: "qrc:/rigelcam/icons/download.svg"
                     text: qsTr("Export clip")
                     onClicked: exportDialog.openAt(playback.position)

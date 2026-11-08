@@ -45,7 +45,9 @@ User-visible changes, newest first.
 - On Windows, an update that failed to start can be tried again without reopening the app.
 - A frame the decoder hands over that can't be read now shows as a camera without picture,
   instead of a black square that counts as live. On Windows, shaders that fail to compile no
-  longer close the app.
+  longer close the app or freeze the video.
+- On Windows, a clip can't be exported while an update downloads, since the app closes when the
+  installer starts and the clip was lost.
 - Marks that turn text around, such as U+202E, are replaced in the names of exported videos, so
   a camera name can't show a file name backwards.
 - A recorder list edited by hand with two recorders on one id, or an id the interface can't hold,
