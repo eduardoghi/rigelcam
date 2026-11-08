@@ -29,6 +29,11 @@ updates:
         update-types:
           - "minor"
           - "patch"
+    ignore:
+      # digest_auth and oo7 still use md-5 0.10, so moving only the one line of rigelcam-core would
+      # build two copies of it. It goes up together with digest_auth.
+      - dependency-name: "md-5"
+        versions: [">=0.11"]
 
   # The actions are pinned by SHA, which never moves by itself.
   - package-ecosystem: github-actions
