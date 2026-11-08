@@ -40,8 +40,9 @@ User-visible changes, newest first.
   long name instead of pushing its buttons out of the window.
 - Recordings opened from a camera watched live start on today, instead of the day that was last
   open in the recordings.
-- A recorder that answers without its list of channels is tried five times and then waits for
-  the user, instead of every minute, which added a login to its log each time.
+- A recorder that answers without its list of channels is tried again for about nine minutes and
+  then waits for the user, instead of every minute for good, which added a login to its log each
+  time.
 - On Windows, an update that failed to start can be tried again without reopening the app.
 - A frame the decoder hands over that can't be read now shows as a camera without picture,
   instead of a black square that counts as live. On Windows, shaders that fail to compile no

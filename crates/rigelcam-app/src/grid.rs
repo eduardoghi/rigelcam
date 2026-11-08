@@ -335,9 +335,10 @@ const PERMISSION_MEMORY: Duration = Duration::from_secs(10 * 60);
 
 const FIRST_RETRY_DELAY: Duration = Duration::from_secs(5);
 const MAX_RETRY_DELAY: Duration = Duration::from_secs(60);
-/// Tries of a recorder that answers but not with its channels. Each one is a login in its log, so
-/// after these it waits for the user to try again.
-const MAX_ANSWERED_RETRIES: u32 = 5;
+/// Retries of a recorder that answers but not with its channels, after the first try. With the
+/// delays growing to a minute they cover about nine minutes, longer than a recorder takes to start
+/// after a power cut. Each one is a login in its log, so after these it waits for the user.
+const MAX_ANSWERED_RETRIES: u32 = 12;
 
 /// What to do after a recorder failed to list its channels.
 #[derive(Clone, Copy, PartialEq, Eq)]
