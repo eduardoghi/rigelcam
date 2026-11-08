@@ -37,6 +37,8 @@ modules:
         skip:
           - target
           - .git
+          # Experiments kept out of git, with build folders of several GB.
+          - spikes
           - packaging/linux/vendor
       # Made by `cargo vendor` in build-flatpak.sh, as the build has no network.
       - type: dir
