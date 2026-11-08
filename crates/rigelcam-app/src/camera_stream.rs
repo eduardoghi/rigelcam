@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use rigelcam_core::dahua::{Client, Error as RecorderError, LoginGate};
@@ -282,6 +282,39 @@ pub struct CameraStream {
     shared: Arc<Shared>,
 }
 
+/// Camera threads still running, which the end of the app waits for. They tear down pipelines
+/// that hold the VA-API or Direct3D device, and the process ending under them runs the cleanup of
+/// the same driver from another thread, which crashed on exit.
+static WORKERS: Mutex<usize> = Mutex::new(0);
+static WORKERS_DONE: Condvar = Condvar::new();
+
+/// Counts a camera thread from its start to its end, however it ends.
+struct Worker;
+
+impl Worker {
+    fn start() -> Self {
+        *WORKERS.lock().unwrap_or_else(PoisonError::into_inner) += 1;
+        Worker
+    }
+}
+
+impl Drop for Worker {
+    fn drop(&mut self) {
+        *WORKERS.lock().unwrap_or_else(PoisonError::into_inner) -= 1;
+        WORKERS_DONE.notify_all();
+    }
+}
+
+/// Waits for the camera threads, which stop on their own once their streams are dropped. Returns
+/// false when some were still running at the deadline.
+pub fn wait_for_workers(limit: Duration) -> bool {
+    let running = WORKERS.lock().unwrap_or_else(PoisonError::into_inner);
+    let (running, _) = WORKERS_DONE
+        .wait_timeout_while(running, limit, |running| *running > 0)
+        .unwrap_or_else(PoisonError::into_inner);
+    *running == 0
+}
+
 impl CameraStream {
     pub fn new(item: *mut c_void) -> Self {
         let shared = Arc::new(Shared {
@@ -291,9 +324,13 @@ impl CameraStream {
             bus: Mutex::default(),
         });
         let worker_shared = shared.clone();
+        let worker = Worker::start();
         std::thread::Builder::new()
             .name("camera".into())
-            .spawn(move || run(worker_shared))
+            .spawn(move || {
+                let _worker = worker;
+                run(worker_shared);
+            })
             .expect("could not start the camera thread");
         Self { shared }
     }

@@ -27,6 +27,8 @@ User-visible changes, newest first.
   About, which the space bar used to pause the recording under.
 - The list of the events of today keeps its place when the recordings are checked again each
   minute, instead of going back to the top.
+- Closing the app while a camera was still closing could crash it on the way out, in the cleanup
+  of the graphics driver.
 - A recorder that answers without its list of channels is tried five times and then waits for
   the user, instead of every minute, which added a login to its log each time.
 - On Windows, an update that failed to start can be tried again without reopening the app.

@@ -10,9 +10,13 @@ mod update;
 
 use rigelcam_core::recorders::RecorderList;
 
+use std::time::Duration;
+
 use cxx_qt_lib::{QGuiApplication, QQmlApplicationEngine, QUrl};
 
 extern "C" {
+    /// Ends the process without the cleanup of exit, from the C runtime.
+    fn _exit(code: i32) -> !;
     fn rigel_prepare_graphics();
     fn rigel_register_types();
     fn rigel_set_app_identity();
@@ -63,5 +67,12 @@ fn main() {
     }
     if let Some(app) = app.as_mut() {
         app.exec();
+    }
+    // The items go with the engine, which tells their camera threads to stop.
+    drop(engine);
+    if !camera_stream::wait_for_workers(Duration::from_secs(5)) {
+        // A camera still closing would race the cleanup of the graphics driver that exit runs.
+        // Ending without that cleanup is safe, since the list is saved and nothing else is open.
+        unsafe { _exit(0) };
     }
 }
