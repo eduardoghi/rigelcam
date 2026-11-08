@@ -413,7 +413,7 @@ ApplicationWindow {
     // The saved grids as { name }, the one on screen at grid.currentLayout.
     readonly property var layoutNames: grid.layouts ? JSON.parse(grid.layouts) : []
     readonly property bool layoutKeys: !inRecordings && layoutNames.length > 1 && zoomed === "" && dragged === null
-        && !popupOpen && !gammaFocused
+        && !popupOpen
     readonly property int includedCount: gridKeys.filter(k => k !== null).length
     property int liveCount: 0
     // State of each camera in the grid, by key, as "live", "denied", "lost" or "connecting".
@@ -478,7 +478,7 @@ ApplicationWindow {
     property string mode: "live"
     readonly property bool inRecordings: mode === "recordings"
     // Off while a popup is open, which takes these keys for itself.
-    readonly property bool playerKeys: inRecordings && playback.spans.length > 0 && !popupOpen && !gammaFocused
+    readonly property bool playerKeys: inRecordings && playback.spans.length > 0 && !popupOpen
     // Any dialog, list or menu, which takes the keys for itself. One list, so a new popup
     // can't be left out of one shortcut and not another.
     readonly property bool popupOpen: comboOpen || aboutDialog.visible || addDialog.visible
@@ -716,15 +716,17 @@ ApplicationWindow {
         onActivated: playback.togglePlaying()
     }
 
+    // The gamma slider keeps the focus after it is used and moves with the arrows, so only these
+    // two give way to it. The other keys go on working.
     Shortcut {
         sequence: "Left"
-        enabled: win.playerKeys
+        enabled: win.playerKeys && !win.gammaFocused
         onActivated: playback.skipBack()
     }
 
     Shortcut {
         sequence: "Right"
-        enabled: win.playerKeys
+        enabled: win.playerKeys && !win.gammaFocused
         onActivated: playback.seek(playback.position + 10)
     }
 

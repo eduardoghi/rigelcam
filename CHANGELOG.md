@@ -29,6 +29,8 @@ User-visible changes, newest first.
   minute, instead of going back to the top.
 - Closing the app while a camera was still closing could crash it on the way out, in the cleanup
   of the graphics driver.
+- After the gamma slider is used, the space bar, Ctrl+arrows and the grid shortcuts work again
+  right away. Only the arrows still move the slider while it has the focus.
 - A recorder that answers without its list of channels is tried five times and then waits for
   the user, instead of every minute, which added a login to its log each time.
 - On Windows, an update that failed to start can be tried again without reopening the app.
