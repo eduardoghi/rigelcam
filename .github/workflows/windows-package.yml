@@ -69,8 +69,13 @@ jobs:
         shell: pwsh
         run: |
           $installer = "gstreamer-1.0-msvc-x86_64-$env:GSTREAMER_VERSION.exe"
-          Invoke-WebRequest -OutFile $installer `
-            "https://gstreamer.freedesktop.org/data/pkg/windows/$env:GSTREAMER_VERSION/msvc/$installer"
+          $url = "https://gstreamer.freedesktop.org/data/pkg/windows/$env:GSTREAMER_VERSION/msvc/$installer"
+          # About 540 MB from a server that drops long downloads, so a try goes on where the last
+          # one stopped. The hash below still checks the whole file.
+          for ($try = 1; ; $try++) {
+            try { Invoke-WebRequest -OutFile $installer -Resume $url; break }
+            catch { if ($try -ge 5) { throw }; Start-Sleep -Seconds 10 }
+          }
           if ((Get-FileHash $installer -Algorithm SHA256).Hash -ne $env:GSTREAMER_SHA256) {
             throw 'the GStreamer installer does not match its hash'
           }
