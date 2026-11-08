@@ -3097,7 +3097,9 @@ ApplicationWindow {
                         x: eventsButton.width - width
                         y: -height - 6
                         width: 300
-                        height: Math.min(eventsList.contentHeight + topPadding + bottomPadding, 380)
+                        // From the count and not from the list, which only makes the rows that fit its
+                        // height, so a height taken from it would stay at zero.
+                        height: Math.min(playback.events.length * 32 + topPadding + bottomPadding, 380)
                         modal: true
                         dim: false
                         focus: true
