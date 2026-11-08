@@ -15,10 +15,12 @@
     <file>icons/previous-event.svg</file>
     <file>icons/next-event.svg</file>
     <file>icons/names.svg</file>
+    <file>icons/more.svg</file>
+    <file>icons/info.svg</file>
     <file>icons/sun.svg</file>
     <file>icons/moon.svg</file>
-    <file>icons/edit.svg</file>
     <file>icons/fullscreen.svg</file>
+    <file>icons/edit.svg</file>
     <file>icons/minus.svg</file>
     <file>icons/close.svg</file>
     <file>icons/sidebar.svg</file>
@@ -26,6 +28,5 @@
     <file>icons/back.svg</file>
     <file>icons/chevron.svg</file>
     <file>icons/camera-off.svg</file>
-    <file>icons/info.svg</file>
     <file>icons/check.svg</file>
 </qresource></RCC>

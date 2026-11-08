@@ -14,6 +14,8 @@ User-visible changes, newest first.
 
 - A more sober look, with neutral gray surfaces, a blue accent and a new logo, smaller corners,
   live and recordings as two halves of one control and the grid size as a row of buttons.
+- An empty square of the grid shows a faint plus, and its hint only under the mouse or while a
+  camera is dragged. About, the theme and full screen moved to a menu at the end of the toolbar.
 
 ## [0.1.4] (2026-11-07)
 

@@ -341,6 +341,37 @@ ApplicationWindow {
         onClicked: win.rtxHdr = !win.rtxHdr
     }
 
+    component AppMenu: Menu {
+        padding: 4
+        // Takes the keys of the player while open, like a list.
+        onAboutToShow: win.comboOpen = true
+        onAboutToHide: win.comboOpen = false
+        background: Rectangle {
+            implicitWidth: 200
+            radius: 5
+            color: colors.surface
+            border.color: colors.line
+        }
+    }
+
+    component AppMenuItem: MenuItem {
+        id: menuItem
+        implicitHeight: 34
+        leftPadding: 10
+        spacing: 10
+        font.pixelSize: 13
+        icon.width: 16
+        icon.height: 16
+        // The style paints the text and the icon with these, highlighted or not.
+        icon.color: colors.text
+        palette.windowText: colors.text
+        palette.highlightedText: colors.text
+        background: Rectangle {
+            radius: 3
+            color: menuItem.highlighted ? colors.raised : "transparent"
+        }
+    }
+
     component AppDialog: Dialog {
         id: dialog
         modal: true
@@ -979,48 +1010,39 @@ ApplicationWindow {
                 onActivated: grid.saveLanguage(currentValue)
             }
 
+            // What is seldom used, out of the way of the controls of the grid.
             AppButton {
-                id: aboutButton
+                id: moreButton
                 display: AbstractButton.IconOnly
-                icon.source: "qrc:/rigelcam/icons/info.svg"
-                text: qsTr("About Rigelcam")
+                icon.source: "qrc:/rigelcam/icons/more.svg"
+                text: qsTr("More")
                 implicitWidth: 34
                 leftPadding: 9
                 rightPadding: 9
-                onClicked: aboutDialog.open()
+                onClicked: moreMenu.open()
                 AppToolTip {
-                    visible: aboutButton.hovered
-                    text: aboutButton.text
+                    visible: moreButton.hovered && !moreMenu.visible
+                    text: moreButton.text
                 }
-            }
-
-            AppButton {
-                id: themeButton
-                display: AbstractButton.IconOnly
-                icon.source: colors.dark ? "qrc:/rigelcam/icons/sun.svg" : "qrc:/rigelcam/icons/moon.svg"
-                text: colors.dark ? qsTr("Light theme") : qsTr("Dark theme")
-                implicitWidth: 34
-                leftPadding: 9
-                rightPadding: 9
-                onClicked: grid.saveTheme(colors.dark ? "light" : "dark")
-                AppToolTip {
-                    visible: themeButton.hovered
-                    text: themeButton.text
-                }
-            }
-
-            AppButton {
-                id: fullScreenButton
-                display: AbstractButton.IconOnly
-                icon.source: "qrc:/rigelcam/icons/fullscreen.svg"
-                text: qsTr("Full screen (F11)")
-                implicitWidth: 34
-                leftPadding: 9
-                rightPadding: 9
-                onClicked: win.toggleFullScreen()
-                AppToolTip {
-                    visible: fullScreenButton.hovered
-                    text: fullScreenButton.text
+                AppMenu {
+                    id: moreMenu
+                    x: moreButton.width - width
+                    y: moreButton.height + 4
+                    AppMenuItem {
+                        icon.source: "qrc:/rigelcam/icons/info.svg"
+                        text: qsTr("About Rigelcam")
+                        onTriggered: aboutDialog.open()
+                    }
+                    AppMenuItem {
+                        icon.source: colors.dark ? "qrc:/rigelcam/icons/sun.svg" : "qrc:/rigelcam/icons/moon.svg"
+                        text: colors.dark ? qsTr("Light theme") : qsTr("Dark theme")
+                        onTriggered: grid.saveTheme(colors.dark ? "light" : "dark")
+                    }
+                    AppMenuItem {
+                        icon.source: "qrc:/rigelcam/icons/fullscreen.svg"
+                        text: qsTr("Full screen (F11)")
+                        onTriggered: win.toggleFullScreen()
+                    }
                 }
             }
         }
@@ -2071,8 +2093,22 @@ ApplicationWindow {
                                     text: clearSquare.text
                                 }
                             }
+                            // An empty square is a faint plus, and says what it takes under the mouse or
+                            // while a camera is dragged, so a big grid with few cameras stays quiet.
+                            readonly property bool explained: square.key !== null || squareHover.hovered
+                                || win.dragged !== null
                             Text {
                                 anchors.centerIn: parent
+                                visible: !parent.explained
+                                text: "+"
+                                font.pixelSize: 26
+                                font.weight: Font.Light
+                                color: colors.faint
+                                opacity: 0.6
+                            }
+                            Text {
+                                anchors.centerIn: parent
+                                visible: parent.explained
                                 width: Math.min(implicitWidth, parent.width - 12)
                                 elide: Text.ElideRight
                                 horizontalAlignment: Text.AlignHCenter

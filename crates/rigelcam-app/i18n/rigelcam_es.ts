@@ -515,5 +515,9 @@
         <source>Hide camera names</source>
         <translation>Ocultar los nombres de las cámaras</translation>
     </message>
+    <message>
+        <source>More</source>
+        <translation>Más</translation>
+    </message>
 </context>
 </TS>
