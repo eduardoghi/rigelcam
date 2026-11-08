@@ -904,7 +904,8 @@ ApplicationWindow {
                 Layout.preferredWidth: 170
                 visible: win.recorderList.length > 0 && !win.inRecordings && win.layoutNames.length > 0
                 model: win.layoutNames.map((item, index) => ({ index: index, name: item.name }))
-                labelOf: item => win.layoutLabel(item.index, item.name)
+                // A grid deleted can leave the row pointing past the list for a moment.
+                labelOf: item => item ? win.layoutLabel(item.index, item.name) : ""
                 // Set by hand, since a new list of grids would move the row back to the first one.
                 onModelChanged: currentIndex = grid.currentLayout
                 Connections {
