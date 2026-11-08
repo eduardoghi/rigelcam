@@ -3135,6 +3135,15 @@ ApplicationWindow {
                         height: track.height
                         color: colors.text
                     }
+
+                    Rectangle {
+                        visible: timelineMouse.containsMouse
+                        x: timelineMouse.mouseX
+                        width: 1
+                        height: track.height
+                        color: colors.text
+                        opacity: 0.5
+                    }
                 }
 
                 Repeater {
@@ -3157,6 +3166,7 @@ ApplicationWindow {
                     property real pressStart: 0
                     property bool panning: false
                     anchors.fill: track
+                    hoverEnabled: true
                     cursorShape: panning ? Qt.ClosedHandCursor : Qt.PointingHandCursor
                     onPressed: mouse => {
                         pressX = mouse.x
@@ -3164,6 +3174,9 @@ ApplicationWindow {
                         panning = false
                     }
                     onPositionChanged: mouse => {
+                        // With hover on this also runs without a button held, which isn't a drag.
+                        if (!pressed)
+                            return
                         if (Math.abs(mouse.x - pressX) > 4)
                             panning = true
                         if (panning) {
@@ -3196,6 +3209,26 @@ ApplicationWindow {
                         // Zoomed in on another time, the bar stays there.
                         if (playback.position < start || playback.position > start + next)
                             timeline.following = false
+                    }
+                }
+
+                // The time under the mouse, to aim at a moment before clicking it. It covers the
+                // marks of the hours below the bar while it shows.
+                Rectangle {
+                    visible: timelineMouse.containsMouse
+                    x: win.clamp(timelineMouse.mouseX - width / 2, 0, timeline.width - width)
+                    y: track.height + 2
+                    width: hoverTime.implicitWidth + 10
+                    height: hoverTime.implicitHeight + 4
+                    radius: 3
+                    color: colors.raised
+                    Text {
+                        id: hoverTime
+                        anchors.centerIn: parent
+                        font.pixelSize: 11
+                        font.features: { "tnum": 1 }
+                        color: colors.text
+                        text: playback.clockText(win.clamp(timeline.timeAt(timelineMouse.mouseX), 0, 86399))
                     }
                 }
             }
