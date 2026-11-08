@@ -13,6 +13,8 @@ e Dahua, no Linux e no Windows.
 Ele conversa com o gravador pelos protocolos que o próprio aparelho já oferece, RTSP para o vídeo e a
 API HTTP da Dahua para o resto. Por isso não precisa do SDK do fabricante e roda nativo no Linux.
 
+<p align="center"><img src="assets/screenshots/live.jpg" alt="Grade ao vivo com nove câmeras" width="900"></p>
+
 ## Recursos
 
 **Ao vivo**
@@ -36,6 +38,20 @@ API HTTP da Dahua para o resto. Por isso não precisa do SDK do fabricante e rod
 - Exportação de trechos em MP4, sem recompressão, só das gravações que o usuário pode reproduzir
 
 A interface está em inglês, português e espanhol, com tema escuro e claro.
+
+## Imagens
+
+<p align="center">
+  <img src="assets/screenshots/recordings.jpg" alt="Gravações de uma câmera, com os eventos na linha do tempo" width="440">
+  <img src="assets/screenshots/camera.jpg" alt="Uma câmera sozinha, no stream principal" width="440">
+</p>
+<p align="center">
+  <img src="assets/screenshots/grids.jpg" alt="Duas grades salvas na barra de cima" width="440">
+  <img src="assets/screenshots/light.jpg" alt="O tema claro" width="440">
+</p>
+
+As câmeras destas imagens vêm de um gravador de teste que transmite fotos em domínio público e
+CC0 do Wikimedia Commons.
 
 ## Como funciona
 

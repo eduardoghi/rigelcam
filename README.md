@@ -13,6 +13,8 @@ NVRs, for Linux and Windows.
 It talks to the recorder over the protocols the device already exposes, RTSP for video and the
 Dahua HTTP API for everything else, so it does not need the vendor SDK and runs natively on Linux.
 
+<p align="center"><img src="assets/screenshots/live.jpg" alt="Live grid with nine cameras" width="900"></p>
+
 ## Features
 
 **Live view**
@@ -36,6 +38,20 @@ Dahua HTTP API for everything else, so it does not need the vendor SDK and runs 
 - Export a clip to MP4, without re-encoding, limited to the recordings the user can play
 
 The interface comes in English, Portuguese and Spanish, with dark and light themes.
+
+## Screenshots
+
+<p align="center">
+  <img src="assets/screenshots/recordings.jpg" alt="Recordings of one camera, with events on the timeline" width="440">
+  <img src="assets/screenshots/camera.jpg" alt="One camera on its own, from the main stream" width="440">
+</p>
+<p align="center">
+  <img src="assets/screenshots/grids.jpg" alt="Two saved grids in the toolbar" width="440">
+  <img src="assets/screenshots/light.jpg" alt="The light theme" width="440">
+</p>
+
+The cameras in these screenshots come from a test recorder that streams public domain and CC0 photos
+from Wikimedia Commons.
 
 ## How it works
 

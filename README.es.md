@@ -14,6 +14,8 @@ Se comunica con el grabador por los protocolos que el equipo ya ofrece, RTSP par
 HTTP de Dahua para todo lo demás, así que no necesita el SDK del fabricante y funciona de forma
 nativa en Linux.
 
+<p align="center"><img src="assets/screenshots/live.jpg" alt="Cuadrícula en vivo con nueve cámaras" width="900"></p>
+
 ## Funciones
 
 **Vista en vivo**
@@ -40,6 +42,20 @@ nativa en Linux.
   reproducir
 
 La interfaz está en inglés, portugués y español, con tema oscuro y claro.
+
+## Capturas
+
+<p align="center">
+  <img src="assets/screenshots/recordings.jpg" alt="Grabaciones de una cámara, con los eventos en la línea de tiempo" width="440">
+  <img src="assets/screenshots/camera.jpg" alt="Una cámara sola, en el flujo principal" width="440">
+</p>
+<p align="center">
+  <img src="assets/screenshots/grids.jpg" alt="Dos cuadrículas guardadas en la barra superior" width="440">
+  <img src="assets/screenshots/light.jpg" alt="El tema claro" width="440">
+</p>
+
+Las cámaras de estas capturas vienen de un grabador de prueba que transmite fotos de dominio público y
+CC0 de Wikimedia Commons.
 
 ## Cómo funciona
 
