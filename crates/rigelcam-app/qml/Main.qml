@@ -1768,12 +1768,15 @@ ApplicationWindow {
                                 }
                             }
 
+                            // The rows stay while the search changes and only hide, since rebuilding
+                            // all of them on every key costs about ten objects a camera.
                             Repeater {
-                                model: recorderGroup.folded ? [] : recorderGroup.matches
+                                model: recorderGroup.folded ? [] : recorderGroup.modelData.cameras
 
                                 Rectangle {
                                     id: cameraRow
                                     required property var modelData
+                                    visible: sidebar.search === "" || modelData.name.toLowerCase().includes(sidebar.search)
                                     readonly property string key: win.cameraKey(recorderGroup.modelData.id, modelData.number)
                                     readonly property bool onGrid: win.gridKeys.includes(key)
                                     readonly property bool isPlayback: win.inRecordings
@@ -1886,11 +1889,12 @@ ApplicationWindow {
                 width: isMain ? cameraArea.width : cameraArea.cellWidth
                 height: isMain ? cameraArea.height : cameraArea.cellHeight
 
-                onStatusChanged: win.updateLiveCount()
+                // Once per turn of the event loop, since cameras connecting together each change it.
+                onStatusChanged: Qt.callLater(win.updateLiveCount)
                 onPhotoFinished: file => photoToast.show(file)
                 // Later, because this closes the tile that is emitting the signal.
                 onAuthRefused: Qt.callLater(grid.recorderRefused.bind(grid, recorder))
-                onIncludedChanged: win.updateLiveCount()
+                onIncludedChanged: Qt.callLater(win.updateLiveCount)
 
                 // Hidden cameras keep running for a while, since going back to the grid right after
                 // zooming is common and reconnecting all of them takes seconds. Recordings stop them
