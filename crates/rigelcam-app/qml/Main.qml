@@ -234,15 +234,18 @@ ApplicationWindow {
     }
 
     component GammaControl: RowLayout {
+        // Without the label and with a shorter slider, for a bar that is running out of room.
+        property bool compact: false
         spacing: 6
         Text {
+            visible: !parent.compact
             font.pixelSize: 13
             color: colors.text
             text: qsTr("Gamma")
         }
         Slider {
             id: gammaSlider
-            Layout.preferredWidth: 110
+            Layout.preferredWidth: parent.compact ? 70 : 110
             onActiveFocusChanged: win.gammaFocused = activeFocus
             from: 0.5
             to: 3
@@ -2179,7 +2182,8 @@ ApplicationWindow {
         visible: win.zoomed !== ""
         x: 12
         y: 12
-        width: zoomBar.implicitWidth + 8
+        // The margins of the row inside, and no wider than the window, where the name gives way.
+        width: Math.min(Math.ceil(zoomBar.implicitWidth) + 18, parent.width - 24)
         height: 42
         radius: 6
         color: colors.panel
@@ -2204,8 +2208,12 @@ ApplicationWindow {
                 }
             }
             Text {
+                Layout.fillWidth: true
+                Layout.preferredWidth: Math.ceil(implicitWidth)
+                Layout.minimumWidth: 40
                 text: win.zoomedName
                 textFormat: Text.PlainText
+                elide: Text.ElideRight
                 font.pixelSize: 13
                 font.weight: Font.Medium
                 color: colors.text
@@ -2880,6 +2888,9 @@ ApplicationWindow {
 
             RowLayout {
                 id: playerRow
+                // Below this the controls get squeezed, so the speeds become a list and the gamma
+                // loses its label.
+                readonly property bool compact: width < 1000
                 anchors.left: parent.left
                 anchors.right: parent.right
                 anchors.top: parent.top
@@ -3205,12 +3216,30 @@ ApplicationWindow {
                 RtxHdrButton {
                     visible: graphicsSetup.rtxHdr && videoArea.used.length === 1
                 }
-                GammaControl { Layout.rightMargin: 8 }
+                GammaControl {
+                    Layout.rightMargin: 8
+                    compact: playerRow.compact
+                }
+
+                AppComboBox {
+                    visible: playerRow.compact
+                    flat: true
+                    enabled: playback.spans.length > 0
+                    // The text of the box keeps 40 px of padding, and below this it had no room.
+                    Layout.preferredWidth: 82
+                    readonly property var rates: [1, 2, 4, 8]
+                    model: rates
+                    labelOf: rate => rate + "x"
+                    // From the plain list, since the model of a ComboBox isn't a JavaScript array.
+                    currentIndex: rates.indexOf(playback.rate)
+                    onActivated: index => playback.setRate(rates[index])
+                }
 
                 Repeater {
                     model: [1, 2, 4, 8]
                     AppButton {
                         required property int modelData
+                        visible: !playerRow.compact
                         enabled: playback.spans.length > 0
                         text: modelData + "x"
                         implicitWidth: 40

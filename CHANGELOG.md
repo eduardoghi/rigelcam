@@ -33,6 +33,9 @@ User-visible changes, newest first.
   right away. Only the arrows still move the slider while it has the focus.
 - On Windows, the notice of a new version stays above the controls of the recordings instead of
   covering the speed, export and event buttons.
+- In a narrow window the bar of the recordings shows the speeds as a list and the gamma without
+  its label, instead of squeezing every control, and the bar of a camera open alone shortens a
+  long name instead of pushing its buttons out of the window.
 - A recorder that answers without its list of channels is tried five times and then waits for
   the user, instead of every minute, which added a login to its log each time.
 - On Windows, an update that failed to start can be tried again without reopening the app.
