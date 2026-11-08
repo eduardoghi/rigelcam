@@ -49,6 +49,8 @@ const DRM_FORMAT_NV12: u32 = 0x3231_564e;
 const DRM_FORMAT_P010: u32 = 0x3031_3050;
 const RTSP_FORBIDDEN: u32 = 403;
 /// A stream that stops sending frames without an error counts as lost after this long.
+/// Wait before a stream that dropped opens again, which grows while it keeps failing.
+const FIRST_RETRY_DELAY: Duration = Duration::from_secs(2);
 const STALL_TIMEOUT: Duration = Duration::from_secs(15);
 const PERMISSION_TIMEOUT: Duration = Duration::from_secs(10);
 /// The first frame also waits for the RTSP handshake and for a key frame.
@@ -204,46 +206,49 @@ impl Shared {
 }
 
 impl Shared {
-    fn set_status(&self, has_video: bool, signal_lost: bool) {
+    /// Calls the item while it still exists. Its lock is held through the call, so the item can't
+    /// go away in the middle of it.
+    fn with_item(&self, call: impl FnOnce(*mut c_void)) {
         let item = self.item.lock().unwrap();
         if *item != 0 {
-            unsafe { rigel_item_set_status(*item as *mut c_void, has_video, signal_lost) };
+            call(*item as *mut c_void);
         }
+    }
+
+    fn set_status(&self, has_video: bool, signal_lost: bool) {
+        self.with_item(|item| unsafe { rigel_item_set_status(item, has_video, signal_lost) });
     }
 
     fn report_position(&self, seconds: f64, attempt: i32) {
-        let item = self.item.lock().unwrap();
-        if *item != 0 {
-            unsafe { rigel_item_position(*item as *mut c_void, seconds, attempt) };
-        }
+        self.with_item(|item| unsafe { rigel_item_position(item, seconds, attempt) });
     }
 
     fn report_ended(&self, cleanly: bool, attempt: i32) {
-        let item = self.item.lock().unwrap();
-        if *item != 0 {
-            let item = *item as *mut c_void;
-            unsafe {
-                if cleanly {
-                    rigel_item_ended(item, attempt);
-                } else {
-                    rigel_item_failed(item, attempt);
-                }
+        self.with_item(|item| unsafe {
+            if cleanly {
+                rigel_item_ended(item, attempt);
+            } else {
+                rigel_item_failed(item, attempt);
             }
-        }
+        });
     }
 
     fn report_refused(&self) {
-        let item = self.item.lock().unwrap();
-        if *item != 0 {
-            unsafe { rigel_item_auth_refused(*item as *mut c_void) };
-        }
+        self.with_item(|item| unsafe { rigel_item_auth_refused(item) });
     }
 
     fn report_denied(&self) {
-        let item = self.item.lock().unwrap();
-        if *item != 0 {
-            unsafe { rigel_item_denied(*item as *mut c_void) };
-        }
+        self.with_item(|item| unsafe { rigel_item_denied(item) });
+    }
+
+    /// Waits until the item is given another source or told to stop.
+    fn wait_for_change(&self, revision: u64) {
+        let guard = self.control.lock().unwrap();
+        drop(
+            self.changed
+                .wait_while(guard, |c| !c.stop && c.revision == revision)
+                .unwrap(),
+        );
     }
 }
 
@@ -371,7 +376,7 @@ impl Drop for CameraStream {
 
 fn run(shared: Arc<Shared>) {
     let mut generation = 0;
-    let mut retry_delay = Duration::from_secs(2);
+    let mut retry_delay = FIRST_RETRY_DELAY;
     // A camera that stays offline fails on every retry, so only a new reason reaches the log.
     let mut last_reason = String::new();
     // A recorder can answer 404 once and open the camera on the next try, so a source that has not
@@ -404,7 +409,7 @@ fn run(shared: Arc<Shared>) {
         match result {
             Outcome::Changed => {
                 // With a new source, the current picture stays until its first frame arrives.
-                retry_delay = Duration::from_secs(2);
+                retry_delay = FIRST_RETRY_DELAY;
                 last_reason.clear();
             }
             // Repeating a refused password can lock the user on the recorder, so this stream waits
@@ -414,13 +419,7 @@ fn run(shared: Arc<Shared>) {
                 source.gate.refuse();
                 shared.set_status(false, true);
                 shared.report_refused();
-                let guard = shared.control.lock().unwrap();
-                drop(
-                    shared
-                        .changed
-                        .wait_while(guard, |c| !c.stop && c.revision == revision)
-                        .unwrap(),
-                );
+                shared.wait_for_change(revision);
             }
             // The user has no permission on this channel, which trying again doesn't change and
             // only adds logins to the log of the recorder. Its other channels go on.
@@ -434,13 +433,7 @@ fn run(shared: Arc<Shared>) {
                 if source.recording {
                     shared.report_ended(false, source.attempt);
                 }
-                let guard = shared.control.lock().unwrap();
-                drop(
-                    shared
-                        .changed
-                        .wait_while(guard, |c| !c.stop && c.revision == revision)
-                        .unwrap(),
-                );
+                shared.wait_for_change(revision);
             }
             Outcome::Lost {
                 received_video,
@@ -451,17 +444,11 @@ fn run(shared: Arc<Shared>) {
                 if source.recording {
                     eprintln!("{} ({reason})", source.url);
                     shared.report_ended(received_video && reason == STREAM_ENDED, source.attempt);
-                    let guard = shared.control.lock().unwrap();
-                    drop(
-                        shared
-                            .changed
-                            .wait_while(guard, |c| !c.stop && c.revision == revision)
-                            .unwrap(),
-                    );
+                    shared.wait_for_change(revision);
                     continue;
                 }
                 if received_video {
-                    retry_delay = Duration::from_secs(2);
+                    retry_delay = FIRST_RETRY_DELAY;
                     last_reason.clear();
                 }
                 if reason != last_reason {
