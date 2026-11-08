@@ -29,6 +29,8 @@ User-visible changes, newest first.
 - A frame the decoder hands over that can't be read now shows as a camera without picture,
   instead of a black square that counts as live. On Windows, shaders that fail to compile no
   longer close the app.
+- Marks that turn text around, such as U+202E, are replaced in the names of exported videos, so
+  a camera name can't show a file name backwards.
 - A recorder list edited by hand with two recorders on one id, or an id the interface can't hold,
   opens without them, since they would share a password in the keyring. A folder that refuses
   its permissions no longer stops the list from being saved.

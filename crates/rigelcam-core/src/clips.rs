@@ -26,6 +26,11 @@ pub fn file_stem(camera: &str, date: &str, start: u32, end: u32) -> String {
         .map(|c| match c {
             '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => '_',
             c if c.is_control() => '_',
+            // Marks that turn text around or hide in it, which could show the name backwards.
+            '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{FEFF}' => '_',
             c => c,
         })
         .collect();
@@ -77,6 +82,12 @@ pub fn free_path(folder: &Path, stem: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn marks_that_turn_text_around_are_replaced() {
+        let stem = file_stem("Gate\u{202E}4pm.exe", "2026-11-08", 0, 60);
+        assert!(stem.starts_with("Gate_4pm.exe "));
+    }
 
     #[test]
     fn removes_only_unfinished_videos() {
