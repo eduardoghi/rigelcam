@@ -4,6 +4,12 @@ User-visible changes, newest first.
 
 ## [Unreleased]
 
+## [0.1.6] (2026-11-10)
+
+### Changed
+
+- Updates the dependencies.
+
 ## [0.1.5] (2026-11-08)
 
 ### Added
