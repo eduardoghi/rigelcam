@@ -30,10 +30,14 @@ updates:
           - "minor"
           - "patch"
     ignore:
-      # digest_auth and oo7 still use md-5 0.10, so moving only the one line of rigelcam-core would
-      # build two copies of it. It goes up together with digest_auth.
+      # digest_auth and oo7 0.6 still use md-5 0.10, so moving only the one line of rigelcam-core
+      # would build two copies of it. It goes up together with digest_auth and oo7 0.7.
       - dependency-name: "md-5"
         versions: [">=0.11"]
+      # oo7 0.7 moves to zbus 6 and md-5 0.11 while keyring, through secret-service, stays on zbus 5,
+      # so the Linux build would carry two copies of each. It goes up once secret-service moves.
+      - dependency-name: "oo7"
+        versions: [">=0.7"]
 
   # The actions are pinned by SHA, which never moves by itself.
   - package-ecosystem: github-actions
