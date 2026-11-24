@@ -4,6 +4,12 @@ User-visible changes, newest first.
 
 ## [Unreleased]
 
+## [0.1.7] (2026-11-24)
+
+### Changed
+
+- Updates the dependencies.
+
 ### Fixed
 
 - The recordings of a camera that saves a new file at each event no longer stop in the middle of
