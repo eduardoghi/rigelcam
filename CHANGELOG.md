@@ -4,6 +4,12 @@ User-visible changes, newest first.
 
 ## [Unreleased]
 
+### Fixed
+
+- The recordings of a camera that saves a new file at each event no longer stop in the middle of
+  the day. A recorder answers about 1000 files per search, which such a camera can fill before
+  the afternoon, so the rest of the day is now searched again from where the list ended.
+
 ## [0.1.6] (2026-11-10)
 
 ### Changed

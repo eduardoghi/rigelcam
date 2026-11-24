@@ -296,21 +296,24 @@ impl Client {
     /// Lists what a channel recorded on a day given as `YYYY-MM-DD`. An old day comes back empty.
     pub fn recordings(&self, channel: u32, date: &str) -> Result<Vec<Span>, Error> {
         let finder = Finder::open(self)?;
-        if !finder.find(channel, date)? {
-            return Ok(Vec::new());
-        }
-        let mut spans = Vec::new();
-        for _ in 0..MAX_SEARCH_PAGES {
-            let files = finder.next(SEARCH_PAGE)?;
-            let found = files.len();
-            spans.extend(files.iter().filter_map(|file| file.span_on(date)));
-            // Only an empty page ends the list, since a firmware may answer pages smaller than
-            // asked for with more still to come. It costs one more request at the end.
-            if found == 0 {
-                return Ok(merge_spans(spans));
+        let end = format!("{date} 23:59:59");
+        search_day(date, |from, pages| {
+            if !finder.find(channel, from, &end)? {
+                return Ok(Vec::new());
             }
-        }
-        Err(Error::Unexpected("too many recordings".to_owned()))
+            let mut files = Vec::new();
+            while *pages < MAX_SEARCH_PAGES {
+                *pages += 1;
+                let page = finder.next(SEARCH_PAGE)?;
+                // Only an empty page ends the list, since a firmware may answer pages smaller
+                // than asked for with more still to come. It costs one more request at the end.
+                if page.is_empty() {
+                    return Ok(files);
+                }
+                files.extend(page);
+            }
+            Err(Error::Unexpected("too many recordings".to_owned()))
+        })
     }
 
     /// Tells which of the given days, as `YYYY-MM-DD`, have recordings of a channel, one at a time
@@ -324,7 +327,8 @@ impl Client {
     ) -> Result<(), Error> {
         let finder = Finder::open(self)?;
         for date in dates {
-            let recorded = finder.find(channel, date)? && !finder.next(1)?.is_empty();
+            let (start, end) = (format!("{date} 00:00:00"), format!("{date} 23:59:59"));
+            let recorded = finder.find(channel, &start, &end)? && !finder.next(1)?.is_empty();
             if !found(date, recorded) {
                 break;
             }
@@ -711,15 +715,20 @@ impl<'a> Finder<'a> {
         Ok(Self::Cgi { client, object })
     }
 
-    /// Starts a search of a day and tells whether it found anything.
-    fn find(&self, channel: u32, date: &str) -> Result<bool, Error> {
+    /// Starts a search between two times as `YYYY-MM-DD HH:MM:SS` and tells whether it found
+    /// anything.
+    fn find(&self, channel: u32, start: &str, end: &str) -> Result<bool, Error> {
+        // The times go unescaped into the address of the CGI, except for the space.
+        if !is_clock(start) || !is_clock(end) {
+            return Err(Error::Unexpected(format!("search from {start} to {end}")));
+        }
         match self {
             Self::Session { session, object } => {
                 let condition = json!({
                     // Starts at 0 here, unlike everywhere else.
                     "Channel": channel.saturating_sub(1),
-                    "StartTime": format!("{date} 00:00:00"),
-                    "EndTime": format!("{date} 23:59:59"),
+                    "StartTime": start,
+                    "EndTime": end,
                     "Types": ["dav"],
                     "VideoStream": "Main",
                 });
@@ -728,10 +737,11 @@ impl<'a> Finder<'a> {
                 search_found_files(&answer)
             }
             Self::Cgi { client, object } => {
+                let (start, end) = (start.replace(' ', "%20"), end.replace(' ', "%20"));
                 let path = format!(
                     "/cgi-bin/mediaFileFind.cgi?action=findFile&object={object}\
-                     &condition.Channel={channel}&condition.StartTime={date}%2000:00:00\
-                     &condition.EndTime={date}%2023:59:59"
+                     &condition.Channel={channel}&condition.StartTime={start}\
+                     &condition.EndTime={end}"
                 );
                 // The recorder answers an error to a search that finds nothing.
                 match client.get(&path) {
@@ -863,6 +873,44 @@ fn parse_files(body: &str) -> Vec<RecordedFile> {
         }
     }
     files.into_iter().map(|(_, file)| file).collect()
+}
+
+/// The recordings of a day, from searches that `search` makes from a time to the end of the day,
+/// counting the pages it reads in the counter shared by all of them.
+///
+/// A recorder stops a search after about 1000 files, and a channel that starts a file at each
+/// event can pass that before the afternoon (an Intelbras NVR stopped at 12:35). So each search
+/// starts again at the start of the last file found, which brings that file once more, until one
+/// brings no file that starts later.
+///
+/// The start and not the end, since the file still recording today may end later at each search,
+/// and an end can be past the day, as 24:59:59 or the next day.
+fn search_day(
+    date: &str,
+    mut search: impl FnMut(&str, &mut usize) -> Result<Vec<RecordedFile>, Error>,
+) -> Result<Vec<Span>, Error> {
+    let mut from = format!("{date} 00:00:00");
+    let mut pages = 0;
+    let mut spans = Vec::new();
+    loop {
+        let files = search(&from, &mut pages)?;
+        spans.extend(files.iter().filter_map(|file| file.span_on(date)));
+        // The format sorts like the times it holds. A start at the last second would search from
+        // 23:59:59 to 23:59:59, and what a recorder answers to that isn't known.
+        let last = files
+            .iter()
+            .map(|file| file.start.as_str())
+            .filter(|start| {
+                is_clock(start)
+                    && start.starts_with(date)
+                    && seconds_of(start).is_some_and(|seconds| seconds < 86_399)
+            })
+            .max();
+        match last {
+            Some(last) if last > from.as_str() => from = last.to_owned(),
+            _ => return Ok(merge_spans(spans)),
+        }
+    }
 }
 
 /// Joins recordings that touch, since recorders split a continuous day in files of minutes.
@@ -1017,6 +1065,73 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn a_day_past_the_files_of_one_search_is_searched_again() {
+        // A file of a minute from 00:00 to 23:00, and a recorder that answers 100 at a time.
+        let time = |minute: u32| format!("2026-11-19 {:02}:{:02}:00", minute / 60, minute % 60);
+        let files: Vec<RecordedFile> = (0..23 * 60)
+            .map(|minute| RecordedFile {
+                start: time(minute),
+                end: time(minute + 1),
+                event: minute % 2 == 1,
+            })
+            .collect();
+        let mut searches = Vec::new();
+        let spans = search_day("2026-11-19", |from, _| {
+            searches.push(from.to_owned());
+            Ok(files
+                .iter()
+                .filter(|file| file.end.as_str() > from)
+                .take(100)
+                .map(|file| RecordedFile {
+                    start: file.start.clone(),
+                    end: file.end.clone(),
+                    event: file.event,
+                })
+                .collect())
+        })
+        .unwrap();
+        assert_eq!(spans.len(), 23 * 60);
+        assert_eq!(spans.last().unwrap().end, 23 * 3600);
+        // Each search after the first brings the last file of the one before again, so 14 bring
+        // the 1380 files, and one more brings only the last of them.
+        assert_eq!(searches.len(), 15);
+        assert_eq!(searches[1], "2026-11-19 01:39:00");
+    }
+
+    #[test]
+    fn a_day_search_ends_on_a_file_that_keeps_growing_or_ends_past_the_day() {
+        let file = |start: &str, end: String| RecordedFile {
+            start: format!("2026-11-19 {start}"),
+            end,
+            event: false,
+        };
+        // Today, the file being recorded ends a second later at each search.
+        let mut searches = 0;
+        let spans = search_day("2026-11-19", |_, _| {
+            searches += 1;
+            Ok(vec![
+                file("00:00:00", "2026-11-19 10:00:00".to_owned()),
+                file("10:00:00", format!("2026-11-19 10:00:{searches:02}")),
+            ])
+        })
+        .unwrap();
+        assert_eq!(searches, 2);
+        assert_eq!(spans.last().unwrap().end, 36_002);
+
+        // An end past the day, and a start at the last second, don't start another search.
+        let mut searches = Vec::new();
+        search_day("2026-11-19", |from, _| {
+            searches.push(from.to_owned());
+            Ok(vec![
+                file("00:00:00", "2026-11-19 24:59:59".to_owned()),
+                file("23:59:59", "2026-11-20 00:00:10".to_owned()),
+            ])
+        })
+        .unwrap();
+        assert_eq!(searches, ["2026-11-19 00:00:00"]);
     }
 
     #[test]
