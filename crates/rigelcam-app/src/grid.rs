@@ -253,7 +253,8 @@ use rigelcam_core::dahua::{
 use rigelcam_core::layout::{CameraId, Layout};
 use rigelcam_core::recorders::{
     list_path, lock_instance, put_password, restore_password, take_password, Address, AddressError,
-    Error as RecordersError, InstanceLock, Previous, RecorderList, Secrets, SystemKeyring,
+    Error as RecordersError, InstanceLock, Previous, Recorder, RecorderList, Secrets,
+    SystemKeyring,
 };
 use serde_json::json;
 
@@ -383,6 +384,28 @@ enum Retry {
     Never,
 }
 
+impl Retry {
+    fn after(error: &RecorderError) -> Self {
+        match error {
+            RecorderError::Http(_) => Self::Always,
+            RecorderError::Status(500..=599) | RecorderError::Unexpected(_) => Self::Limited,
+            _ => Self::Never,
+        }
+    }
+
+    /// Whether to try again, counting the try in `spent` when this kind of failure has a limit.
+    fn spend(self, spent: &mut u32) -> bool {
+        match self {
+            Self::Always => true,
+            Self::Limited => {
+                *spent += 1;
+                *spent <= MAX_ANSWERED_RETRIES
+            }
+            Self::Never => false,
+        }
+    }
+}
+
 fn report_refused(thread: &CxxQtThread<qobject::CameraGrid>, recorder: i32) {
     let _ = thread.queue(move |grid: Pin<&mut qobject::CameraGrid>| {
         grid.recorder_refused(recorder);
@@ -457,6 +480,64 @@ impl Connection {
             Ok(self.client())
         } else {
             Err(RecorderError::Unauthorized)
+        }
+    }
+
+    /// A recording of `channel` from `seconds` after the midnight of `date`, which goes through
+    /// the HTTP API when RTSP doesn't have it.
+    fn playback_source(
+        &self,
+        channel: u32,
+        date: String,
+        seconds: u32,
+        rate: u32,
+        attempt: i32,
+    ) -> Source {
+        let client = self.client();
+        Source {
+            url: client.playback_url(channel, &date, seconds),
+            user: self.user.clone(),
+            password: self.password.clone(),
+            recording: true,
+            rate,
+            attempt,
+            gate: self.gate.clone(),
+            stretch: Some(Arc::new(Stretch {
+                client: Arc::new(client),
+                channel,
+                date,
+                start: seconds,
+                without_rtsp: self.without_rtsp.clone(),
+                allowed: self.allowed_recordings.clone(),
+            })),
+            direct: None,
+        }
+    }
+
+    /// The live video of `channel`, which can go to its camera when the recorder told where it is.
+    fn live_source(&self, channels: Option<&[Channel]>, channel: u32, kind: Stream) -> Source {
+        let camera = channels
+            .and_then(|channels| channels.iter().find(|c| c.number == channel))
+            .and_then(|channel| channel.camera.as_ref());
+        let client = Arc::new(self.client());
+        let direct = camera.map(|camera| {
+            Arc::new(Direct {
+                url: camera.live_url(kind),
+                channel,
+                cameras: self.direct_cameras.clone(),
+                client: client.clone(),
+            })
+        });
+        Source {
+            url: client.live_url(channel, kind),
+            user: self.user.clone(),
+            password: self.password.clone(),
+            recording: false,
+            rate: 1,
+            attempt: 0,
+            gate: self.gate.clone(),
+            stretch: None,
+            direct,
         }
     }
 
@@ -703,39 +784,17 @@ impl qobject::CameraGrid {
 
     // A missing element looks like an offline camera otherwise, on the first run of a new install.
     fn check_components(mut self: Pin<&mut Self>) {
-        let missing = missing_elements();
-        let h265 = missing_h265_elements();
-        let old = old_gstreamer();
-        let graphics_ready = unsafe { rigel_graphics_ready() };
-        let message = if !graphics_ready {
-            message("This graphics card could not be set up to show video.", &[])
-        } else if let Some(version) = &old {
-            message(
-                "GStreamer 1.24 or newer is needed to show video, and this system has %1.",
-                &[version],
-            )
-        } else if !missing.is_empty() && cfg!(windows) {
-            // The plugins come with the app on Windows, so only a decoder the GPU lacks is missing.
-            message(
-                "This computer can't decode the video of the cameras on its graphics card (%1).",
-                &[&missing.join(", ")],
-            )
-        } else if !missing.is_empty() {
-            message(
-                "GStreamer components are missing to show video (%1). \
-                 Install the GStreamer plugins and VA-API support.",
-                &[&missing.join(", ")],
-            )
-        } else if !h265.is_empty() {
-            message(
-                "H.265 cameras won't open because GStreamer components are missing (%1).",
-                &[&h265.join(", ")],
-            )
-        } else {
+        let components = Components {
+            graphics_ready: unsafe { rigel_graphics_ready() },
+            old_gstreamer: old_gstreamer(),
+            missing: missing_elements(),
+            missing_h265: missing_h265_elements(),
+            windows: cfg!(windows),
+        };
+        let Some((message, video_unavailable)) = components.problem() else {
             return;
         };
-        self.as_mut()
-            .set_video_unavailable(!graphics_ready || !missing.is_empty() || old.is_some());
+        self.as_mut().set_video_unavailable(video_unavailable);
         self.set_missing(QString::from(message.as_str()));
     }
 
@@ -743,41 +802,7 @@ impl qobject::CameraGrid {
         let Some(list) = self.list.as_ref() else {
             return;
         };
-        let items: Vec<_> = list
-            .recorders()
-            .iter()
-            .map(|r| {
-                let channels = self.channels.get(&r.id);
-                let failure = self.failures.get(&r.id);
-                let state = match (channels, failure) {
-                    (Some(_), _) => "online",
-                    (None, Some(_)) => "failed",
-                    (None, None) => "connecting",
-                };
-                let cameras: Vec<_> = channels
-                    .into_iter()
-                    .flatten()
-                    .map(|c| {
-                        let aspect = c
-                            .main_size
-                            .map_or(0.0, |(width, height)| f64::from(width) / f64::from(height));
-                        json!({"number": c.number, "name": c.name, "aspect": aspect})
-                    })
-                    .collect();
-                json!({
-                    "id": r.id,
-                    "name": r.name,
-                    "host": r.host,
-                    "user": r.user,
-                    "httpPort": r.http_port,
-                    "rtspPort": r.rtsp_port,
-                    "state": state,
-                    "failure": failure,
-                    "cameras": cameras,
-                })
-            })
-            .collect();
-        let text = serde_json::Value::Array(items).to_string();
+        let text = tree_text(list.recorders(), &self.channels, &self.failures);
         self.set_tree(QString::from(text.as_str()));
     }
 
@@ -833,16 +858,7 @@ impl qobject::CameraGrid {
                             connection.gate.confirm();
                             Ok((connection, channels))
                         }
-                        Err(error) => {
-                            let retry = match error {
-                                RecorderError::Http(_) => Retry::Always,
-                                RecorderError::Status(500..=599) | RecorderError::Unexpected(_) => {
-                                    Retry::Limited
-                                }
-                                _ => Retry::Never,
-                            };
-                            Err((recorder_message(&error), retry))
-                        }
+                        Err(error) => Err((recorder_message(&error), Retry::after(&error))),
                     }
                 });
             let _ = thread.queue(move |mut grid: Pin<&mut qobject::CameraGrid>| {
@@ -862,15 +878,7 @@ impl qobject::CameraGrid {
                     Err((message, retry)) => {
                         let mut state = grid.as_mut().rust_mut();
                         state.failures.insert(id, message);
-                        let again = match retry {
-                            Retry::Always => true,
-                            Retry::Limited => {
-                                let spent = state.answered_retries.entry(id).or_default();
-                                *spent += 1;
-                                *spent <= MAX_ANSWERED_RETRIES
-                            }
-                            Retry::Never => false,
-                        };
+                        let again = retry.spend(state.answered_retries.entry(id).or_default());
                         if again {
                             grid.as_mut().schedule_retry(id, attempt, fill_empty_grid);
                         }
@@ -898,13 +906,8 @@ impl qobject::CameraGrid {
 
     /// Starts the grid with the channels of a recorder the first time, and fixes the saved one.
     fn merge_layout(self: Pin<&mut Self>, recorder: u64, channels: &[Channel], fill_empty: bool) {
-        let saved = self.list.as_ref().and_then(|list| list.layout().cloned());
-        let mut layout = match saved.clone() {
-            Some(layout) if !(fill_empty && layout.is_empty()) => layout,
-            _ => Layout::fitting(&recorder_cameras(recorder, channels)),
-        };
-        layout.repair();
-        if saved.as_ref() != Some(&layout) {
+        let saved = self.list.as_ref().and_then(|list| list.layout());
+        if let Some(layout) = merged_layout(saved, recorder, channels, fill_empty) {
             self.save_layout(layout);
         }
     }
@@ -969,8 +972,7 @@ impl qobject::CameraGrid {
 
     fn turn_layout(mut self: Pin<&mut Self>) {
         let shown = self.as_mut().with_list(|list| {
-            let next = (list.current_layout() + 1) % list.layouts().len().max(1);
-            list.show_layout(next)
+            list.show_layout(next_layout(list.current_layout(), list.layouts().len()))
         }) == Some(true);
         // Leaves a notice in place, since nobody chose to move away from it.
         if shown {
@@ -1018,18 +1020,9 @@ impl qobject::CameraGrid {
         let Some(channels) = self.channels.get(&id) else {
             return;
         };
-        let cameras = channels.len();
+        let notice = capacity_notice(channels.len());
         let fitted = Layout::fitting(&recorder_cameras(id, channels));
         self.as_mut().save_layout(fitted);
-        let capacity = Layout::capacity();
-        let notice = if cameras > capacity {
-            message(
-                "Showing %1 of %2 cameras from this recorder.",
-                &[&capacity.to_string(), &cameras.to_string()],
-            )
-        } else {
-            String::new()
-        };
         self.set_notice(QString::from(notice.as_str()));
     }
 
@@ -1059,13 +1052,7 @@ impl qobject::CameraGrid {
         std::thread::spawn(move || {
             let result = connection.allowed_client().and_then(|client| {
                 let now = client.clock()?;
-                if !is_clock(&now) {
-                    return Err(RecorderError::Unexpected(format!("clock {now}")));
-                }
-                if !date.is_empty() && !is_date(&date) {
-                    return Err(RecorderError::Unexpected(format!("day {date}")));
-                }
-                let day = if date.is_empty() { day_of(&now) } else { date };
+                let day = day_to_search(&date, &now)?;
                 let spans = client.recordings(channel as u32, &day)?;
                 Ok((now, day, spans))
             });
@@ -1112,29 +1099,14 @@ impl qobject::CameraGrid {
         start: i32,
         end: i32,
     ) {
-        // Only days that came from a checked search get here, and this keeps it that way.
-        if !is_date(&date.to_string()) {
-            return;
-        }
-        // QML checks these too. A stretch that ends before it starts would ask the recorder for
-        // nearly a whole day once the subtraction wraps.
-        let (Some(channel), Some(start), Some(end)) = (
-            channel_number(channel),
-            second_of_day(start),
-            second_of_day(end),
-        ) else {
-            return;
-        };
-        if end <= start {
-            return;
-        }
-        let job = Job {
+        let Some(job) = export_job(
             recorder,
             channel,
-            name: name.to_string(),
-            date: date.to_string(),
-            start,
-            end,
+            name.to_string(),
+            date.to_string(),
+            (start, end),
+        ) else {
+            return;
         };
         self.as_mut().rust_mut().exports.push_back(job);
         self.start_next_export();
@@ -1273,12 +1245,7 @@ impl qobject::CameraGrid {
                 Err(error @ RecorderError::Unauthorized) => return refused(error),
                 Err(_) => String::new(),
             };
-            // From the end, which is what someone looking for a recent event wants first.
-            let dates: Vec<String> = (1..=days_in_month(&month))
-                .rev()
-                .map(|day| format!("{month}-{day:02}"))
-                .filter(|date| today.is_empty() || *date <= today)
-                .collect();
+            let dates = days_to_ask(&month, &today);
             let mut days: Vec<u32> = Vec::new();
             let key = format!("{recorder}:{channel}:{month}");
             let result = client.recorded_days(
@@ -1289,7 +1256,7 @@ impl qobject::CameraGrid {
                         return false;
                     }
                     if recorded {
-                        days.extend(date.rsplit('-').next().and_then(|d| d.parse::<u32>().ok()));
+                        days.extend(day_number(date));
                         let text = json!({"key": key, "days": days, "done": false}).to_string();
                         let _ = thread.queue(move |grid: Pin<&mut qobject::CameraGrid>| {
                             grid.set_recorded_days(QString::from(text.as_str()));
@@ -1319,42 +1286,19 @@ impl qobject::CameraGrid {
         seconds: i32,
         rate: i32,
     ) -> i32 {
-        if self.video_unavailable || !is_date(&date.to_string()) {
+        if self.video_unavailable {
             return 0;
         }
-        let (Some(channel), Some(seconds)) = (channel_number(channel), second_of_day(seconds))
-        else {
+        let date = date.to_string();
+        let Some((channel, seconds, rate)) = playback_point(&date, channel, seconds, rate) else {
             return 0;
         };
-        if rate < 1 {
-            return 0;
-        }
         let attempt = self.playbacks + 1;
         self.as_mut().rust_mut().playbacks = attempt;
         let Some(connection) = self.connections.get(&(recorder as u64)) else {
             return 0;
         };
-        let client = connection.client();
-        let date = date.to_string();
-        let url = client.playback_url(channel, &date, seconds);
-        let source = Source {
-            url,
-            user: connection.user.clone(),
-            password: connection.password.clone(),
-            recording: true,
-            rate: rate as u32,
-            attempt,
-            gate: connection.gate.clone(),
-            stretch: Some(Arc::new(Stretch {
-                client: Arc::new(client),
-                channel,
-                date,
-                start: seconds,
-                without_rtsp: connection.without_rtsp.clone(),
-                allowed: connection.allowed_recordings.clone(),
-            })),
-            direct: None,
-        };
+        let source = connection.playback_source(channel, date, seconds, rate, attempt);
         let stream = stream_of(item as *mut c_void);
         (*stream).set_paused(false);
         (*stream).set_source(Some(source));
@@ -1456,8 +1400,7 @@ impl qobject::CameraGrid {
     ) {
         self.as_mut().set_form_error(QString::default());
         self.as_mut().set_notice(QString::default());
-        let port = |number: i32| u16::try_from(number).ok().filter(|&port| port != 0);
-        let address = match Address::parse(&host.to_string(), port(ports.0), port(ports.1)) {
+        let address = match form_address(&host.to_string(), ports) {
             Ok(address) => address,
             Err(error) => {
                 self.set_form_error(QString::from(address_message(error)));
@@ -1467,15 +1410,8 @@ impl qobject::CameraGrid {
         let name = name.to_string();
         let user = user.to_string();
         let password = password.to_string();
-        // The saved password is only for the address it was typed for, or changing the address
-        // would hand it to whatever answers there.
-        let same_address = |id| {
-            self.list
-                .as_ref()
-                .and_then(|list| list.recorders().iter().find(|r| r.id == id))
-                .is_some_and(|recorder| recorder.address() == address)
-        };
-        if id.is_some_and(|id| password.is_empty() && !same_address(id)) {
+        let recorders = self.list.as_ref().map_or(&[][..], RecorderList::recorders);
+        if needs_new_password(id, &password, recorders, &address) {
             self.set_form_error(QString::from("Enter the password for the new address."));
             return;
         }
@@ -1518,7 +1454,7 @@ impl qobject::CameraGrid {
                         return;
                     }
                 };
-                let label = if name.trim().is_empty() { model } else { name };
+                let label = recorder_label(name, model);
                 let saved = grid
                     .as_mut()
                     .with_list(|list| list.store(target, label.trim(), &address, &user));
@@ -1605,12 +1541,8 @@ impl qobject::CameraGrid {
             self.set_error(QString::from(list_error(&error).as_str()));
             return;
         }
-        let notice = if password_removed {
-            ""
-        } else {
-            "Recorder removed, but its password stayed in the system keyring."
-        };
-        self.as_mut().set_notice(QString::from(notice));
+        self.as_mut()
+            .set_notice(QString::from(removal_notice(password_removed)));
         self.as_mut().forget_recorder(id);
         self.as_mut().publish_layouts();
         self.publish_tree();
@@ -1634,43 +1566,145 @@ impl qobject::CameraGrid {
             return;
         }
         let stream = stream_of(item);
+        let channels = self.channels.get(&(recorder as u64));
         let source = self
             .connections
             .get(&(recorder as u64))
-            .filter(|_| visible && !self.video_unavailable && channel_number(channel).is_some())
-            .map(|connection| {
+            .filter(|_| visible && !self.video_unavailable)
+            .and_then(|connection| {
+                let channel = channel_number(channel)?;
                 let kind = if main_stream {
                     Stream::Main
                 } else {
                     Stream::Sub
                 };
-                let camera = self
-                    .channels
-                    .get(&(recorder as u64))
-                    .and_then(|channels| channels.iter().find(|c| c.number == channel as u32))
-                    .and_then(|channel| channel.camera.as_ref());
-                let client = Arc::new(connection.client());
-                let direct = camera.map(|camera| {
-                    Arc::new(Direct {
-                        url: camera.live_url(kind),
-                        channel: channel as u32,
-                        cameras: connection.direct_cameras.clone(),
-                        client: client.clone(),
-                    })
-                });
-                Source {
-                    url: client.live_url(channel as u32, kind),
-                    user: connection.user.clone(),
-                    password: connection.password.clone(),
-                    recording: false,
-                    rate: 1,
-                    attempt: 0,
-                    gate: connection.gate.clone(),
-                    stretch: None,
-                    direct,
-                }
+                Some(connection.live_source(channels.map(Vec::as_slice), channel, kind))
             });
         (*stream).set_source(source);
+    }
+}
+
+/// The recorders as the sidebar shows them, with the state of each and the cameras of the ones
+/// that answered.
+fn tree_text(
+    recorders: &[Recorder],
+    channels: &HashMap<u64, Vec<Channel>>,
+    failures: &HashMap<u64, String>,
+) -> String {
+    let items: Vec<_> = recorders
+        .iter()
+        .map(|r| {
+            let channels = channels.get(&r.id);
+            let failure = failures.get(&r.id);
+            let state = match (channels, failure) {
+                (Some(_), _) => "online",
+                (None, Some(_)) => "failed",
+                (None, None) => "connecting",
+            };
+            let cameras: Vec<_> = channels
+                .into_iter()
+                .flatten()
+                .map(|c| {
+                    let aspect = c
+                        .main_size
+                        .map_or(0.0, |(width, height)| f64::from(width) / f64::from(height));
+                    json!({"number": c.number, "name": c.name, "aspect": aspect})
+                })
+                .collect();
+            json!({
+                "id": r.id,
+                "name": r.name,
+                "host": r.host,
+                "user": r.user,
+                "httpPort": r.http_port,
+                "rtspPort": r.rtsp_port,
+                "state": state,
+                "failure": failure,
+                "cameras": cameras,
+            })
+        })
+        .collect();
+    serde_json::Value::Array(items).to_string()
+}
+
+/// The grid to save once a recorder lists its channels, or None when the saved one stays as it is.
+/// The first recorder fills a grid that doesn't exist yet, or an empty one with `fill_empty`.
+fn merged_layout(
+    saved: Option<&Layout>,
+    recorder: u64,
+    channels: &[Channel],
+    fill_empty: bool,
+) -> Option<Layout> {
+    let mut layout = match saved {
+        Some(layout) if !(fill_empty && layout.is_empty()) => layout.clone(),
+        _ => Layout::fitting(&recorder_cameras(recorder, channels)),
+    };
+    layout.repair();
+    (saved != Some(&layout)).then_some(layout)
+}
+
+/// What a recorder with more cameras than the largest grid holds tells after opening it.
+fn capacity_notice(cameras: usize) -> String {
+    let capacity = Layout::capacity();
+    if cameras > capacity {
+        message(
+            "Showing %1 of %2 cameras from this recorder.",
+            &[&capacity.to_string(), &cameras.to_string()],
+        )
+    } else {
+        String::new()
+    }
+}
+
+/// The grid after `current` when the grids take turns, back to the first after the last.
+fn next_layout(current: usize, count: usize) -> usize {
+    (current + 1) % count.max(1)
+}
+
+/// What the system offers for showing video, as `check_components` finds it.
+struct Components {
+    graphics_ready: bool,
+    old_gstreamer: Option<String>,
+    missing: Vec<&'static str>,
+    missing_h265: Vec<&'static str>,
+    windows: bool,
+}
+
+impl Components {
+    /// The message about what is missing, and whether no video can show at all. None when
+    /// nothing is missing.
+    fn problem(&self) -> Option<(String, bool)> {
+        let missing = self.missing.join(", ");
+        let text = if !self.graphics_ready {
+            message("This graphics card could not be set up to show video.", &[])
+        } else if let Some(version) = &self.old_gstreamer {
+            message(
+                "GStreamer 1.24 or newer is needed to show video, and this system has %1.",
+                &[version],
+            )
+        } else if !self.missing.is_empty() && self.windows {
+            // The plugins come with the app on Windows, so only a decoder the GPU lacks is missing.
+            message(
+                "This computer can't decode the video of the cameras on its graphics card (%1).",
+                &[&missing],
+            )
+        } else if !self.missing.is_empty() {
+            message(
+                "GStreamer components are missing to show video (%1). \
+                 Install the GStreamer plugins and VA-API support.",
+                &[&missing],
+            )
+        } else if !self.missing_h265.is_empty() {
+            message(
+                "H.265 cameras won't open because GStreamer components are missing (%1).",
+                &[&self.missing_h265.join(", ")],
+            )
+        } else {
+            return None;
+        };
+        let unavailable =
+            !self.graphics_ready || !self.missing.is_empty() || self.old_gstreamer.is_some();
+        Some((text, unavailable))
     }
 }
 
@@ -1684,6 +1718,116 @@ fn recorder_cameras(recorder: u64, channels: &[Channel]) -> Vec<CameraId> {
         .collect()
 }
 
+/// The day a search of recordings asks for, from what QML sent and the clock of the recorder. An
+/// empty day is today on that clock. Both end up in requests, so neither can be anything else.
+fn day_to_search(date: &str, now: &str) -> Result<String, RecorderError> {
+    if !is_clock(now) {
+        return Err(RecorderError::Unexpected(format!("clock {now}")));
+    }
+    if date.is_empty() {
+        return Ok(day_of(now));
+    }
+    if !is_date(date) {
+        return Err(RecorderError::Unexpected(format!("day {date}")));
+    }
+    Ok(date.to_owned())
+}
+
+/// An export as QML asks for it, or None for values QML shouldn't send.
+fn export_job(
+    recorder: i32,
+    channel: i32,
+    name: String,
+    date: String,
+    (start, end): (i32, i32),
+) -> Option<Job> {
+    // Only days that came from a checked search get here, and this keeps it that way.
+    if !is_date(&date) {
+        return None;
+    }
+    // QML checks these too. A stretch that ends before it starts would ask the recorder for
+    // nearly a whole day once the subtraction wraps.
+    let (channel, start, end) = (
+        channel_number(channel)?,
+        second_of_day(start)?,
+        second_of_day(end)?,
+    );
+    (end > start).then_some(Job {
+        recorder,
+        channel,
+        name,
+        date,
+        start,
+        end,
+    })
+}
+
+/// The days of a month as `YYYY-MM` to ask the recorder about, up to `today` when it is known.
+/// From the end, which is what someone looking for a recent event wants first.
+fn days_to_ask(month: &str, today: &str) -> Vec<String> {
+    (1..=days_in_month(month))
+        .rev()
+        .map(|day| format!("{month}-{day:02}"))
+        .filter(|date| today.is_empty() || date.as_str() <= today)
+        .collect()
+}
+
+/// The day of the month of a date as `YYYY-MM-DD`.
+fn day_number(date: &str) -> Option<u32> {
+    date.rsplit('-').next()?.parse().ok()
+}
+
+/// The address typed in the form, with the ports of its fields. A port of 0 or out of range is
+/// left to the address or to the factory one.
+fn form_address(host: &str, (http_port, rtsp_port): (i32, i32)) -> Result<Address, AddressError> {
+    let port = |number: i32| u16::try_from(number).ok().filter(|&port| port != 0);
+    Address::parse(host, port(http_port), port(rtsp_port))
+}
+
+/// Whether an edit with the password left empty has to ask for it. The saved password is only for
+/// the address it was typed for, or changing the address would hand it to whatever answers there.
+fn needs_new_password(
+    id: Option<u64>,
+    password: &str,
+    recorders: &[Recorder],
+    address: &Address,
+) -> bool {
+    let Some(id) = id.filter(|_| password.is_empty()) else {
+        return false;
+    };
+    !recorders
+        .iter()
+        .find(|r| r.id == id)
+        .is_some_and(|recorder| recorder.address() == *address)
+}
+
+fn removal_notice(password_removed: bool) -> &'static str {
+    if password_removed {
+        ""
+    } else {
+        "Recorder removed, but its password stayed in the system keyring."
+    }
+}
+
+/// The name a recorder is saved with, which is its model when none was typed.
+fn recorder_label(name: String, model: String) -> String {
+    if name.trim().is_empty() {
+        model
+    } else {
+        name
+    }
+}
+
+/// The channel, second and speed of a recording as QML asks to play it, or None for values QML
+/// shouldn't send.
+fn playback_point(date: &str, channel: i32, seconds: i32, rate: i32) -> Option<(u32, u32, u32)> {
+    if !is_date(date) {
+        return None;
+    }
+    let rate = u32::try_from(rate).ok().filter(|&rate| rate >= 1)?;
+    Some((channel_number(channel)?, second_of_day(seconds)?, rate))
+}
+
 /// The day of a clock of the recorder, as `YYYY-MM-DD HH:MM:SS` gives it.
 fn day_of(now: &str) -> String {
     now.split(' ').next().unwrap_or_default().to_owned()
@@ -1692,6 +1836,7 @@ fn day_of(now: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rigelcam_core::dahua::Camera;
     use std::cell::Cell;
 
     #[test]
@@ -1856,5 +2001,374 @@ mod tests {
     #[test]
     fn a_cancelled_export_shows_no_message() {
         assert!(export_message(&export::Error::Cancelled).is_empty());
+    }
+
+    /// A message of `i18n::message` with its arguments, as QML gets it.
+    fn translated(text: &str, arguments: &[&str]) -> String {
+        message(text, arguments)
+    }
+
+    fn components() -> Components {
+        Components {
+            graphics_ready: true,
+            old_gstreamer: None,
+            missing: Vec::new(),
+            missing_h265: Vec::new(),
+            windows: false,
+        }
+    }
+
+    #[test]
+    fn components_report_the_first_problem_and_whether_video_can_show() {
+        assert_eq!(components().problem(), None);
+
+        let no_graphics = Components {
+            graphics_ready: false,
+            old_gstreamer: Some("1.22.0".to_owned()),
+            ..components()
+        };
+        let graphics = "This graphics card could not be set up to show video.";
+        assert_eq!(
+            no_graphics.problem(),
+            Some((translated(graphics, &[]), true))
+        );
+
+        let old = Components {
+            old_gstreamer: Some("1.22.0".to_owned()),
+            missing: vec!["vah264dec"],
+            ..components()
+        };
+        let (text, unavailable) = old.problem().unwrap();
+        assert!(text.starts_with("GStreamer 1.24 or newer") && text.ends_with("1.22.0"));
+        assert!(unavailable);
+
+        let missing = Components {
+            missing: vec!["vah264dec", "vah265dec"],
+            missing_h265: vec!["h265parse"],
+            ..components()
+        };
+        let (text, unavailable) = missing.problem().unwrap();
+        assert!(
+            text.starts_with("GStreamer components are missing"),
+            "{text}"
+        );
+        assert!(text.ends_with("vah264dec, vah265dec"));
+        assert!(unavailable);
+        let on_windows = Components {
+            windows: true,
+            ..missing
+        };
+        let (text, _) = on_windows.problem().unwrap();
+        assert!(text.starts_with("This computer can't decode"), "{text}");
+
+        let h265 = Components {
+            missing_h265: vec!["h265parse"],
+            ..components()
+        };
+        let (text, unavailable) = h265.problem().unwrap();
+        assert!(text.starts_with("H.265 cameras won't open") && text.ends_with("h265parse"));
+        assert!(!unavailable);
+    }
+
+    fn recorder(id: u64, host: &str) -> Recorder {
+        Recorder {
+            id,
+            name: format!("NVR {id}"),
+            host: host.to_owned(),
+            user: "admin".to_owned(),
+            http_port: 80,
+            rtsp_port: 554,
+        }
+    }
+
+    fn channel(number: u32, camera: Option<&str>) -> Channel {
+        Channel {
+            number,
+            name: format!("Cam {number}"),
+            camera: camera.map(|host| Camera {
+                host: host.to_owned(),
+                rtsp_port: 554,
+            }),
+            main_size: Some((1920, 1080)),
+        }
+    }
+
+    #[test]
+    fn the_tree_tells_the_state_and_the_cameras_of_each_recorder() {
+        let recorders = [
+            recorder(1, "192.0.2.1"),
+            recorder(2, "192.0.2.2"),
+            recorder(3, "192.0.2.3"),
+        ];
+        let channels = HashMap::from([(1, vec![channel(4, None)])]);
+        let failures = HashMap::from([(1, "old".to_owned()), (2, "down".to_owned())]);
+        let tree: serde_json::Value =
+            serde_json::from_str(&tree_text(&recorders, &channels, &failures)).unwrap();
+        let states: Vec<_> = tree
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["state"].as_str().unwrap())
+            .collect();
+        assert_eq!(states, ["online", "failed", "connecting"]);
+        assert_eq!(tree[1]["failure"], "down");
+        assert!(tree[2]["failure"].is_null());
+        assert_eq!(tree[0]["host"], "192.0.2.1");
+        assert_eq!(tree[0]["httpPort"], 80);
+        assert_eq!(tree[0]["rtspPort"], 554);
+        let camera = &tree[0]["cameras"][0];
+        assert_eq!(camera["number"], 4);
+        assert_eq!(camera["name"], "Cam 4");
+        assert!((camera["aspect"].as_f64().unwrap() - 16.0 / 9.0).abs() < 1e-9);
+        assert!(tree[1]["cameras"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn retries_follow_the_kind_of_failure() {
+        let unreachable = Client::new("127.0.0.1", "u", "p")
+            .with_ports(1, 554)
+            .device_type()
+            .unwrap_err();
+        assert!(Retry::after(&unreachable) == Retry::Always);
+        for limited in [
+            RecorderError::Status(500),
+            RecorderError::Status(599),
+            RecorderError::Unexpected(String::new()),
+        ] {
+            assert!(Retry::after(&limited) == Retry::Limited, "{limited}");
+        }
+        for never in [
+            RecorderError::Status(404),
+            RecorderError::Status(600),
+            RecorderError::Unauthorized,
+            RecorderError::Challenge(String::new()),
+        ] {
+            assert!(Retry::after(&never) == Retry::Never, "{never}");
+        }
+
+        let mut spent = 0;
+        assert!(Retry::Always.spend(&mut spent));
+        assert!(!Retry::Never.spend(&mut spent));
+        assert_eq!(spent, 0);
+        let limited: Vec<bool> = (0..MAX_ANSWERED_RETRIES + 2)
+            .map(|_| Retry::Limited.spend(&mut spent))
+            .collect();
+        assert!(limited[..MAX_ANSWERED_RETRIES as usize]
+            .iter()
+            .all(|&again| again));
+        assert!(!limited[MAX_ANSWERED_RETRIES as usize]);
+        assert_eq!(spent, MAX_ANSWERED_RETRIES + 2);
+    }
+
+    fn camera(recorder: u64, channel: u32) -> Option<CameraId> {
+        Some(CameraId { recorder, channel })
+    }
+
+    #[test]
+    fn a_recorder_fills_a_missing_or_empty_grid_and_repairs_a_saved_one() {
+        let channels = [channel(1, None), channel(2, None)];
+        let fitted = merged_layout(None, 7, &channels, false).unwrap();
+        assert_eq!(fitted.cameras, [camera(7, 1), camera(7, 2), None, None]);
+
+        assert_eq!(merged_layout(Some(&fitted), 8, &channels, true), None);
+
+        let empty = Layout {
+            columns: 1,
+            cameras: vec![None],
+        };
+        assert_eq!(merged_layout(Some(&empty), 7, &channels, false), None);
+        assert_eq!(
+            merged_layout(Some(&empty), 7, &channels, true),
+            Some(fitted)
+        );
+
+        let repeated = Layout {
+            columns: 2,
+            cameras: vec![camera(7, 1), camera(7, 1), None, None],
+        };
+        let repaired = merged_layout(Some(&repeated), 7, &channels, false).unwrap();
+        assert_eq!(repaired.cameras, [camera(7, 1), None, None, None]);
+    }
+
+    #[test]
+    fn opening_a_recorder_tells_when_its_cameras_dont_fit() {
+        assert_eq!(capacity_notice(Layout::capacity()), "");
+        assert_eq!(
+            capacity_notice(40),
+            translated(
+                "Showing %1 of %2 cameras from this recorder.",
+                &["36", "40"]
+            )
+        );
+    }
+
+    #[test]
+    fn grids_take_turns_back_to_the_first() {
+        assert_eq!(next_layout(0, 3), 1);
+        assert_eq!(next_layout(2, 3), 0);
+        assert_eq!(next_layout(0, 0), 0);
+    }
+
+    #[test]
+    fn a_search_asks_for_today_on_the_clock_of_the_recorder_or_a_checked_day() {
+        let now = "2026-11-26 10:00:00";
+        assert_eq!(day_to_search("", now).unwrap(), "2026-11-26");
+        assert_eq!(day_to_search("2026-11-20", now).unwrap(), "2026-11-20");
+        assert!(day_to_search("2026-11-20&channel=2", now).is_err());
+        assert!(day_to_search("", "2026-11-26").is_err());
+        assert!(day_to_search("2026-11-20", "not a clock").is_err());
+    }
+
+    #[test]
+    fn an_export_takes_only_a_checked_day_and_a_stretch_that_moves_forward() {
+        let job = |date: &str, channel, stretch| {
+            export_job(1, channel, "Gate".to_owned(), date.to_owned(), stretch)
+        };
+        let ok = job("2026-11-26", 3, (100, 200)).unwrap();
+        assert_eq!(
+            (ok.recorder, ok.channel, ok.start, ok.end),
+            (1, 3, 100, 200)
+        );
+        assert_eq!((ok.name.as_str(), ok.date.as_str()), ("Gate", "2026-11-26"));
+        assert!(job("2026-11-2x", 3, (100, 200)).is_none());
+        assert!(job("2026-11-26", 0, (100, 200)).is_none());
+        assert!(job("2026-11-26", 3, (200, 200)).is_none());
+        assert!(job("2026-11-26", 3, (200, 100)).is_none());
+        assert!(job("2026-11-26", 3, (100, 86_400)).is_none());
+        assert!(job("2026-11-26", 3, (-1, 100)).is_none());
+    }
+
+    #[test]
+    fn the_calendar_asks_from_the_last_day_up_to_today() {
+        assert_eq!(
+            days_to_ask("2026-11", "2026-11-03"),
+            ["2026-11-03", "2026-11-02", "2026-11-01"]
+        );
+        let unknown = days_to_ask("2026-11", "");
+        assert_eq!(unknown.len(), 30);
+        assert_eq!(unknown[0], "2026-11-30");
+        assert_eq!(days_to_ask("2026-02", "2026-12-01").len(), 28);
+        assert!(days_to_ask("2026-12", "2026-11-26").is_empty());
+        assert_eq!(day_number("2026-11-07"), Some(7));
+        assert_eq!(day_number("2026-11-xx"), None);
+    }
+
+    #[test]
+    fn a_recording_plays_only_from_values_qml_should_send() {
+        assert_eq!(playback_point("2026-11-26", 3, 600, 4), Some((3, 600, 4)));
+        assert_eq!(playback_point("2026-11-26", 3, 600, 1), Some((3, 600, 1)));
+        assert_eq!(playback_point("2026-11-26", 3, 600, 0), None);
+        assert_eq!(playback_point("2026-11-26", 3, 600, -2), None);
+        assert_eq!(playback_point("2026-11-26", 0, 600, 1), None);
+        assert_eq!(playback_point("2026-11-26", 3, 86_400, 1), None);
+        assert_eq!(playback_point("26/11/2026", 3, 600, 1), None);
+    }
+
+    #[test]
+    fn the_form_takes_its_ports_and_asks_for_a_password_for_a_new_address() {
+        let address = form_address("192.0.2.1", (0, 0)).unwrap();
+        assert_eq!((address.http_port, address.rtsp_port), (80, 554));
+        let address = form_address("192.0.2.1", (8080, 5541)).unwrap();
+        assert_eq!((address.http_port, address.rtsp_port), (8080, 5541));
+        let address = form_address("192.0.2.1", (70_000, -1)).unwrap();
+        assert_eq!((address.http_port, address.rtsp_port), (80, 554));
+        assert_eq!(
+            form_address("https://192.0.2.1", (0, 0)),
+            Err(AddressError::Https)
+        );
+
+        let recorders = [recorder(1, "192.0.2.1")];
+        let same = form_address("192.0.2.1", (0, 0)).unwrap();
+        let other = form_address("192.0.2.9", (0, 0)).unwrap();
+        assert!(!needs_new_password(None, "", &recorders, &other));
+        assert!(!needs_new_password(Some(1), "secret", &recorders, &other));
+        assert!(!needs_new_password(Some(1), "", &recorders, &same));
+        assert!(needs_new_password(Some(1), "", &recorders, &other));
+        assert!(needs_new_password(Some(2), "", &recorders, &same));
+
+        assert_eq!(
+            recorder_label("  ".to_owned(), "NVD 7132".to_owned()),
+            "NVD 7132"
+        );
+        assert_eq!(
+            recorder_label("Gate".to_owned(), "NVD 7132".to_owned()),
+            "Gate"
+        );
+        assert_eq!(removal_notice(true), "");
+        assert!(removal_notice(false).contains("keyring"));
+    }
+
+    #[test]
+    fn live_video_goes_to_the_camera_only_when_the_recorder_told_where_it_is() {
+        let connection = connection();
+        let channels = [channel(1, Some("192.0.2.10")), channel(2, None)];
+        let source = connection.live_source(Some(&channels), 1, Stream::Main);
+        assert_eq!(
+            source.url,
+            "rtsp://127.0.0.1:554/cam/realmonitor?channel=1&subtype=0"
+        );
+        let direct = source.direct.as_ref().unwrap();
+        assert_eq!(direct.channel, 1);
+        assert!(direct.url.starts_with("rtsp://192.0.2.10:554/"));
+        assert!(!source.recording && source.rate == 1 && source.stretch.is_none());
+        assert_eq!((source.user.as_str(), source.password.as_str()), ("u", "p"));
+
+        let sub = connection.live_source(Some(&channels), 2, Stream::Sub);
+        assert!(sub.direct.is_none());
+        assert!(sub.url.ends_with("channel=2&subtype=1"));
+        assert!(connection
+            .live_source(None, 1, Stream::Sub)
+            .direct
+            .is_none());
+    }
+
+    #[test]
+    fn a_recording_carries_what_the_http_api_needs_to_play_it() {
+        let connection = connection();
+        let source = connection.playback_source(3, "2026-11-26".to_owned(), 3_661, 4, 9);
+        assert_eq!(
+            source.url,
+            connection.client().playback_url(3, "2026-11-26", 3_661)
+        );
+        assert!(source.recording && source.direct.is_none());
+        assert_eq!((source.rate, source.attempt), (4, 9));
+        let stretch = source.stretch.as_ref().unwrap();
+        assert_eq!(
+            (stretch.channel, stretch.date.as_str(), stretch.start),
+            (3, "2026-11-26", 3_661)
+        );
+        assert!(Arc::ptr_eq(&stretch.without_rtsp, &connection.without_rtsp));
+        assert!(Arc::ptr_eq(
+            &stretch.allowed,
+            &connection.allowed_recordings
+        ));
+    }
+
+    #[test]
+    fn errors_of_the_list_and_the_address_reach_the_interface_translated() {
+        assert_eq!(
+            list_error(&RecordersError::NoPassword),
+            translated("The system keyring has no password for this recorder.", &[])
+        );
+        let keyring = list_error(&RecordersError::Keyring("locked".to_owned()));
+        assert_eq!(
+            keyring,
+            translated("The system keyring failed (%1).", &["locked"])
+        );
+        let texts = [
+            address_message(AddressError::Credentials),
+            address_message(AddressError::Https),
+            address_message(AddressError::Invalid),
+        ];
+        assert!(texts.iter().all(|text| !text.is_empty()));
+        assert!(texts[1].contains("https://"));
+        assert_eq!(day_of("2026-11-26 10:00:00"), "2026-11-26");
+        assert_eq!(
+            recorder_cameras(4, &[channel(2, None)]),
+            [CameraId {
+                recorder: 4,
+                channel: 2
+            }]
+        );
     }
 }

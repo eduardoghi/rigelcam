@@ -530,6 +530,28 @@ fn rtsp_status(error: &gst::message::Error) -> Option<u32> {
     error.details()?.get("rtsp-status-code").ok()
 }
 
+/// What an error of the pipeline means for the stream. `has_other_way` is a source with another
+/// way to the video, the HTTP API or the camera, which a 404 before any video sends it to.
+fn error_outcome(
+    error: &gst::message::Error,
+    has_other_way: bool,
+    received_video: bool,
+) -> Outcome {
+    if error.error().matches(gst::ResourceError::NotAuthorized) {
+        return Outcome::Refused;
+    }
+    if rtsp_status(error) == Some(RTSP_FORBIDDEN) {
+        return Outcome::Denied;
+    }
+    if has_other_way && !received_video && error.error().matches(gst::ResourceError::NotFound) {
+        return lost(NOT_ON_RTSP);
+    }
+    Outcome::Lost {
+        received_video,
+        reason: error.error().to_string(),
+    }
+}
+
 fn lost(reason: &str) -> Outcome {
     Outcome::Lost {
         received_video: false,
@@ -583,7 +605,7 @@ fn open_live(
         let outcome = play(shared, source, revision, generation);
         let not_found = matches!(&outcome, Outcome::Lost { reason, .. } if reason == NOT_ON_RTSP);
         let served = cameras.served.lock().unwrap().contains(&direct.channel);
-        if !not_found || !failed_before || served {
+        if !may_go_to_camera(not_found, failed_before, served) {
             return outcome;
         }
         if direct.client.camera_connected(direct.channel) != Some(true) {
@@ -604,6 +626,13 @@ fn open_live(
         }
         outcome => outcome,
     }
+}
+
+/// Whether a live stream that failed may go to the camera, once the recorder confirms the camera
+/// is connected. Only after a 404 on two tries in a row, and never for a channel the recorder sent
+/// video for, whose 404 only means its camera dropped for a moment.
+fn may_go_to_camera(not_found: bool, failed_before: bool, served: bool) -> bool {
+    not_found && failed_before && !served
 }
 
 fn play(shared: &Arc<Shared>, source: &Source, revision: u64, generation: u64) -> Outcome {
@@ -699,22 +728,12 @@ fn watch(
             if let Some(message) = bus.timed_pop(timeout) {
                 match message.view() {
                     gst::MessageView::Error(error) => {
-                        if error.error().matches(gst::ResourceError::NotAuthorized) {
-                            break Outcome::Refused;
-                        }
-                        if rtsp_status(error) == Some(RTSP_FORBIDDEN) {
-                            break Outcome::Denied;
-                        }
-                        if (source.stretch.is_some() || source.direct.is_some())
-                            && !received_video.load(Ordering::Relaxed)
-                            && error.error().matches(gst::ResourceError::NotFound)
-                        {
-                            break lost(NOT_ON_RTSP);
-                        }
-                        break Outcome::Lost {
-                            received_video: received_video.load(Ordering::Relaxed),
-                            reason: error.error().to_string(),
-                        };
+                        let has_other_way = source.stretch.is_some() || source.direct.is_some();
+                        break error_outcome(
+                            error,
+                            has_other_way,
+                            received_video.load(Ordering::Relaxed),
+                        );
                     }
                     gst::MessageView::Eos(_) => {
                         break Outcome::Lost {
@@ -842,8 +861,7 @@ fn feed(
 ) {
     let push = |frames: Vec<Frame>| {
         for frame in frames {
-            if frame.key || rate < KEY_FRAMES_ONLY_RATE {
-                let milliseconds = frame.elapsed_ms / u64::from(rate);
+            if let Some(milliseconds) = shown_at(&frame, rate) {
                 let buffer = export::buffer_of(frame, milliseconds);
                 // Fails once the pipeline stops, which also ends a push that was blocked.
                 if video.push_buffer(buffer).is_err() {
@@ -878,12 +896,28 @@ fn feed(
     }
 }
 
+/// The time of the stream a frame of the recording shows at, at `rate` times the normal speed, or
+/// None for a frame that fast playback skips, which shows only key frames.
+fn shown_at(frame: &Frame, rate: u32) -> Option<u64> {
+    let rate = rate.max(1);
+    (frame.key || rate < KEY_FRAMES_ONLY_RATE).then(|| frame.elapsed_ms / u64::from(rate))
+}
+
 fn decoder_elements(codec: Codec) -> (&'static str, &'static str) {
     let decoder = match codec {
         Codec::H264 => H264_DECODER,
         Codec::H265 => H265_DECODER,
     };
     (export::parser_of(codec), decoder)
+}
+
+/// The depayloader, parser and decoder of an RTP encoding, as `encoding-name` names it.
+fn rtp_elements(encoding: &str) -> Option<(&'static str, (&'static str, &'static str))> {
+    match encoding {
+        "H264" => Some(("rtph264depay", decoder_elements(Codec::H264))),
+        "H265" => Some(("rtph265depay", decoder_elements(Codec::H265))),
+        _ => None,
+    }
 }
 
 fn build_stretch_pipeline(
@@ -1061,13 +1095,7 @@ pub fn recording_access(url: &str, user: &str, password: &str, cancel: &AtomicBo
             &[gst::MessageType::Error],
         );
         if let Some(gst::MessageView::Error(error)) = message.as_ref().map(|m| m.view()) {
-            if rtsp_status(error) == Some(RTSP_FORBIDDEN) {
-                access = Access::Denied;
-            } else if error.error().matches(gst::ResourceError::NotAuthorized) {
-                access = Access::Refused;
-            } else if error.error().matches(gst::ResourceError::NotFound) {
-                access = Access::NotOnRtsp;
-            }
+            access = access_of(error);
             break;
         }
     }
@@ -1076,6 +1104,19 @@ pub fn recording_access(url: &str, user: &str, password: &str, cancel: &AtomicBo
         access = Access::Allowed;
     }
     access
+}
+
+/// What an error of the request for a recording tells about the permission of the channel.
+fn access_of(error: &gst::message::Error) -> Access {
+    if rtsp_status(error) == Some(RTSP_FORBIDDEN) {
+        Access::Denied
+    } else if error.error().matches(gst::ResourceError::NotAuthorized) {
+        Access::Refused
+    } else if error.error().matches(gst::ResourceError::NotFound) {
+        Access::NotOnRtsp
+    } else {
+        Access::Unknown
+    }
 }
 
 fn build_pipeline(
@@ -1112,13 +1153,9 @@ fn build_pipeline(
             return;
         };
         let encoding = structure.get::<String>("encoding-name").unwrap_or_default();
-        let (depay, (parse, decoder)) = match encoding.as_str() {
-            "H264" => ("rtph264depay", decoder_elements(Codec::H264)),
-            "H265" => ("rtph265depay", decoder_elements(Codec::H265)),
-            other => {
-                fail(&pipeline, &format!("unsupported encoding ({other})"));
-                return;
-            }
+        let Some((depay, (parse, decoder))) = rtp_elements(&encoding) else {
+            fail(&pipeline, &format!("unsupported encoding ({encoding})"));
+            return;
         };
         let description = format!(
             "{depay} ! {parse} name=parser ! {decoder} ! {DECODED_CAPS} \
@@ -1596,5 +1633,104 @@ mod tests {
         assert_eq!(access("404 Not Found"), Access::NotOnRtsp);
         assert_ne!(access("200 OK"), Access::Allowed);
         assert_eq!(access("401 Unauthorized"), Access::Refused);
+    }
+
+    /// An error as rtspsrc posts it, with the status of the RTSP answer when it has one.
+    fn rtsp_error(error: gst::ResourceError, status: Option<u32>) -> gst::Message {
+        gst::init().unwrap();
+        let builder = gst::message::Error::builder(error, "from the test");
+        match status {
+            Some(status) => builder
+                .details(
+                    gst::Structure::builder("details")
+                        .field("rtsp-status-code", status)
+                        .build(),
+                )
+                .build(),
+            None => builder.build(),
+        }
+    }
+
+    fn outcome_of(message: &gst::Message, has_other_way: bool, received_video: bool) -> Outcome {
+        let gst::MessageView::Error(error) = message.view() else {
+            unreachable!();
+        };
+        error_outcome(error, has_other_way, received_video)
+    }
+
+    #[test]
+    fn errors_of_a_stream_tell_a_refusal_a_denial_and_a_missing_stream_apart() {
+        let refused = rtsp_error(gst::ResourceError::NotAuthorized, Some(401));
+        assert!(matches!(
+            outcome_of(&refused, true, false),
+            Outcome::Refused
+        ));
+        let denied = rtsp_error(gst::ResourceError::Read, Some(RTSP_FORBIDDEN));
+        assert!(matches!(outcome_of(&denied, true, true), Outcome::Denied));
+
+        let missing = rtsp_error(gst::ResourceError::NotFound, Some(404));
+        let reason_of = |outcome| match outcome {
+            Outcome::Lost {
+                received_video,
+                reason,
+            } => (received_video, reason),
+            _ => panic!("not lost"),
+        };
+        // Only a source with another way to the video, and before any video, takes the 404 as
+        // a stream that isn't there.
+        assert_eq!(
+            reason_of(outcome_of(&missing, true, false)),
+            (false, NOT_ON_RTSP.to_owned())
+        );
+        let (received, reason) = reason_of(outcome_of(&missing, false, false));
+        assert!(!received && reason != NOT_ON_RTSP);
+        let (received, reason) = reason_of(outcome_of(&missing, true, true));
+        assert!(received && reason != NOT_ON_RTSP);
+
+        let other = rtsp_error(gst::ResourceError::Read, Some(500));
+        assert!(reason_of(outcome_of(&other, true, true)).0);
+        let gst::MessageView::Error(error) = other.view() else {
+            unreachable!();
+        };
+        assert_eq!(access_of(error), Access::Unknown);
+    }
+
+    #[test]
+    fn a_live_stream_goes_to_the_camera_only_after_two_404s_on_a_channel_never_served() {
+        assert!(may_go_to_camera(true, true, false));
+        assert!(!may_go_to_camera(false, true, false));
+        assert!(!may_go_to_camera(true, false, false));
+        assert!(!may_go_to_camera(true, true, true));
+    }
+
+    #[test]
+    fn rtp_encodings_get_their_own_elements() {
+        assert_eq!(
+            rtp_elements("H264"),
+            Some(("rtph264depay", decoder_elements(Codec::H264)))
+        );
+        assert_eq!(
+            rtp_elements("H265"),
+            Some(("rtph265depay", decoder_elements(Codec::H265)))
+        );
+        assert_eq!(rtp_elements("JPEG"), None);
+        assert_ne!(decoder_elements(Codec::H264), decoder_elements(Codec::H265));
+    }
+
+    #[test]
+    fn fast_playback_shows_only_key_frames_at_its_speed() {
+        let frame = |key| Frame {
+            key,
+            elapsed_ms: 8_000,
+            data: Vec::new(),
+        };
+        assert_eq!(shown_at(&frame(false), 1), Some(8_000));
+        assert_eq!(
+            shown_at(&frame(false), KEY_FRAMES_ONLY_RATE - 1),
+            Some(8_000 / 7)
+        );
+        assert_eq!(shown_at(&frame(false), KEY_FRAMES_ONLY_RATE), None);
+        assert_eq!(shown_at(&frame(true), 16), Some(500));
+        assert_eq!(shown_at(&frame(true), 0), Some(8_000));
     }
 }
