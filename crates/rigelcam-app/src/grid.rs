@@ -813,7 +813,11 @@ impl qobject::CameraGrid {
                 .map_err(|error| (list_error(&error), Retry::Never))
                 .and_then(|password| {
                     let address = recorder.address();
-                    let gate = client_for(&address, &recorder.user, &password);
+                    // The check of the password logs in through a session too, and a refusal
+                    // there spares the searches from trying one again.
+                    let sessions_refused: Arc<Mutex<bool>> = Arc::default();
+                    let gate = client_for(&address, &recorder.user, &password)
+                        .with_session_memory(sessions_refused.clone());
                     let connection = Connection {
                         address,
                         user: recorder.user,
@@ -822,7 +826,7 @@ impl qobject::CameraGrid {
                         without_rtsp: Arc::default(),
                         allowed_recordings: Arc::default(),
                         direct_cameras: Arc::default(),
-                        sessions_refused: Arc::default(),
+                        sessions_refused,
                     };
                     match connection.client().channels() {
                         Ok(channels) => {

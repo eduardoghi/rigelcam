@@ -276,7 +276,21 @@ impl Client {
 
     /// Current time of the recorder as `YYYY-MM-DD HH:MM:SS`, which can differ from this computer
     /// and is the one its recordings use.
+    ///
+    /// Asked through a session where the recorder offers one, since the recordings of today ask
+    /// for it every minute, twice with the check of the password, and through CGI each time is a
+    /// login in the log of the recorder. A wrong password then costs the session login and the CGI
+    /// one, once, since the refused session is remembered.
     pub fn clock(&self) -> Result<String, Error> {
+        if let Some(session) = Session::open(self) {
+            let now = session
+                .call("global.getCurrentTime", Value::Null, &Value::Null)
+                .ok()
+                .and_then(|answer| answer.pointer("/params/time")?.as_str().map(str::to_owned));
+            if let Some(now) = now {
+                return Ok(now);
+            }
+        }
         let body = self.get("/cgi-bin/global.cgi?action=getCurrentTime")?;
         parse_value(&body, "result")
             .map(str::to_owned)
@@ -1177,8 +1191,9 @@ mod tests {
         );
         let client = Client::new("127.0.0.1", "admin", "wrong").with_ports(port, 554);
         assert!(matches!(client.clock(), Err(Error::Unauthorized)));
+        // The first step of a session login, which carries no password, and the CGI login.
         let tried = requests.load(Ordering::Relaxed);
-        assert!(tried <= 2, "{tried}");
+        assert!(tried <= 3, "{tried}");
         assert!(matches!(
             client.recordings(1, "2026-10-30"),
             Err(Error::Unauthorized)
@@ -1444,7 +1459,8 @@ mod tests {
         );
         let client = Client::new("127.0.0.1", "admin", "secret").with_ports(port, 554);
         assert!(matches!(client.clock(), Err(Error::Status(301))));
-        assert_eq!(requests.load(Ordering::Relaxed), 1);
+        // The session login and then the CGI request, neither of them followed.
+        assert_eq!(requests.load(Ordering::Relaxed), 2);
     }
 
     #[test]
@@ -1457,7 +1473,7 @@ mod tests {
         let gate = LoginGate::new(client);
         assert!(!gate.allows());
         let tried = requests.load(Ordering::Relaxed);
-        assert!(tried <= 2, "{tried}");
+        assert!(tried <= 3, "{tried}");
         assert!(!gate.allows());
         assert_eq!(requests.load(Ordering::Relaxed), tried);
     }
@@ -1480,8 +1496,9 @@ mod tests {
             assert!(!search.join().unwrap());
         }
         assert!(gate.is_refused());
+        // One check for all of them, as in a_refused_password_stops_all_further_requests.
         let tried = requests.load(Ordering::Relaxed);
-        assert!(tried <= 2, "{tried}");
+        assert!(tried <= 3, "{tried}");
     }
 
     #[test]

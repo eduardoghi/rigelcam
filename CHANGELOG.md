@@ -4,6 +4,12 @@ User-visible changes, newest first.
 
 ## [Unreleased]
 
+### Fixed
+
+- The recordings of today no longer fill the log of the recorder while they stay open. Asking
+  its clock each minute wrote 4 login entries there, and the clock is now asked through a
+  session, which leaves no entry on recorders that offer one.
+
 ## [0.1.7] (2026-11-24)
 
 ### Changed
