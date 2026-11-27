@@ -4,6 +4,8 @@ User-visible changes, newest first.
 
 ## [Unreleased]
 
+## [0.1.8] (2026-11-27)
+
 ### Fixed
 
 - The recordings of today no longer fill the log of the recorder while they stay open. Asking
