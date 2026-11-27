@@ -1290,14 +1290,10 @@ mod tests {
 
     #[test]
     fn a_recorder_out_of_reach_is_asked_again_later() {
-        let port = std::net::TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
+        // A port freed by a listener here could be taken by another test running at the same time.
         let memory: Arc<Mutex<bool>> = Arc::default();
         let client = Client::new("127.0.0.1", "admin", "secret")
-            .with_ports(port, 554)
+            .with_ports(1, 554)
             .with_session_memory(memory.clone());
         assert!(Session::open(&client).is_none());
         assert!(!*memory.lock().unwrap());
@@ -1601,5 +1597,501 @@ mod tests {
             "rtsp://recorder.local:554/cam/realmonitor?channel=3&subtype=1"
         );
         assert!(!url.contains("secret"));
+    }
+
+    /// A request as a fake recorder of `fake_api` got it.
+    struct Request {
+        method: String,
+        path: String,
+        authorization: Option<String>,
+        body: String,
+    }
+
+    impl Request {
+        fn json(&self) -> Value {
+            serde_json::from_str(&self.body).unwrap_or(Value::Null)
+        }
+
+        /// The method of a call of a session, or "" for a CGI request.
+        fn call(&self) -> String {
+            self.json()["method"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned()
+        }
+    }
+
+    type Requests = Arc<Mutex<Vec<Request>>>;
+
+    fn read_request(stream: &mut std::net::TcpStream) -> Option<Request> {
+        use std::io::Read;
+
+        let mut head = Vec::new();
+        let mut byte = [0; 1];
+        while !head.ends_with(b"\r\n\r\n") {
+            if stream.read(&mut byte).ok()? == 0 {
+                return None;
+            }
+            head.push(byte[0]);
+        }
+        let head = String::from_utf8_lossy(&head).into_owned();
+        let header = |name: &str| {
+            head.lines().find_map(|line| {
+                let (key, value) = line.split_once(':')?;
+                key.eq_ignore_ascii_case(name)
+                    .then(|| value.trim().to_owned())
+            })
+        };
+        let mut first = head.lines().next()?.split(' ');
+        let (method, path) = (first.next()?.to_owned(), first.next()?.to_owned());
+        let length = header("content-length").map_or(0, |length| length.parse().unwrap_or(0));
+        let mut body = vec![0; length];
+        stream.read_exact(&mut body).ok()?;
+        Some(Request {
+            method,
+            path,
+            authorization: header("authorization"),
+            body: String::from_utf8_lossy(&body).into_owned(),
+        })
+    }
+
+    /// A recorder on a local port that reads whole requests and answers each with the status,
+    /// the header lines and the body that `answer` gives. Keeps the requests in order, each one
+    /// before its answer goes out.
+    fn fake_api(
+        answer: impl Fn(&Request) -> (u16, String, String) + Send + 'static,
+    ) -> (u16, Requests) {
+        use std::io::Write;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let requests = Requests::default();
+        let kept = requests.clone();
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let Some(request) = read_request(&mut stream) else {
+                    continue;
+                };
+                let (status, headers, body) = answer(&request);
+                kept.lock().unwrap().push(request);
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 {status} X\r\nConnection: close\r\n{headers}\
+                     Content-Length: {}\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        });
+        (port, requests)
+    }
+
+    fn json_answer(body: Value) -> (u16, String, String) {
+        (200, String::new(), body.to_string())
+    }
+
+    /// What the recorder of `session_recorder` holds.
+    #[derive(Default)]
+    struct Recorded {
+        /// Start and end of each file, as the recorder writes them.
+        files: Vec<(String, String)>,
+        /// Files a search finds at most, as a real recorder stops at about 1000.
+        cap: usize,
+        /// A full page of the same file for every page asked, which never ends.
+        endless: bool,
+        /// What `global.getCurrentTime` answers, which fails without it.
+        time: Option<&'static str>,
+        /// A search that says it found files and then lists none.
+        found_but_empty: bool,
+    }
+
+    /// A recorder with the session API for user `admin` and password `secret`, which searches
+    /// `recorded` and answers CGI requests only for its clock, as `result=CGI`.
+    fn session_recorder(recorded: Recorded) -> (Client, Requests) {
+        let found: Mutex<(Vec<(String, String)>, usize)> = Mutex::default();
+        let (port, requests) = fake_api(move |request| {
+            if request.method == "GET" {
+                return (200, String::new(), "result=CGI\r\n".to_owned());
+            }
+            let call = request.json();
+            let params = &call["params"];
+            match call["method"].as_str().unwrap_or_default() {
+                "global.login" if params["password"] == "" => json_answer(json!({
+                    "result": false, "session": "s",
+                    "params": {"encryption": "Default", "realm": "r", "random": "1"},
+                })),
+                "global.login" => {
+                    let right = params["password"] == login_hash("admin", "secret", "r", "1");
+                    json_answer(json!({"result": right, "session": "s"}))
+                }
+                "global.getCurrentTime" => json_answer(match recorded.time {
+                    Some(time) => json!({"result": true, "params": {"time": time}}),
+                    None => json!({"result": false, "error": {"code": 1}}),
+                }),
+                "mediaFileFind.factory.create" => json_answer(json!({"result": 7})),
+                "LogicDeviceManager.getCameraState" => json_answer(json!({
+                    "result": true,
+                    "params": {"states": [
+                        {"channel": 0, "connectionState": "Connected"},
+                        {"channel": 1, "connectionState": "Unconnect"},
+                    ]},
+                })),
+                "mediaFileFind.findFile" => {
+                    let condition = &params["condition"];
+                    let from = condition["StartTime"].as_str().unwrap_or_default();
+                    let to = condition["EndTime"].as_str().unwrap_or_default();
+                    let files: Vec<_> = recorded
+                        .files
+                        .iter()
+                        .filter(|(start, end)| end.as_str() > from && start.as_str() <= to)
+                        .take(recorded.cap)
+                        .cloned()
+                        .collect();
+                    let nothing =
+                        files.is_empty() && !recorded.endless && !recorded.found_but_empty;
+                    *found.lock().unwrap() = (files, 0);
+                    json_answer(if nothing {
+                        json!({"result": false, "error": {"code": SEARCH_FOUND_NOTHING}})
+                    } else {
+                        json!({"result": true})
+                    })
+                }
+                "mediaFileFind.findNextFile" => {
+                    let count = params["count"].as_u64().unwrap_or(0) as usize;
+                    let mut found = found.lock().unwrap();
+                    let page: Vec<(String, String)> = if recorded.endless {
+                        vec![("2026-11-26 10:00:00".into(), "2026-11-26 10:01:00".into()); count]
+                    } else {
+                        let (files, read) = &mut *found;
+                        let page = files.iter().skip(*read).take(count).cloned().collect();
+                        *read += count;
+                        page
+                    };
+                    let infos: Vec<_> = page
+                        .iter()
+                        .map(|(start, end)| {
+                            json!({"StartTime": start, "EndTime": end, "Flags": ["Timing"]})
+                        })
+                        .collect();
+                    json_answer(json!({
+                        "result": true, "params": {"found": infos.len(), "infos": infos},
+                    }))
+                }
+                _ => json_answer(json!({"result": true})),
+            }
+        });
+        let client = Client::new("127.0.0.1", "admin", "secret").with_ports(port, 554);
+        (client, requests)
+    }
+
+    /// The calls of sessions that reached the recorder, in order.
+    fn calls(requests: &Requests) -> Vec<String> {
+        requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|request| request.method == "POST")
+            .map(Request::call)
+            .collect()
+    }
+
+    fn cgi_requests(requests: &Requests) -> usize {
+        let requests = requests.lock().unwrap();
+        requests.iter().filter(|r| r.method == "GET").count()
+    }
+
+    /// Files of a minute, a minute apart, so each one is a span of its own.
+    fn minutes_apart(date: &str, count: u32) -> Vec<(String, String)> {
+        let time = |minute: u32| format!("{date} {:02}:{:02}:00", minute / 60, minute % 60);
+        (0..count).map(|i| (time(2 * i), time(2 * i + 1))).collect()
+    }
+
+    #[test]
+    fn a_session_reads_a_day_in_pages_and_searches_past_what_one_search_finds() {
+        let (client, requests) = session_recorder(Recorded {
+            files: minutes_apart("2026-11-26", 250),
+            cap: 100,
+            ..Recorded::default()
+        });
+        let spans = client.recordings(3, "2026-11-26").unwrap();
+        assert_eq!(spans.len(), 250);
+        assert_eq!(spans[249].end, 499 * 60);
+        assert_eq!(cgi_requests(&requests), 0);
+
+        let calls = calls(&requests);
+        // Files 0 to 99, then from the start of file 99 to 198, 198 to 249, and 249 alone.
+        let searches = calls
+            .iter()
+            .filter(|call| *call == "mediaFileFind.findFile");
+        assert_eq!(searches.count(), 4);
+        assert_eq!(
+            calls[calls.len() - 3..],
+            [
+                "mediaFileFind.close",
+                "mediaFileFind.destroy",
+                "global.logout"
+            ]
+        );
+        let requests = requests.lock().unwrap();
+        let sent: Vec<Value> = requests.iter().map(Request::json).collect();
+        let find = sent
+            .iter()
+            .find(|call| call["method"] == "mediaFileFind.findFile")
+            .unwrap();
+        assert_eq!(find["params"]["condition"]["Channel"], 2);
+        assert_eq!(find["object"], 7);
+        assert!(sent
+            .iter()
+            .filter(|call| call["method"] == "mediaFileFind.findNextFile")
+            .all(|call| call["params"]["count"] == SEARCH_PAGE));
+        // The web interface counts its calls, and a recorder could refuse a repeated id.
+        let ids: Vec<u64> = sent
+            .iter()
+            .filter(|call| call["session"] == "s")
+            .filter_map(|call| call["id"].as_u64())
+            .collect();
+        assert!(ids.windows(2).all(|pair| pair[0] < pair[1]), "{ids:?}");
+    }
+
+    #[test]
+    fn a_search_that_never_ends_stops_at_the_page_limit() {
+        let (client, requests) = session_recorder(Recorded {
+            endless: true,
+            ..Recorded::default()
+        });
+        assert!(matches!(
+            client.recordings(3, "2026-11-26"),
+            Err(Error::Unexpected(_))
+        ));
+        let calls = calls(&requests);
+        let pages = calls
+            .iter()
+            .filter(|call| *call == "mediaFileFind.findNextFile");
+        assert_eq!(pages.count(), MAX_SEARCH_PAGES);
+    }
+
+    #[test]
+    fn a_day_with_nothing_recorded_reads_no_page() {
+        let (client, requests) = session_recorder(Recorded {
+            files: minutes_apart("2026-11-25", 3),
+            cap: 100,
+            ..Recorded::default()
+        });
+        assert!(client.recordings(3, "2026-11-26").unwrap().is_empty());
+        assert!(!calls(&requests).contains(&"mediaFileFind.findNextFile".to_owned()));
+    }
+
+    #[test]
+    fn recorded_days_answers_each_day_from_one_search_and_stops_when_asked() {
+        let mut files = minutes_apart("2026-11-24", 2);
+        files.extend(minutes_apart("2026-11-26", 2));
+        let (client, requests) = session_recorder(Recorded {
+            files,
+            cap: 100,
+            ..Recorded::default()
+        });
+        let days = ["2026-11-26", "2026-11-25", "2026-11-24"];
+        let mut answers = Vec::new();
+        client
+            .recorded_days(3, days, |date, recorded| {
+                answers.push((date.to_owned(), recorded));
+                true
+            })
+            .unwrap();
+        assert_eq!(
+            answers,
+            [
+                ("2026-11-26".to_owned(), true),
+                ("2026-11-25".to_owned(), false),
+                ("2026-11-24".to_owned(), true),
+            ]
+        );
+        let created = |calls: &[String]| {
+            let creates = calls
+                .iter()
+                .filter(|c| *c == "mediaFileFind.factory.create");
+            creates.count()
+        };
+        assert_eq!(created(&calls(&requests)), 1);
+
+        requests.lock().unwrap().clear();
+        let mut asked = 0;
+        client
+            .recorded_days(3, days, |_, _| {
+                asked += 1;
+                false
+            })
+            .unwrap();
+        assert_eq!(asked, 1);
+        let calls = calls(&requests);
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|c| *c == "mediaFileFind.findFile")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_day_whose_search_finds_files_but_lists_none_has_no_recordings() {
+        let (client, _) = session_recorder(Recorded {
+            found_but_empty: true,
+            ..Recorded::default()
+        });
+        let mut answers = Vec::new();
+        client
+            .recorded_days(3, ["2026-11-26"], |_, recorded| {
+                answers.push(recorded);
+                true
+            })
+            .unwrap();
+        assert_eq!(answers, [false]);
+    }
+
+    #[test]
+    fn the_state_of_a_camera_comes_through_a_session() {
+        let (client, _) = session_recorder(Recorded::default());
+        assert_eq!(client.camera_connected(1), Some(true));
+        assert_eq!(client.camera_connected(2), Some(false));
+        assert_eq!(client.camera_connected(3), None);
+    }
+
+    #[test]
+    fn the_clock_comes_through_a_session_and_from_cgi_when_the_session_cant_tell() {
+        let (client, requests) = session_recorder(Recorded {
+            time: Some("2026-11-26 21:07:43"),
+            ..Recorded::default()
+        });
+        assert_eq!(client.clock().unwrap(), "2026-11-26 21:07:43");
+        assert_eq!(cgi_requests(&requests), 0);
+        assert_eq!(calls(&requests).last().unwrap(), "global.logout");
+
+        let (client, requests) = session_recorder(Recorded::default());
+        assert_eq!(client.clock().unwrap(), "CGI");
+        assert_eq!(cgi_requests(&requests), 1);
+    }
+
+    #[test]
+    fn a_search_with_a_time_that_isnt_one_sends_nothing() {
+        let (client, requests) = session_recorder(Recorded::default());
+        let finder = Finder::open(&client).unwrap();
+        let day = "2026-11-26 00:00:00";
+        assert!(matches!(
+            finder.find(1, day, "2026-11-26 24:00"),
+            Err(Error::Unexpected(_))
+        ));
+        assert!(matches!(
+            finder.find(1, "2026-11-26&x=1", day),
+            Err(Error::Unexpected(_))
+        ));
+        assert!(!calls(&requests).contains(&"mediaFileFind.findFile".to_owned()));
+    }
+
+    #[test]
+    fn the_cgi_answers_digest_with_the_password_and_reuses_the_challenge() {
+        fn md5(text: &str) -> String {
+            Md5::digest(text.as_bytes())
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect()
+        }
+        let challenge =
+            "WWW-Authenticate: Digest realm=\"r\", qop=\"auth\", nonce=\"n\"\r\n".to_owned();
+        let recorder = move || {
+            let challenge = challenge.clone();
+            fake_api(move |request| {
+                // No session API, so everything goes through CGI.
+                if request.method == "POST" {
+                    return (404, String::new(), String::new());
+                }
+                let Some(answer) = &request.authorization else {
+                    return (401, challenge.clone(), String::new());
+                };
+                let fields: HashMap<&str, &str> = answer
+                    .trim_start_matches("Digest ")
+                    .split(',')
+                    .filter_map(|field| field.trim().split_once('='))
+                    .map(|(key, value)| (key, value.trim_matches('"')))
+                    .collect();
+                let first = md5("admin:r:secret");
+                let second = md5(&format!("GET:{}", request.path));
+                let expected = md5(&format!(
+                    "{first}:n:{}:{}:auth:{second}",
+                    fields["nc"], fields["cnonce"]
+                ));
+                if fields["uri"] == request.path && fields["response"] == expected {
+                    (
+                        200,
+                        String::new(),
+                        "result=2026-11-26 10:00:00\r\n".to_owned(),
+                    )
+                } else {
+                    (401, challenge.clone(), String::new())
+                }
+            })
+        };
+
+        let (port, requests) = recorder();
+        let client = Client::new("127.0.0.1", "admin", "secret").with_ports(port, 554);
+        assert_eq!(client.clock().unwrap(), "2026-11-26 10:00:00");
+        assert_eq!(client.clock().unwrap(), "2026-11-26 10:00:00");
+        // The challenge, the answer, and then the saved challenge answered at once.
+        assert_eq!(cgi_requests(&requests), 3);
+
+        let (port, _) = recorder();
+        let client = Client::new("127.0.0.1", "admin", "wrong").with_ports(port, 554);
+        assert!(matches!(client.clock(), Err(Error::Unauthorized)));
+    }
+
+    #[test]
+    fn the_model_and_the_channels_come_from_cgi_without_the_disabled_ones() {
+        let (port, _) = fake_api(|request| {
+            let body = if request.path.contains("getDeviceType") {
+                "type=NVD 7132\r\n"
+            } else if request.path.contains("name=ChannelTitle") {
+                "table.ChannelTitle[0].Name=Gate\r\n\
+                 table.ChannelTitle[1].Name=Off\r\n\
+                 table.ChannelTitle[2].Name=Yard\r\n"
+            } else if request.path.contains("name=RemoteDevice") {
+                "table.RemoteDevice.uuid:System_CONFIG_NETCAMERA_INFO_1.Enable=false\r\n"
+            } else if request.path.contains("name=Encode") {
+                "table.Encode[2].MainFormat[0].Video.resolution=1920x1080\r\n"
+            } else {
+                return (404, String::new(), String::new());
+            };
+            (200, String::new(), body.to_owned())
+        });
+        let client = Client::new("127.0.0.1", "admin", "secret").with_ports(port, 554);
+        assert_eq!(client.device_type().unwrap(), "NVD 7132");
+        let channels = client.channels().unwrap();
+        let listed: Vec<_> = channels
+            .iter()
+            .map(|channel| (channel.number, channel.name.as_str(), channel.main_size))
+            .collect();
+        assert_eq!(listed, [(1, "Gate", None), (3, "Yard", Some((1920, 1080)))]);
+    }
+
+    #[test]
+    fn times_and_spans_at_their_limits() {
+        assert_eq!(seconds_of("2026-11-26 10:59:59"), Some(39_599));
+        assert_eq!(seconds_of("2026-11-26 10:60:00"), None);
+        assert_eq!(seconds_of("2026-11-26 10:00:60"), None);
+
+        let file = |start: &str, end: &str| RecordedFile {
+            start: format!("2026-11-26 {start}"),
+            end: format!("2026-11-26 {end}"),
+            event: false,
+        };
+        assert_eq!(file("10:00:00", "10:00:00").span_on("2026-11-26"), None);
+        assert!(file("10:00:00", "10:00:01").span_on("2026-11-26").is_some());
+
+        // A second between two files is how recorders split a continuous recording.
+        let span = |start, end| Span {
+            start,
+            end,
+            event: false,
+        };
+        assert_eq!(merge_spans(vec![span(0, 10), span(11, 20)]), [span(0, 20)]);
+        assert_eq!(merge_spans(vec![span(0, 10), span(12, 20)]).len(), 2);
     }
 }

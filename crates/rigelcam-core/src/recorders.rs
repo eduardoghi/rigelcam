@@ -1433,4 +1433,56 @@ mod tests {
         ));
         assert_eq!(fs::read_to_string(&path).unwrap(), "not json");
     }
+
+    #[test]
+    fn the_grid_on_screen_deleted_in_the_middle_gives_its_place_to_the_next() {
+        let path = temp_path("grids-middle");
+        let mut list = RecorderList::open(path.clone()).unwrap();
+        list.set_layout(Layout::fitting(&[CameraId {
+            recorder: 1,
+            channel: 1,
+        }]));
+        assert!(list.add_layout());
+        assert!(list.add_layout());
+        list.rename_layout(2, "Last");
+        assert!(list.select_layout(1));
+        list.remove_layout(1);
+        assert_eq!(list.current_layout(), 1);
+        assert_eq!(list.layouts()[1].name, "Last");
+    }
+
+    #[test]
+    fn settings_left_at_their_defaults_stay_out_of_the_file() {
+        let path = temp_path("defaults");
+        let mut list = RecorderList::open(path.clone()).unwrap();
+        assert!(list.checks_for_updates());
+        assert!(!list.camera_names_hidden());
+        list.set_theme("dark");
+        drop(list);
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(
+            !text.contains("current_layout") && !text.contains("cycle_seconds"),
+            "{text}"
+        );
+
+        fs::write(&path, r#"{"recorders":[],"check_updates":false}"#).unwrap();
+        assert!(!RecorderList::open(path).unwrap().checks_for_updates());
+    }
+
+    #[test]
+    fn the_largest_id_left_is_still_given() {
+        let path = temp_path("largest-id");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let text = format!(r#"{{"recorders":[],"next_id":{MAX_RECORDER_ID}}}"#);
+        fs::write(&path, text).unwrap();
+        let mut list = RecorderList::open(path).unwrap();
+        assert_eq!(list.reserve_id(), MAX_RECORDER_ID);
+    }
+
+    #[test]
+    fn a_list_that_cant_be_read_is_an_error_and_not_an_empty_list() {
+        let path = temp_path("unreadable");
+        fs::create_dir_all(&path).unwrap();
+        assert!(matches!(RecorderList::open(path), Err(Error::File(_))));
+    }
 }

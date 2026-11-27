@@ -491,4 +491,47 @@ mod tests {
         assert_eq!(of(&[0, 0, 1, 0x67]), Codec::H264);
         assert_eq!(of(&[0, 0, 0, 1, 0x40, 0x01]), Codec::H265);
     }
+
+    #[test]
+    fn a_size_too_small_for_the_header_and_trailer_is_not_a_frame() {
+        // One byte short, with the trailer mark where that size puts it, which taken as a frame
+        // would end the video before it starts.
+        let mut short = frame(KEY_FRAME, 1, NOON, 0, &[]);
+        let size = short.len() - 1;
+        short[12..16].copy_from_slice(&(size as u32).to_le_bytes());
+        short[size - TRAILER_SIZE..size - TRAILER_SIZE + 4].copy_from_slice(TRAILER_MARK);
+        short.truncate(size);
+        short.extend(frame(KEY_FRAME, 2, NOON, 50, b"ok"));
+        let frames = read_all(&short);
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].data, b"ok");
+
+        // The smallest frame, with nothing in it, still is one.
+        let empty = read_all(&frame(KEY_FRAME, 1, NOON, 0, &[]));
+        assert_eq!(empty.len(), 1);
+        assert!(empty[0].data.is_empty());
+    }
+
+    #[test]
+    fn a_frame_past_the_largest_size_doesnt_hold_back_the_ones_after_it() {
+        let mut bytes = MARK.to_vec();
+        bytes.extend([0u8; 8]);
+        bytes.extend((MAX_FRAME_SIZE as u32 + 1).to_le_bytes());
+        bytes.extend([0u8; 8]);
+        bytes.extend(run(100, NOON, 0));
+        assert!(!Reader::new().push(&bytes).is_empty());
+
+        let payload = vec![0; MAX_FRAME_SIZE - frame(KEY_FRAME, 1, NOON, 0, &[]).len()];
+        let largest = read_all(&frame(KEY_FRAME, 1, NOON, 0, &payload));
+        assert_eq!(largest.len(), 1);
+        assert_eq!(largest[0].data.len(), payload.len());
+    }
+
+    #[test]
+    fn a_mark_cut_before_its_header_at_the_end_is_dropped() {
+        let mut bytes = run(100, NOON, 0);
+        bytes.extend(MARK);
+        bytes.extend([0u8; 5]);
+        assert_eq!(read_all(&bytes).len(), TRUSTED_RUN);
+    }
 }

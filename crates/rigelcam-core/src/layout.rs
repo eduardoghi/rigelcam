@@ -174,6 +174,8 @@ mod tests {
         assert_eq!(largest.columns, 6);
         assert_eq!(largest.cameras.len(), 36);
         assert_eq!(largest.cameras[35], Some(cam(36)));
+        assert_eq!(Layout::capacity(), largest.cameras.len());
+        assert!(!largest.is_empty());
     }
 
     #[test]
